@@ -1,0 +1,50 @@
+From: William Floyd <git@notmy.space>
+Date: Thu, 4 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ipa: libipa: Add sensor helpers for IMX320 and IMX345
+
+The Snapdragon Galaxy S9 uses a Sony IMX320 front and IMX345 rear sensor.
+Without a helper the SoftISP cannot convert between gain code and gain, so
+its AGC never raises the analogue gain and every frame comes out black.
+
+Both use the usual Sony gain = 1024 / (1024 - code) model, the same as the
+IMX477 and IMX708, and their black level was measured at 64 in 10 bits.
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -600,6 +600,18 @@
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx296", CameraSensorHelperImx296)
+ 
++class CameraSensorHelperImx320 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx320()
++	{
++		/* Measured on hardware: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx320", CameraSensorHelperImx320)
++
+ class CameraSensorHelperImx327 : public CameraSensorHelperImx290
+ {
+ };
+@@ -616,6 +628,18 @@
+ 	}
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx335", CameraSensorHelperImx335)
++
++class CameraSensorHelperImx345 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx345()
++	{
++		/* Measured on hardware: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx345", CameraSensorHelperImx345)
+ 
+ class CameraSensorHelperImx415 : public CameraSensorHelper
+ {

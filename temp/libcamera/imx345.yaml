@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: CC0-1.0
+#
+# Tuning for the Sony IMX345 as fitted to the Snapdragon Galaxy S9
+# (samsung-starqltechn).
+#
+# The black level is measured: the sensor pedestals at 64 in 10 bits, which is
+# 4096 in libcamera's 16-bit space. Leaving it unset makes shadows come out
+# magenta.
+#
+# The colour matrices are NOT calibrated for this sensor -- they are borrowed
+# from the IMX363, a Sony phone sensor of the same generation, and are here so
+# that a matrix exists at all. Without one the raw Bayer response is strongly
+# green. Replace with measured values when someone calibrates the module.
+%YAML 1.1
+---
+version: 1
+algorithms:
+  - BlackLevel:
+      blackLevel: 4096
+  - Awb:
+  - Ccm:
+      ccms:
+        - ct: 2701
+          ccm: [ 1.66951, -0.35271, -0.31679,
+                -0.33594,  1.69731, -0.36137,
+                 0.07843, -1.25185,  2.17341 ]
+        - ct: 3025
+          ccm: [ 1.71956, -0.37493, -0.34462,
+                -0.46994,  1.83453, -0.36459,
+                 0.01838, -1.03863,  2.02024 ]
+        - ct: 4125
+          ccm: [ 1.89736, -0.65796, -0.23941,
+                -0.36603,  1.62015, -0.25412,
+                 0.01202, -0.66114,  1.64912 ]
+        - ct: 6521
+          ccm: [ 1.64464, -0.50901, -0.13564,
+                -0.28189,  1.73169, -0.44979,
+                -0.02601, -0.51457,  1.54058 ]
+  - Adjust:
+  - Agc:
+      # Sensor delays for these sensors are declared in libcamera's sensor
+      # properties database, so the loop knows a change takes two frames to
+      # land and does not need extra damping to avoid overshooting. Upstream
+      # defaults converge roughly twice as fast, which matters here because
+      # exposure starts low on every open and the image is noisy until it
+      # settles.
+      proportionalGain: 0.04
+      maxStep: 0.15
+...
