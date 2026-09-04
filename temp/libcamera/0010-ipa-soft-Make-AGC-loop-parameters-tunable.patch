@@ -1,0 +1,140 @@
+From: William Floyd <git@notmy.space>
+Date: Fri, 4 Sep 2026 00:00:00 +0000
+Subject: [PATCH] ipa: soft: Make the AGC loop parameters tunable
+
+The soft ISP AGC hardcodes its target, hysteresis, proportional gain and
+maximum per-frame step. The right values are not universal: the loop gain
+that converges nicely on one sensor overshoots on another, because how far
+the exposure moves before the change takes effect depends on how many
+frames that sensor takes to apply it. On the IMX345 a bright scene drives
+the loop past the target and into clipping, which turns blown highlights
+green.
+
+Adjust, BlackLevel and Ccm already take their parameters from the tuning
+file; Agc is the only soft ISP algorithm that does not. Give it the same
+init() hook and read the four values from tuning data, keeping the current
+constants as defaults so a bare "- Agc:" behaves exactly as before.
+
+--- a/b/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -19,6 +19,8 @@
+ 	Agc();
+ 	~Agc() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++
+ 	void process(IPAContext &context, const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+@@ -26,6 +28,11 @@
+ 
+ private:
+ 	void updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV);
++
++	float exposureOptimal_;
++	float exposureSatisfactory_;
++	float proportionalGain_;
++	float maxStep_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+--- a/b/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -37,7 +37,7 @@
+  * It is small enough to have the exposure close to the optimal, and is big
+  * enough to prevent the exposure from wobbling around the optimal value.
+  */
+-static constexpr float kExposureSatisfactory = 0.2;
++static constexpr float kDefaultExposureSatisfactory = 0.2;
+ 
+ /*
+  * Proportional gain for exposure/gain adjustment. Maps the MSV error to a
+@@ -45,7 +45,7 @@
+  *
+  *   factor = 1.0 + kExpProportionalGain * error
+  *
+- * With kExpProportionalGain = 0.04:
++ * With a proportional gain of 0.04:
+  *   - max error ~2.5 -> factor 1.10 (~10% step, same as before)
+  *   - error 1.0      -> factor 1.04 (~4% step)
+  *   - error 0.3      -> factor 1.012 (~1.2% step)
+@@ -53,26 +53,64 @@
+  * This replaces the fixed 10% bang-bang step with a proportional correction
+  * that converges smoothly and avoids overshooting near the target.
+  */
+-static constexpr float kExpProportionalGain = 0.04;
++static constexpr float kDefaultExpProportionalGain = 0.04;
+ 
+ /*
+  * Maximum multiplicative step per frame, to bound the correction when the
+  * scene changes dramatically.
+  */
+-static constexpr float kExpMaxStep = 0.15;
++static constexpr float kDefaultExpMaxStep = 0.15;
+ 
+ Agc::Agc()
++	: exposureOptimal_(kExposureOptimal),
++	  exposureSatisfactory_(kDefaultExposureSatisfactory),
++	  proportionalGain_(kDefaultExpProportionalGain),
++	  maxStep_(kDefaultExpMaxStep)
+ {
+ }
+ 
++/*
++ * All four parameters are optional: a tuning file that lists the algorithm as a
++ * bare "- Agc:" gets exactly the behaviour that was previously hardcoded. They
++ * are worth setting per sensor because the right loop gain depends on how many
++ * frames the sensor takes to apply a new exposure -- too high and the loop
++ * overshoots into clipping on a bright scene, too low and it ramps visibly.
++ */
++int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	auto optimal = tuningData["exposureOptimal"].get<float>();
++	if (optimal.has_value())
++		exposureOptimal_ = optimal.value();
++
++	auto satisfactory = tuningData["exposureSatisfactory"].get<float>();
++	if (satisfactory.has_value())
++		exposureSatisfactory_ = satisfactory.value();
++
++	auto gain = tuningData["proportionalGain"].get<float>();
++	if (gain.has_value())
++		proportionalGain_ = gain.value();
++
++	auto step = tuningData["maxStep"].get<float>();
++	if (step.has_value())
++		maxStep_ = step.value();
++
++	LOG(IPASoftExposure, Debug)
++		<< "AGC: optimal " << exposureOptimal_
++		<< ", satisfactory " << exposureSatisfactory_
++		<< ", proportional gain " << proportionalGain_
++		<< ", max step " << maxStep_;
++
++	return 0;
++}
++
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
+ {
+ 	int32_t &exposure = frameContext.sensor.exposure;
+ 	double &again = frameContext.sensor.gain;
+ 
+-	double error = kExposureOptimal - exposureMSV;
++	double error = exposureOptimal_ - exposureMSV;
+ 
+-	if (std::abs(error) <= kExposureSatisfactory)
++	if (std::abs(error) <= exposureSatisfactory_)
+ 		return;
+ 
+ 	/*
+@@ -80,8 +118,8 @@
+ 	 * determines the direction: positive error means too dark (increase),
+ 	 * negative means too bright (decrease).
+ 	 */
+-	float step = std::clamp(static_cast<float>(error) * kExpProportionalGain,
+-				-kExpMaxStep, kExpMaxStep);
++	float step = std::clamp(static_cast<float>(error) * proportionalGain_,
++				-maxStep_, maxStep_);
+ 	float factor = 1.0f + step;
+ 
+ 	if (factor > 1.0f) {

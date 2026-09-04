@@ -1,0 +1,48 @@
+From: William Floyd <git@notmy.space>
+Date: Fri, 4 Sep 2026 00:00:00 +0000
+Subject: [PATCH] libcamera: sensor: Add properties for IMX320 and IMX345
+
+Neither sensor is in the properties database, so libcamera warns that it is
+"assuming unverified defaults" and uses a gain delay of one frame. Every
+other Sony sensor in the database except the imx219 and imx283 applies gain
+two frames later, and assuming one frame makes the AGC correct against a
+frame that has not taken the previous correction yet -- the loop then
+overshoots on a scene change and clips.
+
+Pixel pitches are from the Galaxy S9, which pairs a 1.4um rear IMX345 with a
+1.22um front IMX320. The delays follow the Sony family convention rather than
+individual measurement.
+
+--- a/b/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -256,10 +256,30 @@
+ 			.testPatternModes = {},
+ 			.sensorDelays = { },
+ 		} },
++		{ "imx320", {
++			.unitCellSize = { 1220, 1220 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "imx335", {
+ 			.unitCellSize = { 2000, 2000 },
+ 			.testPatternModes = {},
+ 			.sensorDelays = { },
++		} },
++		{ "imx345", {
++			.unitCellSize = { 1400, 1400 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
+ 		} },
+ 		{ "imx415", {
+ 			.unitCellSize = { 1450, 1450 },
