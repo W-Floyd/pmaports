@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 4 Sep 2026 20:00:00 +0000
+Subject: [PATCH 7/7] save_prev_bl_data: export androidboot.revision
+
+On Samsung sdm845 devices the board revision is known only to the primary
+bootloader, which reads it from hardware, passes it as androidboot.revision
+on the cmdline, and uses it to pick which starqlte-revNN.dtb to load.
+
+When u-boot is chainloaded in place of the kernel that information is lost:
+u-boot builds its own cmdline and nothing forwards the revision, so the OS
+cannot tell a rev12 board from a rev14 one. That matters because the wifi
+NVRAM is per-revision RF calibration -- PA coefficients, max TX power,
+antenna gain, RSSI correction -- so shipping one variant to every unit
+miscalibrates all the others, silently and without any error.
+
+The previous bootloader's fdt is already located and validated here in
+order to save prevbl_fdt_addr, so pull the revision out of its
+/chosen/bootargs while we are looking at it and export it as
+prevbl_revision. A boot script can then append it to the kernel cmdline.
+
+This only sets an environment variable. If the fdt, the property, the key
+or the value is missing, the variable is simply not set and boot is
+unaffected.
+
+Note for upstreaming: the revision is read where the /chosen node is
+already resolved, which today sits behind SAVE_PREV_BL_INITRAMFS_START_ADDR.
+Exporting the revision is logically independent of that option and the
+lookup should be hoisted before sending this anywhere.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+--- a/arch/arm/lib/save_prev_bl_data.c
++++ b/arch/arm/lib/save_prev_bl_data.c
+@@ -14,6 +14,7 @@
+ #include <linux/errno.h>
+ #include <asm/system.h>
+ #include <asm/armv8/mmu.h>
++#include <linux/string.h>
+ 
+ static ulong reg0 __section(".data");
+ 
+@@ -45,6 +46,40 @@
+ 	return false;
+ }
+ 
++/**
++ * Export androidboot.revision from the previous bootloader's cmdline.
++ *
++ * The board revision is read from hardware by the primary bootloader and is
++ * not discoverable once it is gone, so forward it if it is there. Absence is
++ * not an error: not every primary bootloader sets it.
++ */
++static void save_prev_bl_revision(const void *fdt_blob, int node)
++{
++	static const char key[] = "androidboot.revision=";
++	const char *args, *val, *end;
++	char buf[16];
++	int len;
++
++	args = fdt_getprop(fdt_blob, node, "bootargs", &len);
++	if (!args || len <= 0)
++		return;
++
++	val = strstr(args, key);
++	if (!val)
++		return;
++	val += sizeof(key) - 1;
++
++	end = val;
++	while (*end && *end != ' ')
++		end++;
++	if (end == val || (size_t)(end - val) >= sizeof(buf))
++		return;
++
++	memcpy(buf, val, end - val);
++	buf[end - val] = '\0';
++	env_set("prevbl_revision", buf);
++}
++
+ int save_prev_bl_data(void)
+ {
+ 	struct fdt_header *fdt_blob;
+@@ -71,6 +106,9 @@
+ 					__func__, reg0);
+ 		return -ENODATA;
+ 	}
++
++	save_prev_bl_revision(fdt_blob, node);
++
+ 	/*
+ 	 * linux,initrd-start property might be either 64 or 32 bit,
+ 	 * depending on primary bootloader implementation.
