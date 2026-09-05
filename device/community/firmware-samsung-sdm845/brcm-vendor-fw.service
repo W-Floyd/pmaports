@@ -1,0 +1,15 @@
+[Unit]
+Description=Link BCM4361 firmware from the vendor partition
+DefaultDependencies=no
+Requires=msm-firmware-loader.service
+After=msm-firmware-loader.service
+Before=systemd-udevd.service
+ConditionPathIsDirectory=/run/msm-firmware-loader/mnt/vendor/etc/wifi
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/brcm-vendor-fw
+
+[Install]
+WantedBy=sysinit.target
