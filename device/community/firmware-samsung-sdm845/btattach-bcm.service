@@ -1,0 +1,16 @@
+[Unit]
+Description=Attach BCM4347B2 Bluetooth on uart6 (starqltechn)
+Documentation=https://wiki.postmarketos.org/wiki/Samsung_Galaxy_S9_(samsung-starqltechn)
+Before=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+# The chip only answers with hardware flow control enabled on this UART.
+ExecStartPre=/bin/stty -F /dev/ttyHS1 115200 crtscts
+ExecStart=/usr/bin/btattach -B /dev/ttyHS1 -P bcm -S 115200
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
