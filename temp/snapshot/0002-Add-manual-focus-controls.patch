@@ -1,0 +1,347 @@
+From: William Floyd <git@notmy.space>
+Date: Mon, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] Add manual focus controls
+
+Snapshot has no manual controls at all today, which issue #215 asks for:
+cameras get focus and exposure wrong often enough that being able to pin
+them down matters. This adds the focus half, on top of the camera control
+API in aperture.
+
+A camera that reports both AfMode and LensPosition gets a button in the
+controls bar opening a popover with a Manual Focus switch and a position
+slider. Everything else is unchanged: a camera exposing neither -- a
+fixed-focus front sensor, most webcams -- gets no button at all rather
+than a control that moves nothing.
+
+The slider is in the units LensPosition is specified in, dioptres, which
+are the reciprocal of the focus distance. That is not a number anyone
+wants to read, so the ends are marked "Far" and "Near" and the value
+itself is not drawn.
+
+Two details come from how the underlying control works:
+
+  - Controls are silently discarded while a camera is idle, so the
+    popover follows the viewfinder in and out of Ready. The camera and
+    the state are separate properties that settle in either order, so it
+    is driven from both notifications rather than from the state alone.
+
+  - Dragging a slider emits value-changed continuously, and each change
+    makes the camera re-settle before it trusts its own sharpness
+    measurement again. Positions are therefore coalesced to at most one
+    per 50ms, always the most recent, with the final position guaranteed
+    to be sent when the drag ends.
+
+Because controls cannot be read back, the slider starts from the
+controls
+
+--- a/data/resources/ui/camera_controls.ui
++++ b/data/resources/ui/camera_controls.ui
+@@ -5,6 +5,20 @@
+     <property name="valign">center</property>
+     <property name="spacing">24</property>
+     <child>
++      <object class="GtkMenuButton" id="focus_menu_button">
++        <property name="halign">center</property>
++        <property name="valign">center</property>
++        <!-- Shown only for cameras that expose a focus control. -->
++        <property name="visible">False</property>
++        <property name="icon-name">zoom-fit-best-symbolic</property>
++        <property name="tooltip-text" translatable="yes">Focus</property>
++        <style>
++          <class name="camerabutton" />
++          <class name="circular" />
++        </style>
++      </object>
++    </child>
++    <child>
+       <object class="GtkStack" id="gallery_button_stack">
+         <child>
+           <object class="AdwBin" id="fake_gallery_button"/>
+--- a/src/widgets/camera.rs
++++ b/src/widgets/camera.rs
+@@ -184,6 +184,14 @@
+                 }
+             ));
+ 
++            self.viewfinder.connect_camera_notify(glib::clone!(
++                #[weak]
++                obj,
++                move |_| {
++                    obj.update_focus_controls();
++                }
++            ));
++
+             self.viewfinder.connect_code_detected(glib::clone!(
+                 #[weak]
+                 obj,
+@@ -590,6 +598,28 @@
+         }
+     }
+ 
++    /// Offer the focus controls only while a camera is actually streaming.
++    ///
++    /// The driver discards controls set on an idle camera, so the popover has
++    /// nothing useful to do until the viewfinder is `Ready`. The camera and
++    /// the state are separate properties that settle in either order, so this
++    /// is driven from both of their notifications.
++    fn update_focus_controls(&self) {
++        let imp = self.imp();
++
++        let camera = matches!(imp.viewfinder.state(), aperture::ViewfinderState::Ready)
++            .then(|| imp.viewfinder.camera())
++            .flatten();
++
++        log::debug!(
++            "Focus controls: state {:?}, camera {:?}",
++            imp.viewfinder.state(),
++            camera.as_ref().map(|camera| camera.display_name())
++        );
++
++        imp.camera_controls.set_focus_camera(camera.as_ref());
++    }
++
+     fn update_state(&self) {
+         let imp = self.imp();
+ 
+@@ -598,6 +628,8 @@
+             return;
+         }
+ 
++        self.update_focus_controls();
++
+         match imp.viewfinder.state() {
+             aperture::ViewfinderState::Loading => {
+                 imp.stack.set_visible_child_name("loading");
+--- a/src/widgets/camera_controls.rs
++++ b/src/widgets/camera_controls.rs
+@@ -1,12 +1,20 @@
++use std::cell::Cell;
++use std::rc::Rc;
++use std::time::Duration;
++
+ use adw::prelude::*;
+ use adw::subclass::prelude::*;
++use gettextrs::gettext;
+ use gtk::glib::{self, subclass::Signal};
+ 
+ use super::CameraRow;
+ use crate::enums::ControlsLayout;
+ 
++/// Longest a focus position may sit unsent while the slider is being dragged.
++const FOCUS_THROTTLE: Duration = Duration::from_millis(50);
++
+ mod imp {
+-    use std::cell::{Cell, OnceCell};
++    use std::cell::{Cell, OnceCell, RefCell};
+     use std::sync::LazyLock;
+ 
+     use gtk::CompositeTemplate;
+@@ -36,6 +44,14 @@
+         pub shutter_button: TemplateChild<crate::ShutterButton>,
+         #[template_child]
+         pub gallery_button_stack: TemplateChild<gtk::Stack>,
++        #[template_child]
++        pub focus_menu_button: TemplateChild<gtk::MenuButton>,
++
++        /// The camera whose focus controls the popover currently drives, and
++        /// the controls themselves. All `None` for a camera that cannot focus.
++        pub focus_camera: RefCell<Option<aperture::Camera>>,
++        pub af_mode: RefCell<Option<aperture::CameraControl>>,
++        pub lens_position: RefCell<Option<aperture::CameraControl>>,
+     }
+ 
+     #[glib::object_subclass]
+@@ -175,6 +191,193 @@
+         self.imp().camera_menu_button.set_popover(Some(&popover));
+     }
+ 
++    /// Points the focus popover at `camera`, or hides it when passed `None`.
++    ///
++    /// Pass `None` whenever the viewfinder is not `Ready`: the driver
++    /// discards controls set on a camera that is not streaming, so there is
++    /// nothing useful the popover could do before then.
++    pub fn set_focus_camera(&self, camera: Option<&aperture::Camera>) {
++        let imp = self.imp();
++
++        if imp.focus_camera.borrow().as_ref() == camera {
++            return;
++        }
++        imp.focus_camera.replace(camera.cloned());
++
++        // A camera with no autofocus, or one whose controls we could not
++        // reach, gets no focus button at all rather than one that does
++        // nothing.
++        let controls = camera.and_then(|camera| {
++            let af_mode = camera.control("AfMode")?;
++            let lens_position = camera.control("LensPosition")?;
++            Some((camera.clone(), af_mode, lens_position))
++        });
++
++        let Some((camera, af_mode, lens_position)) = controls else {
++            imp.af_mode.replace(None);
++            imp.lens_position.replace(None);
++            imp.focus_menu_button.set_popover(None::<&gtk::Popover>);
++            imp.focus_menu_button.set_visible(false);
++            return;
++        };
++
++        log::debug!(
++            "Camera {} can focus, showing focus controls",
++            camera.display_name()
++        );
++        imp.af_mode.replace(Some(af_mode.clone()));
++        imp.lens_position.replace(Some(lens_position.clone()));
++
++        let manual = af_mode
++            .choices()
++            .iter()
++            .find(|choice| choice.label() == "AfModeManual")
++            .map(|choice| choice.value());
++        let continuous = af_mode
++            .choices()
++            .iter()
++            .find(|choice| choice.label() == "AfModeContinuous")
++            .map(|choice| choice.value());
++
++        let Some((manual, continuous)) = manual.zip(continuous) else {
++            log::debug!("AfMode has no manual/continuous pair, hiding focus controls");
++            imp.focus_menu_button.set_visible(false);
++            return;
++        };
++
++        let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
++        container.set_margin_top(12);
++        container.set_margin_bottom(12);
++        container.set_margin_start(12);
++        container.set_margin_end(12);
++        container.set_width_request(240);
++
++        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
++        let label = gtk::Label::new(Some(&gettext("Manual Focus")));
++        label.set_xalign(0.0);
++        label.set_hexpand(true);
++        let switch = gtk::Switch::new();
++        switch.set_valign(gtk::Align::Center);
++        row.append(&label);
++        row.append(&switch);
++
++        // LensPosition is in dioptres: 0 is infinity and larger values focus
++        // closer, so the scale runs from far to near.
++        let step = (lens_position.maximum() - lens_position.minimum()) / 100.0;
++        let scale = gtk::Scale::with_range(
++            gtk::Orientation::Horizontal,
++            lens_position.minimum(),
++            lens_position.maximum(),
++            step.max(f64::EPSILON),
++        );
++        // Controls cannot be read back, so the default is the only honest
++        // starting point.
++        scale.set_value(lens_position.default_value());
++        scale.set_draw_value(false);
++        scale.set_hexpand(true);
++        scale.set_sensitive(false);
++        scale.add_mark(
++            lens_position.minimum(),
++            gtk::PositionType::Bottom,
++            Some(&gettext("Far")),
++        );
++        scale.add_mark(
++            lens_position.maximum(),
++            gtk::PositionType::Bottom,
++            Some(&gettext("Near")),
++        );
++
++        switch.connect_active_notify(glib::clone!(
++            #[weak]
++            scale,
++            #[strong]
++            camera,
++            #[strong]
++            af_mode,
++            #[strong]
++            lens_position,
++            move |switch| {
++                let is_manual = switch.is_active();
++                scale.set_sensitive(is_manual);
++
++                let mode = if is_manual { manual } else { continuous };
++                if let Err(err) = camera.set_control(&af_mode, mode) {
++                    log::warn!("Could not set AfMode: {err}");
++                    return;
++                }
++
++                // Entering manual mode leaves the lens wherever the autofocus
++                // stopped, which will not match the slider, so push the
++                // slider's value straight away.
++                if is_manual && let Err(err) = camera.set_control(&lens_position, scale.value()) {
++                    log::warn!("Could not set LensPosition: {err}");
++                }
++            }
++        ));
++
++        // A drag emits value-changed continuously. Send at most one position
++        // per FOCUS_THROTTLE, always the most recent one, so that neither the
++        // socket nor the camera's own settling logic is swamped -- the IPA
++        // waits a fixed number of frames after each move before trusting its
++        // sharpness reading again.
++        let pending: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
++        let scheduled: Rc<Cell<bool>> = Rc::new(Cell::new(false));
++
++        scale.connect_value_changed(glib::clone!(
++            #[weak]
++            switch,
++            #[strong]
++            camera,
++            #[strong]
++            lens_position,
++            #[strong]
++            pending,
++            #[strong]
++            scheduled,
++            move |scale| {
++                if !switch.is_active() {
++                    return;
++                }
++                pending.set(Some(scale.value()));
++
++                // A send is already queued; it will pick up the new value.
++                if scheduled.replace(true) {
++                    return;
++                }
++
++                glib::timeout_add_local_once(
++                    FOCUS_THROTTLE,
++                    glib::clone!(
++                        #[strong]
++                        camera,
++                        #[strong]
++                        lens_position,
++                        #[strong]
++                        pending,
++                        #[strong]
++                        scheduled,
++                        move || {
++                            scheduled.set(false);
++                            if let Some(value) = pending.take()
++                                && let Err(err) = camera.set_control(&lens_position, value)
++                            {
++                                log::warn!("Could not set LensPosition: {err}");
++                            }
++                        }
++                    ),
++                );
++            }
++        ));
++
++        container.append(&row);
++        container.append(&scale);
++
++        let popover = gtk::Popover::new();
++        popover.set_child(Some(&container));
++        imp.focus_menu_button.set_popover(Some(&popover));
++        imp.focus_menu_button.set_visible(true);
++    }
++
+     pub fn connect_camera_switched<F: Fn(&Self) + 'static>(&self, f: F) {
+         self.connect_closure(
+             "camera-switched",
