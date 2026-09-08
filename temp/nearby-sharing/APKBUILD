@@ -1,0 +1,128 @@
+# Maintainer: William Floyd <git@notmy.space>
+pkgname=nearby-sharing
+# kidfromjupiter's Linux port of google/nearby. No releases; upstream calls
+# itself "under construction", so this is pinned to a tested commit.
+pkgver=0_git20260801
+pkgrel=0
+_commit="6887b0983200c6c8c29e614ea2633d13bf18315d"
+# Submodules, pinned to what $_commit records.
+_gloop="87b6913daba4e398f7ed6f11777002e4916c33a7"
+_json="bc889afb4c5bf1c0d8ee29ef35eaaf4c8bef8a5d"
+_protobuf="5a5c44c0cfb4926249e2ae6024acdda513cbd3ff"
+_smhasher="61a0530f28277f2e850bfc39600ce61d02b518de"
+_ukey2="34c625a1476cfe04e5372be9af175fec74b6339b"
+pkgdesc="Quick Share (Android Nearby Share) CLI, built on Google's Nearby library"
+url="https://github.com/kidfromjupiter/nearby"
+# Only built where it has been tested; the build is very heavy.
+arch="aarch64"
+license="Apache-2.0"
+depends="
+	bluez
+	postmarketos-config-nftables-mdns
+	"
+makedepends="
+	bazel
+	bluez-dev
+	clang21
+	cmake
+	curl-dev
+	m4
+	make
+	openssl-dev
+	protobuf-dev
+	sdbus-cpp-dev
+	systemd-dev
+	"
+source="$pkgname-$_commit.tar.gz::https://github.com/kidfromjupiter/nearby/archive/$_commit.tar.gz
+	gloop-$_gloop.tar.gz::https://github.com/abseil/gloop/archive/$_gloop.tar.gz
+	json-$_json.tar.gz::https://github.com/nlohmann/json/archive/$_json.tar.gz
+	protobuf-$_protobuf.tar.gz::https://github.com/protocolbuffers/protobuf/archive/$_protobuf.tar.gz
+	smhasher-$_smhasher.tar.gz::https://github.com/aappleby/smhasher/archive/$_smhasher.tar.gz
+	ukey2-$_ukey2.tar.gz::https://github.com/google/ukey2/archive/$_ukey2.tar.gz
+	50_nearby.nft
+	0000-nearby-musl-build-fixes.patch
+	0001-linux-wifi_lan-pin-BWU-port-via-env.patch
+	0002-linux-wifi_hotspot-pin-BWU-port-via-env.patch
+	gloop-musl.patch
+	"
+builddir="$srcdir/nearby-$_commit"
+# net: Bazel resolves its module dependencies from the Bazel Central Registry
+# at build time. !check: the test suite needs hardware radios.
+options="net !check !pmb:crossdirect"
+
+prepare() {
+	# The submodules must be in place before default_prepare, because
+	# gloop-musl.patch patches inside third_party/gloop.
+	cd "$builddir"
+	rmdir third_party/gloop third_party/json/json third_party/protobuf \
+		third_party/smhasher/smhasher third_party/ukey2/ukey2 2>/dev/null || true
+	mv "$srcdir"/gloop-$_gloop third_party/gloop
+	mv "$srcdir"/json-$_json third_party/json/json
+	mv "$srcdir"/protobuf-$_protobuf third_party/protobuf
+	mv "$srcdir"/smhasher-$_smhasher third_party/smhasher/smhasher
+	mv "$srcdir"/ukey2-$_ukey2 third_party/ukey2/ukey2
+
+	default_prepare
+}
+
+build() {
+	# Keep the build out of ~/.cache/bazel: sharing an output base with a
+	# developer's own Bazel means fighting over its server process, and a
+	# package build should not pollute (or depend on) that cache.
+	local bazel_root="$srcdir/.bazel"
+
+	# Two musl workarounds in the flags below:
+	#  - rules_foreign_cc otherwise downloads prebuilt glibc cmake/make
+	#    binaries to build sdbus-c++, which cannot execute here; use the
+	#    system ones instead.
+	#  - gloop refuses to compile against anything but glibc + libc++. Its
+	#    only use on Linux is a time/proto helper, so gloop-musl.patch
+	#    relaxes the guard and these copts acknowledge it in upstream's own
+	#    terms.
+	# Left to itself Bazel schedules against the host's core count and will
+	# exhaust memory on a builder this size; the C++ link steps are large.
+	bazel --output_user_root="$bazel_root" \
+		--host_jvm_args=-Xmx2g \
+		build \
+		--jobs=4 \
+		--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_cmake_toolchain \
+		--extra_toolchains=@rules_foreign_cc//toolchains:preinstalled_make_toolchain \
+		--copt=-DGLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_LIBSTDCXX \
+		--copt=-DGLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_MUSL \
+		//sharing/linux:nearby_sharing_cli
+
+	# Ask the server to go away rather than leave it holding the build tree.
+	# This is a courtesy and must not fail the build: in a container with no
+	# reaper, the killed JVM lingers as a zombie, /proc/<pid> still exists,
+	# and Bazel concludes the server "did not die in a timely fashion" and
+	# exits FATAL. The startup options have to match the build invocation
+	# too, or Bazel decides the server needs replacing before it even tries.
+	bazel --output_user_root="$bazel_root" \
+		--host_jvm_args=-Xmx2g \
+		shutdown || true
+}
+
+package() {
+	install -Dm755 bazel-bin/sharing/linux/nearby_sharing_cli \
+		"$pkgdir"/usr/bin/nearby-sharing-cli
+
+	# Without this the bandwidth upgrade cannot be reached and transfers
+	# fall back to Bluetooth at ~10 KB/s. The port must match
+	# NEARBY_WIFI_LAN_PORT when running the binary.
+	install -Dm644 "$srcdir"/50_nearby.nft \
+		-t "$pkgdir"/etc/nftables.d
+}
+
+sha512sums="
+fb2ce1c7a4d92d83ce7ae78985218f23446f5aa3f88ee7401340828278da2c505d188ac6cd2564579ea1fd7ba9d9d5be03613672779c4fe9fc205d9b7d6ef652  nearby-sharing-6887b0983200c6c8c29e614ea2633d13bf18315d.tar.gz
+47b96286faf15947387db882f322501a5492a635ded3660053bd13ad43b2a20e71fc0049672105e1283da8e5e0b62bfcb4c0864fa1b339245e6a0db61f73cbf2  gloop-87b6913daba4e398f7ed6f11777002e4916c33a7.tar.gz
+bf5e91041fb3df81a1b2ec07a0a03a21abcc56e2cdb735742ad9646f70bfde7198889891603c368e4a1ea880a571c5edfa75e7ad0e8fd9d9a54952aa499ffaf2  json-bc889afb4c5bf1c0d8ee29ef35eaaf4c8bef8a5d.tar.gz
+182a914e3fe1ca7ec551ee16d90929369616a910802aa08195e47a74dd356da7b87ef102f241cf4f148688b18e0a1ff571d358d5dc2bfde950c612424d7b7dfb  protobuf-5a5c44c0cfb4926249e2ae6024acdda513cbd3ff.tar.gz
+36877b53386153c20421ccd32d544c28ee72f6f13ea37c14ab1a1db378f6463db28339b2149671c12611384497bf595b798e99c34ea0ebceb6f9ef2f8908a2b6  smhasher-61a0530f28277f2e850bfc39600ce61d02b518de.tar.gz
+1b4d1aed7326d00e741aaa96acf89ba92452533e6f86042b0f201be2ef0eb8b0e674c3bef5f0b65425f7d876cae0b6f66424cc21c528d617b680420fa214651c  ukey2-34c625a1476cfe04e5372be9af175fec74b6339b.tar.gz
+1cd22642f48a61f8c5225b14bf36b3970ef9a034e10651f046b2fb934c29fcb1569aec5838c6b1b8905501cb0fe1700e31b4349632a3a3c7d2da7571fb4412e2  50_nearby.nft
+59e6f496b8daa14f81b4d8bd4b3996a8b24eaf35ba9354753908c9a08f982dfb0b90382a85a2f28c17baf2a0da71310e79d3b8de19cd6e5e5974bce3c48a1c4d  0000-nearby-musl-build-fixes.patch
+79d5747906069777ebb87a9545c27a99894b6974ba08edca07baad9c57b2188bbbb520e956f3fc338a2b4280791476e3f04d68fc1d9d970c5615d7e022a9a870  0001-linux-wifi_lan-pin-BWU-port-via-env.patch
+3e0f70695233ebb9d5f77485c09760f13514e0f4b55913c90536d5efa47b6a09745dc5c4ccbbe5768919542b8cbe65b26299110206db012259eae2dbfc6d84f9  0002-linux-wifi_hotspot-pin-BWU-port-via-env.patch
+4f9d688c561a697e7c7455aa5bcc399c9bfef47b2242bb4c8be6c22e9ee58c5bc4753b3d954fe094ff86d96091a68317f6845817edfeaed55656d1284ac901e3  gloop-musl.patch
+"

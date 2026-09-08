@@ -1,0 +1,16 @@
+#!/usr/sbin/nft -f
+
+# Nearby Share / Quick Share bandwidth upgrade (WIFI_LAN).
+#
+# After the initial Bluetooth connection, Nearby Connections upgrades to a
+# faster medium by asking the peer to connect *inbound* to a socket we open.
+# That socket normally lands on an ephemeral port, which no static rule can
+# name, so on a default-deny host the peer's SYN is dropped, it times out
+# after ~9s and reports UPGRADE_FAILURE - leaving the transfer on Bluetooth
+# Classic at ~10 KB/s. The port below must match NEARBY_WIFI_LAN_PORT.
+
+table inet filter {
+	chain input {
+		tcp dport 12346 accept comment "nearby wifi-lan bandwidth upgrade"
+	}
+}

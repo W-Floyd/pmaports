@@ -1,0 +1,27 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 21809ed..0929616 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -248,7 +248,7 @@ cmake(
+     },
+     env = {
+         # CMake still needs pkg-config to pass its internal configuration checks for systemd
+-        "PKG_CONFIG_PATH": "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig",
++        "PKG_CONFIG_PATH": "/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib64/pkgconfig:/usr/share/pkgconfig",
+     },
+     # Link the systemd dependency you defined in your WORKSPACE
+     deps = ["@libsystemd//:libsystemd"],
+diff --git a/internal/platform/implementation/linux/timer.cc b/internal/platform/implementation/linux/timer.cc
+index dd5511f..dbee89b 100644
+--- a/internal/platform/implementation/linux/timer.cc
++++ b/internal/platform/implementation/linux/timer.cc
+@@ -12,7 +12,9 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++#ifdef __GLIBC__
+ #include <bits/types/struct_itimerspec.h>
++#endif
+ #include <signal.h>
+ #include <time.h>
+ #include <cerrno>

@@ -1,0 +1,17 @@
+diff --git a/third_party/gloop/gloop/enforce_gloop_support.h b/third_party/gloop/gloop/enforce_gloop_support.h
+index d5322a4..5ffe3ac 100644
+--- a/third_party/gloop/gloop/enforce_gloop_support.h
++++ b/third_party/gloop/gloop/enforce_gloop_support.h
+@@ -88,10 +88,12 @@ static_assert(sizeof(void*) == 8, "Gloop only supports 64-bit platforms.");
+ #endif
+ #endif
+ 
++#if !defined(GLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_MUSL)
+ #if !defined(__GLIBC__) || !defined(__GLIBC_MINOR__) || __GLIBC__ < 2 || \
+     (__GLIBC__ == 2 && __GLIBC_MINOR__ < 39)
+ #error "Gloop requires glibc 2.39 or later."
+ #endif
++#endif
+ 
+ /*
+  * Test compiler flags.

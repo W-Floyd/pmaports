@@ -1,0 +1,37 @@
+diff --git a/internal/platform/implementation/linux/wifi_hotspot.cc b/internal/platform/implementation/linux/wifi_hotspot.cc
+index 6ed6958..06975aa 100644
+--- a/internal/platform/implementation/linux/wifi_hotspot.cc
++++ b/internal/platform/implementation/linux/wifi_hotspot.cc
+@@ -16,6 +16,7 @@
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <memory>
+ #include <random>
+@@ -84,6 +85,24 @@ NetworkManagerWifiHotspotMedium::ConnectToService(
+ 
+ std::unique_ptr<api::WifiHotspotServerSocket>
+ NetworkManagerWifiHotspotMedium::ListenForService(int port) {
++  // Same story as WifiLanMedium::ListenForService: the peer joins our SoftAP
++  // and then connects *inbound* to this socket. Port 0 means an ephemeral
++  // port that no static firewall rule can name, so on a default-deny host the
++  // peer's SYN is dropped and the upgrade is reported as a failure - leaving
++  // the transfer on Bluetooth. NEARBY_WIFI_HOTSPOT_PORT pins it.
++  if (port == 0) {
++    if (const char* env = std::getenv("NEARBY_WIFI_HOTSPOT_PORT")) {
++      int configured = std::atoi(env);
++      if (configured > 0 && configured <= 65535) {
++        port = configured;
++      } else {
++        LOG(WARNING) << __func__
++                     << ": ignoring invalid NEARBY_WIFI_HOTSPOT_PORT='" << env
++                     << "'";
++      }
++    }
++  }
++
+   if (!WifiHotspotActive()) {
+     LOG(ERROR)
+         << __func__

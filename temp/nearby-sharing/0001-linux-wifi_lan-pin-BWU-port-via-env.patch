@@ -1,0 +1,40 @@
+diff --git a/internal/platform/implementation/linux/wifi_lan.cc b/internal/platform/implementation/linux/wifi_lan.cc
+index b763023..b1d84bf 100644
+--- a/internal/platform/implementation/linux/wifi_lan.cc
++++ b/internal/platform/implementation/linux/wifi_lan.cc
+@@ -17,6 +17,7 @@
+ #include <sys/socket.h>
+ #include <cerrno>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <memory>
+ #include <utility>
+@@ -258,7 +259,26 @@ std::unique_ptr<api::WifiLanSocket> WifiLanMedium::ConnectToService(
+ 
+ std::unique_ptr<api::WifiLanServerSocket> WifiLanMedium::ListenForService(
+     int port) {
+-  LOG(INFO) << __func__ << ": Listening for service WifiLanMedium";
++  // A bandwidth upgrade asks the peer to connect *inbound* to this socket.
++  // With port 0 the kernel picks an ephemeral port, which no static firewall
++  // rule can name - on a default-deny host (postmarketOS drops all input) the
++  // peer's SYN is silently dropped, it times out, and the upgrade is reported
++  // as a failure. NEARBY_WIFI_LAN_PORT pins the port so a single accept rule
++  // can cover it. Only honoured when the caller did not request a port.
++  if (port == 0) {
++    if (const char* env = std::getenv("NEARBY_WIFI_LAN_PORT")) {
++      int configured = std::atoi(env);
++      if (configured > 0 && configured <= 65535) {
++        port = configured;
++      } else {
++        LOG(WARNING) << __func__ << ": ignoring invalid NEARBY_WIFI_LAN_PORT='"
++                     << env << "'";
++      }
++    }
++  }
++
++  LOG(INFO) << __func__ << ": Listening for service WifiLanMedium on port "
++            << port;
+   auto socket = TCPServerSocket::Listen(std::nullopt, port);
+   if (!socket.has_value()) return nullptr;
+ 
