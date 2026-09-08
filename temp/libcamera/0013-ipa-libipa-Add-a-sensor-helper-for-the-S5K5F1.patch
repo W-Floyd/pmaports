@@ -1,0 +1,43 @@
+From 438a461fd5d183f912194677148f0caf6735a76c Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Tue, 8 Sep 2026 13:19:17 +0000
+Subject: [PATCH 13/14] ipa: libipa: Add a sensor helper for the S5K5F1
+
+The Samsung S5K5F1 is the monochrome infrared iris sensor on the Snapdragon
+Galaxy S9. Without a helper the SoftISP cannot convert between gain code
+and gain, and logs "Failed to create camera sensor helper".
+
+Samsung's analogue gain is code/32 rather than the Sony
+1024 / (1024 - code) model: the kernel driver exposes ANALOGUE_GAIN over
+32-512, and the vendor register dump pairs code 44 with 1.375x, which is
+exactly 44/32. That gives a 1x to 16x range.
+
+The sensor's ADC is 10 bits. Black level was measured on hardware from
+frames captured with the infrared illuminator off, at 64 in 10 bits.
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 8995a53..93c0dd2 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -851,6 +851,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov13858", CameraSensorHelperOv13858)
+ 
++class CameraSensorHelperS5k5f1 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k5f1()
++	{
++		/* Measured on a Galaxy S9 iris module: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k5f1", CameraSensorHelperS5k5f1)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
