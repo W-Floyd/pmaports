@@ -1,0 +1,597 @@
+From: William Floyd <git@notmy.space>
+Date: Mon, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] software_isp: af: Add AfMode, use dioptres, hold a manual position
+
+The soft ISP autofocus added in 0015 self-triggers: Af::step() treats any
+sharpness change of more than 30% as "focus lost" and restarts a sweep.
+That is what makes it work in applications with no AF support at all, but
+it also means a position set through LensPosition survives only until the
+scene changes, so manual focus is not usable today.
+
+Register controls::AfMode with AfModeManual and AfModeContinuous,
+defaulting to continuous so existing behaviour is unchanged, and return
+early from Af::step() in manual mode so nothing sweeps the lens away from
+where the application put it.
+
+Along the way:
+
+  - Pass the focus lens ControlInfoMap to the IPA at init() time, not only
+    at configure() time, so Af::init() can decline to register any focus
+    control when the sensor has no actuator. Without this a fixed-focus
+    sensor still advertises LensPosition and applications draw a focus
+    slider that cannot move anything.
+
+  - Fix the AfTrigger polarity. AfTriggerStart is 0 and AfTriggerCancel is
+    1, but the code started a sweep on 1 and stopped one on 0. Advertise
+    the control as an enum of the two values rather than a 0..1 range so
+    that applications, and the PipeWire SPA bridge, present it as a
+    choice.
+
+  - Report AfMode in the metadata, and report AfStateIdle rather than
+    AfStateFocused while in manual mode, as the specification requires.
+
+  - Drop the const from the CameraSensor the SoftwareIsp constructor
+    takes, as CameraSensor::focusLens() is not const. The only caller
+    already holds a non-const sensor.
+
+  - Express LensPosition in dioptres, as the control specifies, instead of
+    on an invented 0..100 scale. An application that follows the spec and
+    asks for 0.5 to focus at 2m was previously served a position five
+    codes off the bottom of the actuator's travel, indistinguishable from
+    infinity; it now gets what it asked for. Positions are dioptres
+    throughout the algorithm, including the sweep, and are converted to
+    actuator codes in one place, through a piecewise-linear map. The
+    sweep's step sizes become fractions of the focus range rather than
+    the hardcoded 2 and 0.2, which keeps the coarse-to-fine search
+    identical in shape whatever the range is.
+
+    The map is read from the sensor's tuning file using libipa's Pwl and
+    the same flat x,y list schema as the Raspberry Pi IPA's "rpi.af" map,
+    so a calibration measured for one can be transcribed to the other:
+
+        - Af:
+            map: [ 0.0, 100, 10.0, 1000 ]
+            range: { min: 0.0, max: 10.0, default: 1.0 }
+
+    No tuning file carries a map yet, so the code falls back to assuming
+    the actuator spans infinity to 10cm linearly and logs a warning that
+    reported distances are not trustworthy. That fallback reproduces the
+    previous behaviour exactly, just relabelled; making it correct needs
+    a bench calibration of the module, which is a physical measurement
+    rather than a code change.
+
+  - Offset the lens position by focus_min when mapping it onto the
+    actuator range. This is a no-op for the ak7375 on starqltechn, whose
+    range starts at 0, but it is wrong for any actuator that does not.
+--- a/include/libcamera/ipa/soft.mojom
++++ b/include/libcamera/ipa/soft.mojom
+@@ -18,7 +18,8 @@
+ 	     libcamera.SharedFD fdStats,
+ 	     libcamera.SharedFD fdParams,
+ 	     libcamera.IPACameraSensorInfo sensorInfo,
+-	     libcamera.ControlInfoMap sensorControls)
++	     libcamera.ControlInfoMap sensorControls,
++	     libcamera.ControlInfoMap lensControls)
+ 		=> (int32 ret, libcamera.ControlInfoMap ipaControls, bool ccmEnabled);
+ 	start() => (int32 ret);
+ 	stop();
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -47,7 +47,7 @@
+ class SoftwareIsp : public Object
+ {
+ public:
+-	SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
++	SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 		    ControlInfoMap *ipaControls);
+ 	~SoftwareIsp();
+ 
+--- a/src/ipa/simple/algorithms/af.cpp
++++ b/src/ipa/simple/algorithms/af.cpp
+@@ -8,11 +8,16 @@
+ #include "af.h"
+ 
+ #include <algorithm>
++#include <array>
++#include <cmath>
+ #include <stdint.h>
++#include <utility>
+ 
+ #include <libcamera/base/log.h>
+ #include "libcamera/base/utils.h"
+ 
++#include "libipa/pwl.h"
++
+ #include "control_ids.h"
+ 
+ namespace libcamera {
+@@ -21,48 +26,199 @@
+ 
+ namespace ipa::soft::algorithms {
+ 
++/*
++ * The AF modes this algorithm implements. AfModeAuto is deliberately absent:
++ * it requires a one-shot scan that ends in AfStateFocused and stays there,
++ * which the sweep below does not distinguish from continuous operation.
++ * AfTrigger remains available to force a fresh sweep in continuous mode.
++ */
++static const std::array<ControlValue, 2> kAfModeValues{
++	ControlValue(static_cast<int32_t>(controls::AfModeManual)),
++	ControlValue(static_cast<int32_t>(controls::AfModeContinuous)),
++};
++
++static const std::array<ControlValue, 2> kAfTriggerValues{
++	ControlValue(static_cast<int32_t>(controls::AfTriggerStart)),
++	ControlValue(static_cast<int32_t>(controls::AfTriggerCancel)),
++};
++
++/*
++ * All focus positions in this algorithm are in dioptres (reciprocal metres),
++ * as controls::LensPosition specifies: 0 is infinity and larger values focus
++ * closer. They are converted to actuator codes only in updateFocus(), through
++ * the piecewise-linear map_ read from the tuning file. This follows the
++ * Raspberry Pi IPA, whose tuning files use the same "map" schema.
++ */
++
++/*
++ * Fallback used when the tuning file supplies no map. The actuator's full
++ * travel is assumed to span infinity to 10 cm, linearly. This is a guess: real
++ * modules usually cannot reach infinity at one end of the travel, so distances
++ * reported under this default are not trustworthy. Calibrate and put a "map"
++ * in the sensor's tuning file to fix that.
++ */
++static constexpr double kUncalibratedMaxDioptres = 10.0;
++
++/* A general-purpose resting position, used if the tuning file names none. */
++static constexpr double kFallbackDefaultDioptres = 1.0;
++
++/*
++ * The sweep starts at 1/50 of the focus range and halves until it is finer
++ * than 1/500 of it, which reproduces the coarse-to-fine search the algorithm
++ * has always done.
++ */
++static constexpr double kSweepStepInitial = 1.0 / 50.0;
++static constexpr double kSweepStepFinal = 1.0 / 500.0;
++
+ Af::Af()
+ {
+ }
+ 
+-int Af::init(IPAContext &context,
+-	     [[maybe_unused]] const ValueNode &tuningData)
++int Af::init(IPAContext &context, const ValueNode &tuningData)
+ {
+-	context.ctrlMap[&controls::LensPosition] = ControlInfo(0.0f, 100.0f, 50.0f);
+-	context.ctrlMap[&controls::AfTrigger] = ControlInfo(0, 1, 0);
++	const int32_t codeMin = context.configuration.focus.focus_min;
++	const int32_t codeMax = context.configuration.focus.focus_max;
++
++	/*
++	 * Don't advertise any focus control when the sensor has no actuator,
++	 * so that applications hide their focus UI instead of offering a
++	 * slider that cannot move anything.
++	 */
++	if (codeMax <= codeMin) {
++		LOG(IPASoftAutoFocus, Info)
++			<< "No focus actuator, not registering focus controls";
++		return 0;
++	}
++
++	/*
++	 * The map takes dioptres to actuator codes. Its format matches the
++	 * Raspberry Pi IPA's "rpi.af" map, a flat list of x,y pairs, so a
++	 * calibration measured for one can be transcribed to the other.
++	 */
++	auto map = tuningData["map"].get<ipa::Pwl>();
++	if (map.has_value() && !map->empty()) {
++		map_ = std::move(map.value());
++	} else {
++		LOG(IPASoftAutoFocus, Warning)
++			<< "No focus map in the tuning file, assuming the actuator"
++			<< " spans infinity to " << 100.0 / kUncalibratedMaxDioptres
++			<< "cm linearly; reported focus distances will be wrong";
++		map_.append(0.0, codeMin);
++		map_.append(kUncalibratedMaxDioptres, codeMax);
++	}
++
++	dioptresMin_ = map_.domain().start;
++	dioptresMax_ = map_.domain().end;
++	dioptresDef_ = std::clamp(kFallbackDefaultDioptres, dioptresMin_, dioptresMax_);
++
++	/* An explicit range overrides the map's own domain. */
++	const ValueNode &range = tuningData["range"];
++	auto min = range["min"].get<double>();
++	auto max = range["max"].get<double>();
++	if (min.has_value() && max.has_value() && max.value() > min.value()) {
++		dioptresMin_ = min.value();
++		dioptresMax_ = max.value();
++	}
++	auto def = range["default"].get<double>();
++	dioptresDef_ = std::clamp(def.value_or(dioptresDef_),
++				  dioptresMin_, dioptresMax_);
++
++	LOG(IPASoftAutoFocus, Info)
++		<< "Focus range " << dioptresMin_ << ".." << dioptresMax_
++		<< " dioptres (actuator codes " << lensCode(dioptresMin_)
++		<< ".." << lensCode(dioptresMax_) << "), default " << dioptresDef_;
++
++	context.ctrlMap[&controls::AfMode] =
++		ControlInfo(kAfModeValues,
++			    ControlValue(static_cast<int32_t>(controls::AfModeContinuous)));
++	context.ctrlMap[&controls::LensPosition] =
++		ControlInfo(static_cast<float>(dioptresMin_),
++			    static_cast<float>(dioptresMax_),
++			    static_cast<float>(dioptresDef_));
++	context.ctrlMap[&controls::AfTrigger] =
++		ControlInfo(kAfTriggerValues,
++			    ControlValue(static_cast<int32_t>(controls::AfTriggerStart)));
+ 	return 0;
+ }
+ 
++/* Convert a position in dioptres to an actuator code. */
++int32_t Af::lensCode(double dioptres) const
++{
++	return static_cast<int32_t>(std::lround(map_.eval(map_.domain().clamp(dioptres))));
++}
++
+ int Af::configure(IPAContext &context,
+ 		  [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
+-	context.activeState.knobs.focus_sweep = std::optional<bool>();
+-	context.activeState.knobs.focus_pos = std::optional<double>();
+ 	context.activeState.knobs.focus_sweep = false;
+-	context.activeState.knobs.focus_pos = 0;
++	context.activeState.knobs.focus_pos = dioptresDef_;
++	context.activeState.knobs.af_mode = controls::AfModeContinuous;
+ 	context.configuration.focus.skip = 10;
+ 	return 0;
+ }
+ 
+-void Af::queueRequest([[maybe_unused]] typename Module::Context &context,
++bool Af::isManual(const IPAContext &context) const
++{
++	return context.activeState.knobs.af_mode.value_or(controls::AfModeContinuous) ==
++	       controls::AfModeManual;
++}
++
++void Af::queueRequest(typename Module::Context &context,
+ 		      [[maybe_unused]] const uint32_t frame,
+ 		      [[maybe_unused]] typename Module::FrameContext &frameContext,
+ 		      const ControlList &controls)
+ {
++	const auto &af_mode = controls.get(controls::AfMode);
+ 	const auto &focus_pos = controls.get(controls::LensPosition);
+ 	const auto &af_trigger = controls.get(controls::AfTrigger);
++
++	if (af_mode.has_value()) {
++		const bool wasManual = isManual(context);
++		context.activeState.knobs.af_mode = af_mode.value();
++
++		if (isManual(context) != wasManual) {
++			if (isManual(context)) {
++				/*
++				 * Abandon any sweep in progress and hold the
++				 * position the lens is at, until the
++				 * application supplies one of its own.
++				 */
++				context.activeState.knobs.focus_sweep = false;
++				context.configuration.focus.skip = 10;
++				LOG(IPASoftAutoFocus, Info) << "Switched to manual focus";
++			} else {
++				LOG(IPASoftAutoFocus, Info) << "Switched to continuous focus";
++				restart(context);
++			}
++		}
++	}
++
+ 	if (focus_pos.has_value()) {
+-		context.activeState.knobs.focus_pos = focus_pos;
++		const double pos = std::clamp(static_cast<double>(focus_pos.value()),
++					      dioptresMin_, dioptresMax_);
++		context.activeState.knobs.focus_pos = pos;
+ 		context.configuration.focus.skip = 10;
+-		LOG(IPASoftAutoFocus, Debug) << "Setting focus position to " << focus_pos.value();
++		LOG(IPASoftAutoFocus, Debug)
++			<< "Setting focus position to " << pos << " dioptres (code "
++			<< lensCode(pos) << ")";
+ 	}
+-	if (af_trigger.has_value()) {
+-		context.activeState.knobs.focus_sweep = af_trigger.value() == 1;
+-		if(context.activeState.knobs.focus_sweep){
+-			restart(context);
++
++	/*
++	 * AfTrigger is specified to apply to AfModeAuto only, which this
++	 * algorithm does not implement. Honour it in continuous mode anyway,
++	 * where forcing a fresh scan is useful, and ignore it in manual mode
++	 * as the specification requires.
++	 */
++	if (af_trigger.has_value() && !isManual(context)) {
++		if (af_trigger.value() == controls::AfTriggerStart) {
++			if (!context.activeState.knobs.focus_sweep.value_or(false))
++				restart(context);
++		} else {
++			/* Cancel: hold wherever the lens currently is. */
++			context.activeState.knobs.focus_sweep = false;
++			LOG(IPASoftAutoFocus, Info) << "Focus scan cancelled";
+ 		}
+ 	}
+-
+ }
+ 
+   /*
+@@ -75,25 +231,37 @@
+ 
+ void Af::updateFocus([[maybe_unused]] IPAContext &context, [[maybe_unused]] IPAFrameContext &frameContext, [[maybe_unused]] double exposureMSV)
+ {
+-	frameContext.lens.focus_pos = context.activeState.knobs.focus_pos.value_or(50.0) / 100.0 * (context.configuration.focus.focus_max - context.configuration.focus.focus_min);
++	const double pos = context.activeState.knobs.focus_pos.value_or(dioptresDef_);
++
++	frameContext.lens.focus_pos =
++		std::clamp(lensCode(pos),
++			   context.configuration.focus.focus_min,
++			   context.configuration.focus.focus_max);
+ }
+ 
+ static int steps;
+ 
+ void Af::restart(IPAContext &context) {
+   steps = 0;
+-  context.configuration.focus.focus_max_pos = 0;
++  context.configuration.focus.focus_max_pos = dioptresMin_;
+   context.configuration.focus.sharpness_max = 0;
+-  context.configuration.focus.start = 0;
+-  context.configuration.focus.stop = 100;
+-  context.configuration.focus.step = 2;
++  context.configuration.focus.start = dioptresMin_;
++  context.configuration.focus.stop = dioptresMax_;
++  context.configuration.focus.step = (dioptresMax_ - dioptresMin_) * kSweepStepInitial;
+   context.configuration.focus.skip = 10;
+-  context.activeState.knobs.focus_pos = 0;
++  context.activeState.knobs.focus_pos = dioptresMin_;
+   context.activeState.knobs.focus_sweep = true;
+   LOG(IPASoftAutoFocus, Info) << "Starting focus sweep";
+ }
+ 
+ void Af::step(IPAContext &context, double& focus_pos, uint64_t sharp, bool& sweep){
++  /*
++   * In manual mode the position is entirely the application's to choose.
++   * Return before the focus-loss check below, which would otherwise start a
++   * sweep and drag the lens away from where the user put it.
++   */
++  if (isManual(context))
++    return;
+   steps ++;
+   // Even for sweep, we need some time to move to new lens position
+   if(context.configuration.focus.skip != 0){
+@@ -115,13 +283,13 @@
+ 	if (focus_pos > context.configuration.focus.start && focus_pos < context.configuration.focus.stop)
+ 	  return;
+ 	
+-	context.configuration.focus.start = std::clamp(context.configuration.focus.focus_max_pos - context.configuration.focus.step, 0.0, 100.0);
+-	context.configuration.focus.stop = std::clamp(context.configuration.focus.focus_max_pos +  context.configuration.focus.step, 0.0, 100.0);
++	context.configuration.focus.start = std::clamp(context.configuration.focus.focus_max_pos - context.configuration.focus.step, dioptresMin_, dioptresMax_);
++	context.configuration.focus.stop = std::clamp(context.configuration.focus.focus_max_pos +  context.configuration.focus.step, dioptresMin_, dioptresMax_);
+ 	LOG(IPASoftAutoFocus, Info) << "Best focus on step " <<context.configuration.focus.step << " (" << context.configuration.focus.start << ".." << context.configuration.focus.stop << "): " << focus_pos << " value " << context.configuration.focus.sharpness_max;
+ 	focus_pos = context.configuration.focus.start;
+ 	context.configuration.focus.step /= 2; // HERE
+ 	context.configuration.focus.skip = 10; // We need lens to settle after big move
+-	if (context.configuration.focus.step > 0.2){
++	if (context.configuration.focus.step > (dioptresMax_ - dioptresMin_) * kSweepStepFinal){
+ 	  // We want to search for maximum at smaller step, forget maximum from prev step
+ 	  context.configuration.focus.sharpness_max = 0;
+ 	  return;
+@@ -129,7 +297,7 @@
+ 
+ 	//We are done
+ 	sweep = false;
+-	LOG(IPASoftAutoFocus, Info) << "Sweep end. Best focus: " << context.configuration.focus.focus_max_pos << " steps " << steps;
++	LOG(IPASoftAutoFocus, Info) << "Sweep end. Best focus: " << context.configuration.focus.focus_max_pos << " dioptres (code " << lensCode(context.configuration.focus.focus_max_pos) << ") steps " << steps;
+ 	// We want to keep context.configuration.focus.sharpness_max, to detect when scene changes (aka focus lost)
+ 	focus_pos = context.configuration.focus.focus_max_pos;
+ }
+@@ -146,12 +314,22 @@
+ 		context.activeState.knobs.focus_sweep.value());
+ 	updateFocus(context, frameContext, 0);
+ 
++	const int32_t mode =
++		context.activeState.knobs.af_mode.value_or(controls::AfModeContinuous);
++
+ 	metadata.set(controls::FocusFoM,
+ 		     static_cast<int32_t>(std::min<uint64_t>(stats->sharpness, INT32_MAX)));
+ 	metadata.set(controls::LensPosition,
+-		     context.activeState.knobs.focus_pos.value_or(0.0));
++		     static_cast<float>(context.activeState.knobs.focus_pos.value_or(0.0)));
++	metadata.set(controls::AfMode, mode);
++	/*
++	 * AfState is defined to be AfStateIdle whenever AfMode is
++	 * AfModeManual, as the algorithm is not converging on anything.
++	 */
+ 	metadata.set(controls::AfState,
+-		     context.activeState.knobs.focus_sweep.value_or(false)
++		     isManual(context)
++			     ? controls::AfStateIdle
++		     : context.activeState.knobs.focus_sweep.value_or(false)
+ 			     ? controls::AfStateScanning
+ 			     : controls::AfStateFocused);
+ }
+--- a/src/ipa/simple/algorithms/af.h
++++ b/src/ipa/simple/algorithms/af.h
+@@ -7,7 +7,10 @@
+ 
+ #pragma once
+ 
++#include <stdint.h>
+ 
++#include "libipa/pwl.h"
++
+ #include "algorithm.h"
+ 
+ namespace libcamera {
+@@ -33,9 +36,21 @@
+ 		     ControlList &metadata) override;
+ 
+ private:
++	bool isManual(const IPAContext &context) const;
++	int32_t lensCode(double dioptres) const;
+ 	void updateFocus(IPAContext &context, IPAFrameContext &frameContext, double focus);
+         void step(IPAContext &context, double& focus_pos, uint64_t sharp, bool& sweep);
+ 	void restart(IPAContext &context);
++
++	/*
++	 * Tuning data, kept here rather than in IPAContext::configuration
++	 * because configure() clears that whereas init(), which reads the
++	 * tuning file, runs only once.
++	 */
++	ipa::Pwl map_;
++	double dioptresMin_ = 0.0;
++	double dioptresMax_ = 0.0;
++	double dioptresDef_ = 0.0;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -70,6 +70,8 @@
+ 		/* 0..100 range, 50.0 = normal */
+ 		std::optional<double> focus_pos;
+ 		std::optional<bool> focus_sweep;
++		/* controls::AfModeEnum, defaults to AfModeContinuous */
++		std::optional<int32_t> af_mode;
+ 	} knobs;
+ };
+ 
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -57,6 +57,7 @@
+ 		 const SharedFD &fdParams,
+ 		 const IPACameraSensorInfo &sensorInfo,
+ 		 const ControlInfoMap &sensorControls,
++		 const ControlInfoMap &lensControls,
+ 		 ControlInfoMap *ipaControls,
+ 		 bool *ccmEnabled) override;
+ 	int configure(const IPAConfigInfo &configInfo) override;
+@@ -74,6 +75,7 @@
+ 
+ private:
+ 	void updateExposure(double exposureMSV);
++	void updateFocusRange();
+ 
+ 	DebayerParams *params_;
+ 	SwIspStats *stats_;
+@@ -98,6 +100,7 @@
+ 			const SharedFD &fdParams,
+ 			const IPACameraSensorInfo &sensorInfo,
+ 			const ControlInfoMap &sensorControls,
++			const ControlInfoMap &lensControls,
+ 			ControlInfoMap *ipaControls,
+ 			bool *ccmEnabled)
+ {
+@@ -110,6 +113,13 @@
+ 
+ 	context_.sensorInfo = sensorInfo;
+ 
++	/*
++	 * Record the focus range before the algorithms are created, so that
++	 * they can decide in init() whether to advertise focus controls.
++	 */
++	lensInfoMap_ = lensControls;
++	updateFocusRange();
++
+ 	/* Load the tuning data file */
+ 	File file(settings.configurationFile);
+ 	if (!file.open(File::OpenModeFlag::ReadOnly)) {
+@@ -201,6 +211,30 @@
+ 	return 0;
+ }
+ 
++/*
++ * Record the range of the focus actuator in the IPA configuration, or a zero
++ * range when the sensor has no actuator at all. Called both from init(), so
++ * that algorithms can query it while registering their controls, and from
++ * configure(), which clears the configuration.
++ */
++void IPASoftSimple::updateFocusRange()
++{
++	const auto it = lensInfoMap_.find(V4L2_CID_FOCUS_ABSOLUTE);
++
++	if (it == lensInfoMap_.end()) {
++		LOG(IPASoft, Debug) << "No focus lens, focus control disabled";
++		context_.configuration.focus.focus_min = 0;
++		context_.configuration.focus.focus_max = 0;
++		return;
++	}
++
++	context_.configuration.focus.focus_min = it->second.min().get<int32_t>();
++	context_.configuration.focus.focus_max = it->second.max().get<int32_t>();
++	LOG(IPASoft, Info) << "Focus lens range ["
++			   << context_.configuration.focus.focus_min << ", "
++			   << context_.configuration.focus.focus_max << "]";
++}
++
+ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ {
+ 	sensorInfoMap_ = configInfo.sensorControls;
+@@ -219,20 +253,7 @@
+ 	 * otherwise it is wiped along with the rest of the configuration and
+ 	 * the AF algorithm ends up mapping every position onto zero.
+ 	 */
+-	if (lensInfoMap_.empty() ||
+-	    lensInfoMap_.find(V4L2_CID_FOCUS_ABSOLUTE) == lensInfoMap_.end()) {
+-		LOG(IPASoft, Debug) << "No focus lens, focus control disabled";
+-		context_.configuration.focus.focus_min = 0;
+-		context_.configuration.focus.focus_max = 0;
+-	} else {
+-		const ControlInfo &lensInfo =
+-			lensInfoMap_.find(V4L2_CID_FOCUS_ABSOLUTE)->second;
+-		context_.configuration.focus.focus_min = lensInfo.min().get<int32_t>();
+-		context_.configuration.focus.focus_max = lensInfo.max().get<int32_t>();
+-		LOG(IPASoft, Info) << "Focus lens range ["
+-				   << context_.configuration.focus.focus_min << ", "
+-				   << context_.configuration.focus.focus_max << "]";
+-	}
++	updateFocusRange();
+ 
+ 	context_.configuration.agc.lineDuration =
+ 		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -24,6 +24,7 @@
+ #include <libcamera/stream.h>
+ 
+ #include "libcamera/internal/bayer_format.h"
++#include "libcamera/internal/camera_lens.h"
+ #include "libcamera/internal/framebuffer.h"
+ #include "libcamera/internal/software_isp/debayer_params.h"
+ #include "libcamera/internal/software_isp/quad_bayer.h"
+@@ -80,7 +81,7 @@
+  * \param[out] ipaControls The IPA controls to update
+  * handler
+  */
+-SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
++SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 			 ControlInfoMap *ipaControls)
+ 	: ispWorkerThread_("SWIspWorker"),
+ 	  dmaHeap_(DmaBufAllocator::DmaBufAllocatorFlag::CmaHeap |
+@@ -166,11 +167,21 @@
+ 		return;
+ 	}
+ 
++	/*
++	 * Pass the focus lens controls to the IPA already at init() time, so
++	 * that algorithms can decide whether to advertise focus controls at
++	 * all. A sensor without an actuator must not offer LensPosition.
++	 */
++	CameraLens *focusLens = sensor->focusLens();
++	ControlInfoMap lensControls = focusLens ? focusLens->controls()
++					       : ControlInfoMap();
++
+ 	ret = ipa_->init(IPASettings{ ipaTuningFile, sensor->model() },
+ 			 debayer_->getStatsFD(),
+ 			 sharedParams_.fd(),
+ 			 sensorInfo,
+ 			 sensor->controls(),
++			 lensControls,
+ 			 ipaControls,
+ 			 &ccmEnabled_);
+ 	if (ret) {
