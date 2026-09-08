@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=8
+pkgrel=9
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -68,6 +68,9 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0009-ipa-libipa-Add-sensor-helpers-for-IMX320-and-IMX345.patch
 	0010-ipa-soft-Make-AGC-loop-parameters-tunable.patch
 	0011-libcamera-Add-sensor-properties-for-IMX320-and-IMX345.patch
+	0012-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
+	0013-ipa-libipa-Add-a-sensor-helper-for-the-S5K5F1.patch
+	0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -186,6 +189,9 @@ ac4e3c742fde4f8e4775bd2afbaaecb18fa49b869eb4309032bae985680f97443353eb384de19a9b
 303a12d5512c4001229cf3c2064b0ab082677946ffb0b84d6811a31ab840516fa35997f8930327b49dd83ac8cbf83c403358bc3be1e38b4d967117ec66369595  0009-ipa-libipa-Add-sensor-helpers-for-IMX320-and-IMX345.patch
 f5529e11744a6ae7d10fc12aeccf9ff39a7e9630ffa4aca61b60f8ffb2c33735e23c8509aa19564b9b9c40ef63f0c69d58e666f1b3d8743c6f40538651d8cfa5  0010-ipa-soft-Make-AGC-loop-parameters-tunable.patch
 4a6ec74a9ffac3cb3d599e7e65439d347174201fc36d1e0cd35e121dd5b525833b5af88595973c40a0bb5daa7b8303f222ddf548d6083ffbc1c9c7462f8496a4  0011-libcamera-Add-sensor-properties-for-IMX320-and-IMX345.patch
+5c89448e2cbfb10887651e3b4df7bd36e0032597947612beeeec9b164cccd1cea0fdf30f61ffd1b6483b2c0ad2e537d7d005ae77a21ab8dc895e901948ec94ed  0012-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
+df9623993bc52dfcf2495784db63dee9154477a95c03ef022aa2a49ade85ad69785fe53513c3d2da21a2c121688744d79109872810b494ef5e671609606aacb9  0013-ipa-libipa-Add-a-sensor-helper-for-the-S5K5F1.patch
+958ce32eeacadddd64edf6d2010deb5b679ea679d0ecbbe091a9e66b9d2cd3f2205064d2355e2536a27d8c492b4416bf3cacfdb29a5e481f2480d43ca17286f7  0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 a2f9a14128d85f6aa8a54264b56f84ea09a5d84d6658906a21a84eceb7cd794bca32ab4f5260b449ef57ba0c999a86993601c478cc2cef8450624be358ff1256  imx320.yaml
 1e6055bbe84e9575c4a6d1d9df3da47f17b2c7f2d7675f9e3559675cdb4fc1630ff5929717d82eb0d5e13c0aa20fd8f8d98c99d778e15d56f7acd37fd2226aee  imx345.yaml

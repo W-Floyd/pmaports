@@ -1,0 +1,35 @@
+From 174a3214fe4bc4bce110c26f0ff116c5d1df4bf4 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Tue, 8 Sep 2026 13:19:17 +0000
+Subject: [PATCH 14/14] libcamera: sensor: Add properties for the S5K5F1
+
+Without an entry libcamera warns "No static properties available for
+'s5k5f1'" and publishes no SensorPhysicalSize.
+
+The pixel pitch is 1.0um square from the datasheet, which agrees with the
+2400x2400 array in a 1/5.27" optical format.
+
+The sensor delays have not been measured, so they are left empty and
+libcamera's defaults apply, exactly as for the other sensors that do the
+same. No test pattern modes are described because the register mapping for
+them is unknown.
+---
+ src/libcamera/sensor/camera_sensor_properties.cpp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 7cc2d26..0fa1434 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -523,6 +523,11 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5k5f1", {
++			.unitCellSize = { 1000, 1000 },
++			.testPatternModes = {},
++			.sensorDelays = { },
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {

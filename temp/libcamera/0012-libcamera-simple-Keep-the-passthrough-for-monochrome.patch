@@ -1,0 +1,67 @@
+From be1af98a7c98055dc4637a5fb7dba8a846f27003 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Tue, 8 Sep 2026 13:19:16 +0000
+Subject: [PATCH 12/14] libcamera: simple: Keep the passthrough for monochrome
+ sensors
+
+"libcamera: simple: Skip hwISP formats if swISP is active" made
+tryPipeline() drop any configuration the soft ISP cannot produce an output
+format for, so that the soft ISP is used in preference to a hardware ISP
+that cannot be trusted. That is the right call for Bayer sensors.
+
+The soft ISP is a debayer, though, and it has no monochrome path at all, so
+swIsp_->formats() is empty for every mono sensor. Such a sensor therefore
+ends up with no configurations, tryPipeline() reports "No valid
+configuration found", and the camera is dropped from the camera list.
+
+A monochrome sensor has nothing to debayer, so restore upstream's
+passthrough for it: the capture format is already what userspace wants.
+Bayer formats the soft ISP declines still skip the configuration, so the
+original intent is unchanged. An unrecognised media bus code yields a
+default-constructed BayerFormat whose order is BGGR, so it keeps skipping
+too.
+
+On a Snapdragon Galaxy S9 this is what makes the iris camera (Samsung
+S5K5F1, 2400x2400 Y8) appear at all.
+---
+ src/libcamera/pipeline/simple/simple.cpp | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index fa55d76..c8e1b82 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -32,6 +32,7 @@
+ #include <libcamera/pixel_format.h>
+ #include <libcamera/stream.h>
+ 
++#include "libcamera/internal/bayer_format.h"
+ #include "libcamera/internal/camera.h"
+ #include "libcamera/internal/camera_manager.h"
+ #include "libcamera/internal/camera_sensor.h"
+@@ -745,7 +746,24 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+ 			config.outputFormats = swIsp_->formats(pixelFormat);
+ 			config.outputSizes = swIsp_->sizes(pixelFormat, format.size);
+ 			if (config.outputFormats.empty()) {
+-				continue;
++				/*
++				 * Dropping the configuration here is what
++				 * forces the soft ISP to be used in preference
++				 * to a hardware ISP that cannot be trusted.
++				 *
++				 * The soft ISP is a debayer, though, and a
++				 * monochrome sensor has nothing to debayer, so
++				 * it never offers an output format for one.
++				 * Keep the passthrough for that case: without
++				 * it such a sensor gets no configurations at
++				 * all and is dropped from the camera list.
++				 */
++				if (BayerFormat::fromMbusCode(code).order !=
++				    BayerFormat::MONO)
++					continue;
++
++				config.outputFormats = { pixelFormat };
++				config.outputSizes = config.captureSize;
+ 			}
+ 		} else {
+ 			config.outputFormats = { pixelFormat };
