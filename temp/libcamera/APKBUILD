@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=17
+pkgrel=18
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -73,6 +73,7 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
 	0015-software_isp-add-autofocus.patch
 	0016-software_isp-fix-highlight-exposure-and-awb.patch
+	0017-software_isp-af-Add-AfMode-for-manual-focus.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -196,6 +197,7 @@ df9623993bc52dfcf2495784db63dee9154477a95c03ef022aa2a49ade85ad69785fe53513c3d2da
 958ce32eeacadddd64edf6d2010deb5b679ea679d0ecbbe091a9e66b9d2cd3f2205064d2355e2536a27d8c492b4416bf3cacfdb29a5e481f2480d43ca17286f7  0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
 2eec32821cb31d308032e3b2f6e1f2c4130ca00c5b28ccff1705bcbd3eb5d4cfce3a5416c97bd09ad45b01ad8484696f4e678c9664f330a6d8f7237c70f3bf02  0015-software_isp-add-autofocus.patch
 056bec29b84f3ef681abb635d941dc3f503b2271322338549436a56e48dcb6e65f7bd752d0e7c9bce683592b443a216e3ce680af074634cf0b329bfab7936365  0016-software_isp-fix-highlight-exposure-and-awb.patch
+ed7a31918545921be75f665170a07f9dce64436ce2f3aa8287197d503088c56ab64e38113de6267a9bf3885c0e355a3c324a49cbbc3c7b5276d4745e184b205d  0017-software_isp-af-Add-AfMode-for-manual-focus.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 a2f9a14128d85f6aa8a54264b56f84ea09a5d84d6658906a21a84eceb7cd794bca32ab4f5260b449ef57ba0c999a86993601c478cc2cef8450624be358ff1256  imx320.yaml
 721ca6853a6496e694e99f05c4c9710c32198a5662350a527e3d234161c456495fa6e2f9f2391e61c8f7bb372114a199f70a06c8a57572592a0e1f124c32fce2  imx345.yaml
