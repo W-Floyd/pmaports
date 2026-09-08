@@ -1,0 +1,1119 @@
+From: William Floyd <git@notmy.space>
+Date: Mon, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] aperture: Add a camera control API
+
+Aperture has no notion of a camera control today -- the viewfinder
+documentation says as much: "The viewfinder does not contain any camera
+controls, these must be implemented yourself." That leaves applications
+with no way to offer manual focus, manual exposure or white balance,
+which is what snapshot#215 asks for.
+
+GStreamer is not much help here: pipewiresrc streams from a PipeWire node
+but does not expose that node parameters, so controls cannot be reached
+through the pipeline at all. Patching pipewiresrc to proxy params would
+benefit every PipeWire client, but it adds gst-plugins-bad as a third
+upstream for what is otherwise a self-contained change. Instead bind the
+node directly, using the id the device provider already hands us in the
+GstDevice property "object.id".
+
+Controls are discovered from SPA_PARAM_PropInfo and written with
+SPA_PARAM_Props, which gives a generic control list for free: PipeWire
+maps its six well-known properties onto SPA ids and everything else onto
+SPA_PROP_START_CUSTOM + <driver control id>, so any control a driver
+exposes is addressable, and enumerated controls arrive complete with
+their value labels. A libcamera camera with an autofocus lens therefore
+turns up as
+
+    AfTrigger      enum [AfTriggerStart=0, AfTriggerCancel=1]
+    AfMode         enum [AfModeManual=0, AfModeContinuous=2]
+    LensPosition   0..10 default 1
+
+with no libcamera-specific code in aperture. Controls are matched by name
+rather than by id, because ids outside PipeWire well-known set are only
+stable for a given driver version.
+
+Two properties of the underlying interface shape the API and are worth
+being explicit about:
+
+  - Props is declared write-only, so there is no read-back and no change
+    notification. A caller owns the values it sets, and should seed its
+    UI from CameraControl::default_value() rather than from the device.
+
+  - Controls are silently discarded while the camera is idle: the
+    libcamera plugin queues them and only merges them into a Request in
+    spa_libcamera_buffer_recycle(), under "if (impl->active)". Callers
+    have to wait until the viewfinder is Ready. This is documented on
+    set_control() because it otherwise looks exactly like a permission
+    failure.
+
+supported_controls() returns an empty list when a camera exposes nothing
+adjustable or when the node cannot be reached, so a UI built on it hides
+itself on hardware that cannot be adjusted rather than offering a slider
+that moves nothing. The PipeWire connection is opened lazily on first
+use, since most cameras are never asked for their controls.
+
+Tested on a Samsung Galaxy S9 (SDM845, IMX345 with an AK7375 focus
+actuator) running libcamera 0.7.2 and PipeWire 1.6.8, reading the
+actuator back over V4L2 to confirm the lens really moves. The front
+camera, which is fixed-focus, correctly reports no focus controls. See
+aperture/examples/controls.rs.
+
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -18,6 +18,22 @@
+ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+ 
+ [[package]]
++name = "annotate-snippets"
++version = "0.11.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "710e8eae58854cdc1790fcb56cca04d712a17be849eeb81da2a724bf4bae2bc4"
++dependencies = [
++ "anstyle",
++ "unicode-width",
++]
++
++[[package]]
++name = "anstyle"
++version = "1.0.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
++
++[[package]]
+ name = "anyhow"
+ version = "1.0.102"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -34,6 +50,7 @@
+  "gstreamer-video",
+  "gtk4",
+  "log",
++ "pipewire",
+  "rqrr",
+ ]
+ 
+@@ -206,6 +223,25 @@
+ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+ 
+ [[package]]
++name = "bindgen"
++version = "0.72.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
++dependencies = [
++ "annotate-snippets",
++ "bitflags",
++ "cexpr",
++ "clang-sys",
++ "itertools 0.13.0",
++ "proc-macro2",
++ "quote",
++ "regex",
++ "rustc-hash",
++ "shlex",
++ "syn",
++]
++
++[[package]]
+ name = "bitflags"
+ version = "2.11.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -270,6 +306,15 @@
+ ]
+ 
+ [[package]]
++name = "cexpr"
++version = "0.6.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
++dependencies = [
++ "nom 7.1.3",
++]
++
++[[package]]
+ name = "cfg-expr"
+ version = "0.20.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -286,6 +331,17 @@
+ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ 
+ [[package]]
++name = "clang-sys"
++version = "1.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
++dependencies = [
++ "glob",
++ "libc",
++ "libloading",
++]
++
++[[package]]
+ name = "concurrent-queue"
+ version = "2.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -295,6 +351,12 @@
+ ]
+ 
+ [[package]]
++name = "cookie-factory"
++version = "0.3.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
++
++[[package]]
+ name = "crossbeam-utils"
+ version = "0.8.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -729,6 +791,12 @@
+ ]
+ 
+ [[package]]
++name = "glob"
++version = "0.3.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
++
++[[package]]
+ name = "gobject-sys"
+ version = "0.22.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -805,7 +873,7 @@
+  "futures-util",
+  "glib",
+  "gstreamer-sys",
+- "itertools",
++ "itertools 0.14.0",
+  "kstring",
+  "libc",
+  "muldiv",
+@@ -1057,6 +1125,15 @@
+ 
+ [[package]]
+ name = "itertools"
++version = "0.13.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
++dependencies = [
++ "either",
++]
++
++[[package]]
++name = "itertools"
+ version = "0.14.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+@@ -1191,6 +1268,43 @@
+ ]
+ 
+ [[package]]
++name = "libloading"
++version = "0.8.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
++dependencies = [
++ "cfg-if",
++ "windows-link",
++]
++
++[[package]]
++name = "libspa"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "882f7427e7989dcc9d388b7f05c4630390a1d7696f9ffa469cd4a7a48f0b4c40"
++dependencies = [
++ "bitflags",
++ "cc",
++ "cookie-factory",
++ "libc",
++ "libspa-sys",
++ "nom 8.0.0",
++ "rustix",
++ "system-deps",
++]
++
++[[package]]
++name = "libspa-sys"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3b6e17bdaf63ed0d5e4144022624032b41fd9733112e8c74ac26fc9bf1291924"
++dependencies = [
++ "bindgen",
++ "cc",
++ "system-deps",
++]
++
++[[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1249,12 +1363,37 @@
+ ]
+ 
+ [[package]]
++name = "minimal-lexical"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
++
++[[package]]
+ name = "muldiv"
+ version = "1.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
+ 
+ [[package]]
++name = "nom"
++version = "7.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
++dependencies = [
++ "memchr",
++ "minimal-lexical",
++]
++
++[[package]]
++name = "nom"
++version = "8.0.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
++dependencies = [
++ "memchr",
++]
++
++[[package]]
+ name = "nu-ansi-term"
+ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1399,6 +1538,31 @@
+ ]
+ 
+ [[package]]
++name = "pipewire"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "bde71084c4e25959d68f1ea54daa75e5ecdb338e5caf0b5510143b79baa32d5c"
++dependencies = [
++ "bitflags",
++ "libc",
++ "libspa",
++ "libspa-sys",
++ "pipewire-sys",
++ "rustix",
++]
++
++[[package]]
++name = "pipewire-sys"
++version = "0.10.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9ce653f53e63e5b93853218092ee9a8906a5d082c92f3f1db26316955dd63ce0"
++dependencies = [
++ "bindgen",
++ "libspa-sys",
++ "system-deps",
++]
++
++[[package]]
+ name = "pkg-config"
+ version = "0.3.32"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1501,6 +1665,12 @@
+ ]
+ 
+ [[package]]
++name = "rustc-hash"
++version = "2.1.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
++
++[[package]]
+ name = "rustc_version"
+ version = "0.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1863,6 +2033,12 @@
+ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+ 
+ [[package]]
++name = "unicode-width"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
++
++[[package]]
+ name = "unicode-xid"
+ version = "0.2.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+--- a/aperture/Cargo.toml
++++ b/aperture/Cargo.toml
+@@ -19,4 +19,5 @@
+ gst-video = { workspace = true }
+ gtk = { workspace = true }
+ log = { workspace = true }
++pipewire = "0.10.1"
+ rqrr = { version = "0.10", default-features = false }
+--- a/aperture/src/camera.rs
++++ b/aperture/src/camera.rs
+@@ -1,15 +1,18 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ use std::collections::HashMap;
++use std::rc::Rc;
+ 
+ use gst::prelude::DeviceExt;
+ use gtk::glib;
+ use gtk::prelude::*;
+ use gtk::subclass::prelude::*;
+ 
++use crate::camera_control::ControlSession;
+ use crate::utils;
++use crate::{CameraControl, ControlError};
+ 
+ mod imp {
+-    use std::cell::OnceCell;
++    use std::cell::{OnceCell, RefCell};
+ 
+     use glib::Properties;
+ 
+@@ -20,6 +23,9 @@
+     pub struct Camera {
+         #[property(get, set, construct_only)]
+         device: OnceCell<gst::Device>,
++        /// Opened on first use, since most cameras are never asked for their
++        /// controls and the connection is not free.
++        pub(super) controls: RefCell<Option<Rc<ControlSession>>>,
+     }
+ 
+     #[glib::object_subclass]
+@@ -122,6 +128,86 @@
+             .unwrap_or_default()
+     }
+ 
++    /// Gets the PipeWire node id of the camera represented by `self`.
++    ///
++    /// This is the object the camera's controls live on.
++    fn node_id(&self) -> Option<u32> {
++        let properties = self.device().properties()?;
++        let value = properties.value("object.id").ok()?;
++
++        // PipeWire properties are strings, but GStreamer may already have
++        // parsed this one into an integer.
++        if let Ok(id) = value.get::<u32>() {
++            Some(id)
++        } else if let Ok(id) = value.get::<i32>() {
++            u32::try_from(id).ok()
++        } else {
++            value.get::<&str>().ok()?.parse().ok()
++        }
++    }
++
++    fn control_session(&self) -> Result<Rc<ControlSession>, ControlError> {
++        if let Some(session) = self.imp().controls.borrow().as_ref() {
++            return Ok(session.clone());
++        }
++
++        let node_id = self.node_id().ok_or(ControlError::Unavailable)?;
++        let session = Rc::new(ControlSession::new(node_id)?);
++        *self.imp().controls.borrow_mut() = Some(session.clone());
++
++        Ok(session)
++    }
++
++    /// Gets the controls the camera represented by `self` supports, such as
++    /// focus or exposure.
++    ///
++    /// The list is fixed for the lifetime of the camera. It is empty when the
++    /// camera exposes no controls, or when they could not be queried, so a UI
++    /// built from it degrades to showing nothing on hardware that cannot be
++    /// adjusted.
++    ///
++    /// # Returns
++    ///
++    /// the available [`CameraControl`][crate::CameraControl]s.
++    pub fn supported_controls(&self) -> Vec<CameraControl> {
++        match self.control_session() {
++            Ok(session) => session.controls().to_vec(),
++            Err(err) => {
++                log::debug!("No controls for {}: {err}", self.display_name());
++                Vec::new()
++            }
++        }
++    }
++
++    /// Looks up one of the camera's controls by name.
++    ///
++    /// # Returns
++    ///
++    /// the [`CameraControl`][crate::CameraControl] if the camera has one by
++    /// that name.
++    pub fn control(&self, name: &str) -> Option<CameraControl> {
++        self.supported_controls()
++            .into_iter()
++            .find(|control| control.name() == name)
++    }
++
++    /// Sets a control on the camera represented by `self`.
++    ///
++    /// The value is clamped to the control's range.
++    ///
++    /// Controls only take effect while the camera is streaming; setting one on
++    /// an idle camera is silently discarded by the driver. Callers should
++    /// therefore wait until the
++    /// [`Viewfinder`][crate::Viewfinder] is
++    /// [`Ready`][crate::ViewfinderState::Ready].
++    ///
++    /// There is no way to read a control back, so the caller owns the current
++    /// value and should start from
++    /// [`CameraControl::default_value`][crate::CameraControl::default_value].
++    pub fn set_control(&self, control: &CameraControl, value: f64) -> Result<(), ControlError> {
++        self.control_session()?.set(control, value)
++    }
++
+     /// Gets the `serial` of the device
+     ///
+     /// For newer pipewire versions this corresponds to the `target-object` of
+--- a/aperture/src/camera_control.rs
++++ b/aperture/src/camera_control.rs
+@@ -0,0 +1,422 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//! Camera controls, such as focus and exposure.
++//!
++//! GStreamer's `pipewiresrc` streams from a PipeWire node but does not expose
++//! that node's parameters, so controls cannot be reached through the pipeline.
++//! We therefore bind the node ourselves, using the id the device provider
++//! already gives us, and talk to it directly.
++//!
++//! Controls are discovered from `SPA_PARAM_PropInfo` and written with
++//! `SPA_PARAM_Props`. `Props` is declared write-only by the libcamera plugin,
++//! so there is no read-back and no change notification: a caller owns the
++//! values it sets and should seed its UI from
++//! [`CameraControl::default_value`].
++
++use std::cell::RefCell;
++use std::rc::Rc;
++use std::time::{Duration, Instant};
++
++use pipewire as pw;
++use pw::spa;
++use spa::param::ParamType;
++use spa::pod::deserialize::PodDeserializer;
++use spa::pod::serialize::PodSerializer;
++use spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
++use spa::utils::ChoiceEnum;
++
++use crate::ControlError;
++
++/// PipeWire has well-known property ids for a handful of common controls and
++/// maps everything else to `SPA_PROP_START_CUSTOM + <libcamera control id>`.
++/// Those ids are therefore only stable for a given libcamera version, which is
++/// why controls are matched on their name rather than their id.
++const SPA_PROP_START_CUSTOM: u32 = 0x1000000;
++
++/// How long to wait for the server to answer during discovery.
++const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1000);
++
++/// One of the alternatives of an enumerated [`CameraControl`].
++#[derive(Debug, Clone, PartialEq)]
++pub struct CameraControlChoice {
++    value: f64,
++    label: String,
++}
++
++impl CameraControlChoice {
++    /// The value to pass to [`Camera::set_control`][crate::Camera::set_control].
++    pub fn value(&self) -> f64 {
++        self.value
++    }
++
++    /// A human-readable name for this alternative, as reported by the driver.
++    pub fn label(&self) -> &str {
++        &self.label
++    }
++}
++
++/// A control exposed by a camera, such as focus, exposure or white balance.
++///
++/// Obtained from [`Camera::supported_controls`][crate::Camera::supported_controls].
++/// A control is either continuous, in which case [`minimum`][Self::minimum] and
++/// [`maximum`][Self::maximum] bound it, or enumerated, in which case
++/// [`choices`][Self::choices] lists the alternatives.
++#[derive(Debug, Clone, PartialEq)]
++pub struct CameraControl {
++    prop_id: u32,
++    name: String,
++    minimum: f64,
++    maximum: f64,
++    default_value: f64,
++    choices: Vec<CameraControlChoice>,
++    /// `Props` carries no type information, so the value has to be written
++    /// back with the same scalar type `PropInfo` advertised.
++    is_float: bool,
++}
++
++impl CameraControl {
++    /// The name of the control, as reported by the driver.
++    ///
++    /// For cameras driven by libcamera this is the libcamera control name, such
++    /// as `LensPosition` or `AfMode`.
++    pub fn name(&self) -> &str {
++        &self.name
++    }
++
++    /// The smallest accepted value.
++    pub fn minimum(&self) -> f64 {
++        self.minimum
++    }
++
++    /// The largest accepted value.
++    pub fn maximum(&self) -> f64 {
++        self.maximum
++    }
++
++    /// The value the control has before anything sets it.
++    ///
++    /// Because controls cannot be read back, this is what a UI should show
++    /// until the user changes it.
++    pub fn default_value(&self) -> f64 {
++        self.default_value
++    }
++
++    /// The alternatives for an enumerated control, or empty if it is
++    /// continuous.
++    pub fn choices(&self) -> &[CameraControlChoice] {
++        &self.choices
++    }
++
++    /// Whether this control takes one of a fixed set of values.
++    pub fn is_enum(&self) -> bool {
++        !self.choices.is_empty()
++    }
++
++    /// Whether this control came from the driver rather than one of PipeWire's
++    /// well-known properties.
++    pub fn is_driver_specific(&self) -> bool {
++        self.prop_id >= SPA_PROP_START_CUSTOM
++    }
++}
++
++fn as_f64(value: &Value) -> Option<f64> {
++    match value {
++        Value::Float(v) => Some(*v as f64),
++        Value::Double(v) => Some(*v),
++        Value::Int(v) => Some(*v as f64),
++        Value::Long(v) => Some(*v as f64),
++        Value::Id(v) => Some(v.0 as f64),
++        Value::Bool(v) => Some(*v as i32 as f64),
++        _ => None,
++    }
++}
++
++/// Flatten a choice into `(default, minimum, maximum, is_float)`.
++fn choice_bounds(choice: &ChoiceValue) -> Option<(f64, f64, f64, bool)> {
++    macro_rules! bounds {
++        ($choice:expr, $is_float:expr) => {{
++            let spa::utils::Choice(_flags, body) = $choice;
++            let values: Vec<f64> = match body {
++                ChoiceEnum::None(default) => vec![*default as f64],
++                ChoiceEnum::Range { default, min, max }
++                | ChoiceEnum::Step {
++                    default, min, max, ..
++                } => vec![*default as f64, *min as f64, *max as f64],
++                ChoiceEnum::Enum {
++                    default,
++                    alternatives,
++                } => {
++                    let mut values = vec![*default as f64];
++                    values.extend(alternatives.iter().map(|value| *value as f64));
++                    values
++                }
++                ChoiceEnum::Flags { default, flags } => {
++                    let mut values = vec![*default as f64];
++                    values.extend(flags.iter().map(|value| *value as f64));
++                    values
++                }
++            };
++            (values, $is_float)
++        }};
++    }
++
++    let (values, is_float) = match choice {
++        ChoiceValue::Int(choice) => bounds!(choice, false),
++        ChoiceValue::Long(choice) => bounds!(choice, false),
++        ChoiceValue::Float(choice) => bounds!(choice, true),
++        ChoiceValue::Double(choice) => bounds!(choice, true),
++        ChoiceValue::Id(choice) => {
++            let spa::utils::Choice(_flags, body) = choice;
++            let values = match body {
++                ChoiceEnum::None(default) => vec![default.0 as f64],
++                ChoiceEnum::Enum {
++                    default,
++                    alternatives,
++                } => {
++                    let mut values = vec![default.0 as f64];
++                    values.extend(alternatives.iter().map(|value| value.0 as f64));
++                    values
++                }
++                _ => return None,
++            };
++            (values, false)
++        }
++        _ => return None,
++    };
++
++    let default = *values.first()?;
++    let minimum = values.get(1).copied().unwrap_or(default);
++    let maximum = values.get(2).copied().unwrap_or(default);
++
++    Some((default, minimum, maximum, is_float))
++}
++
++/// Build a [`CameraControl`] from one `PropInfo` object.
++fn parse_prop_info(object: &Object) -> Option<CameraControl> {
++    let mut prop_id = None;
++    let mut name = None;
++    let mut bounds = None;
++    let mut choices = Vec::new();
++
++    for property in &object.properties {
++        match property.key {
++            spa::sys::SPA_PROP_INFO_id => {
++                if let Value::Id(id) = &property.value {
++                    prop_id = Some(id.0);
++                }
++            }
++            spa::sys::SPA_PROP_INFO_description => {
++                if let Value::String(description) = &property.value {
++                    name = Some(description.clone());
++                }
++            }
++            spa::sys::SPA_PROP_INFO_type => {
++                if let Value::Choice(choice) = &property.value {
++                    bounds = choice_bounds(choice);
++                }
++            }
++            spa::sys::SPA_PROP_INFO_labels => {
++                // A flat [value, label, value, label, ...] struct.
++                if let Value::Struct(items) = &property.value {
++                    let mut items = items.iter();
++                    while let (Some(value), Some(label)) = (items.next(), items.next()) {
++                        if let (Some(value), Value::String(label)) = (as_f64(value), label) {
++                            choices.push(CameraControlChoice {
++                                value,
++                                label: label.clone(),
++                            });
++                        }
++                    }
++                }
++            }
++            _ => {}
++        }
++    }
++
++    let (default_value, minimum, maximum, is_float) = bounds?;
++
++    Some(CameraControl {
++        prop_id: prop_id?,
++        name: name?,
++        minimum,
++        maximum,
++        default_value,
++        choices,
++        is_float,
++    })
++}
++
++/// A connection to one camera's PipeWire node, used to read its control list
++/// and write control values.
++///
++/// The loop is driven only around operations rather than being wired into the
++/// GLib main context, which is enough because `Props` is write-only and there
++/// is nothing to listen for once discovery is done. Reading control state back
++/// would need proper main-loop integration.
++pub(crate) struct ControlSession {
++    // Declaration order is drop order: the proxy has to go before the core and
++    // the loop that own its connection.
++    node: pw::node::Node,
++    controls: Vec<CameraControl>,
++    _core: pw::core::CoreRc,
++    _context: pw::context::ContextRc,
++    mainloop: pw::main_loop::MainLoopRc,
++}
++
++impl std::fmt::Debug for ControlSession {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("ControlSession")
++            .field("controls", &self.controls.len())
++            .finish()
++    }
++}
++
++impl ControlSession {
++    pub(crate) fn new(node_id: u32) -> Result<Self, ControlError> {
++        static INIT: std::sync::Once = std::sync::Once::new();
++        INIT.call_once(pw::init);
++
++        let mainloop =
++            pw::main_loop::MainLoopRc::new(None).map_err(|_| ControlError::Unavailable)?;
++        let context =
++            pw::context::ContextRc::new(&mainloop, None).map_err(|_| ControlError::Unavailable)?;
++        let core = context
++            .connect_rc(None)
++            .map_err(|_| ControlError::Unavailable)?;
++        let registry = core
++            .get_registry_rc()
++            .map_err(|_| ControlError::Unavailable)?;
++
++        let node_cell: Rc<RefCell<Option<pw::node::Node>>> = Rc::new(RefCell::new(None));
++        let node_cell_cb = node_cell.clone();
++        let registry_cb = registry.clone();
++
++        let listener = registry
++            .add_listener_local()
++            .global(move |global| {
++                if global.id != node_id || global.type_ != pw::types::ObjectType::Node {
++                    return;
++                }
++                match registry_cb.bind::<pw::node::Node, _>(global) {
++                    Ok(node) => *node_cell_cb.borrow_mut() = Some(node),
++                    Err(err) => log::warn!("Could not bind camera node {node_id}: {err}"),
++                }
++            })
++            .register();
++
++        Self::pump(&mainloop, DISCOVERY_TIMEOUT, || {
++            node_cell.borrow().is_some()
++        });
++        drop(listener);
++
++        let node = node_cell
++            .borrow_mut()
++            .take()
++            .ok_or(ControlError::Unavailable)?;
++
++        // Enumerate the controls the node offers.
++        let controls: Rc<RefCell<Vec<CameraControl>>> = Rc::new(RefCell::new(Vec::new()));
++        let controls_cb = controls.clone();
++        let done = Rc::new(std::cell::Cell::new(false));
++        let done_cb = done.clone();
++
++        let node_listener = node
++            .add_listener_local()
++            .param(move |_seq, id, _index, next, param| {
++                if id != ParamType::PropInfo {
++                    return;
++                }
++                let Some(param) = param else {
++                    done_cb.set(true);
++                    return;
++                };
++                match PodDeserializer::deserialize_any_from(param.as_bytes()) {
++                    Ok((_, Value::Object(object))) => {
++                        if let Some(control) = parse_prop_info(&object) {
++                            controls_cb.borrow_mut().push(control);
++                        }
++                    }
++                    _ => log::debug!("Ignoring unparseable PropInfo"),
++                }
++                if next == 0 {
++                    done_cb.set(true);
++                }
++            })
++            .register();
++
++        node.enum_params(0, Some(ParamType::PropInfo), 0, u32::MAX);
++        Self::pump(&mainloop, DISCOVERY_TIMEOUT, || done.get());
++        drop(node_listener);
++
++        let controls = Rc::try_unwrap(controls)
++            .map(RefCell::into_inner)
++            .unwrap_or_default();
++
++        log::debug!(
++            "Camera node {node_id} exposes {} control(s): {:?}",
++            controls.len(),
++            controls.iter().map(CameraControl::name).collect::<Vec<_>>()
++        );
++
++        Ok(Self {
++            node,
++            controls,
++            _core: core,
++            _context: context,
++            mainloop,
++        })
++    }
++
++    pub(crate) fn controls(&self) -> &[CameraControl] {
++        &self.controls
++    }
++
++    pub(crate) fn set(&self, control: &CameraControl, value: f64) -> Result<(), ControlError> {
++        let value = value.clamp(control.minimum, control.maximum);
++        let value = if control.is_float {
++            Value::Float(value as f32)
++        } else {
++            Value::Int(value.round() as i32)
++        };
++
++        let pod = PodSerializer::serialize(
++            std::io::Cursor::new(Vec::new()),
++            &Value::Object(Object {
++                type_: spa::sys::SPA_TYPE_OBJECT_Props,
++                id: spa::sys::SPA_PARAM_Props,
++                properties: vec![Property {
++                    key: control.prop_id,
++                    flags: PropertyFlags::empty(),
++                    value,
++                }],
++            }),
++        )
++        .map_err(|_| ControlError::NotSupported)?
++        .0
++        .into_inner();
++
++        let pod = Pod::from_bytes(&pod).ok_or(ControlError::NotSupported)?;
++        self.node.set_param(ParamType::Props, 0, pod);
++
++        // Flush the request and drain anything the server sent, without ever
++        // waiting: this runs on the main loop, and a caller dragging a slider
++        // calls it continuously. Blocking here stalls the whole UI, video
++        // included.
++        self.mainloop.loop_().iterate(pw::loop_::Timeout::None);
++
++        Ok(())
++    }
++
++    /// Drive the PipeWire loop until `finished` returns true or `timeout`
++    /// elapses.
++    fn pump(mainloop: &pw::main_loop::MainLoopRc, timeout: Duration, finished: impl Fn() -> bool) {
++        let deadline = Instant::now() + timeout;
++        while Instant::now() < deadline {
++            mainloop
++                .loop_()
++                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(10)));
++            if finished() {
++                return;
++            }
++        }
++    }
++}
+--- a/aperture/src/error.rs
++++ b/aperture/src/error.rs
+@@ -85,3 +85,25 @@
+         }
+     }
+ }
++
++/// Describes the possible errors when reading or setting a
++/// [`CameraControl`][crate::CameraControl].
++#[derive(Debug, Eq, PartialEq, Clone, Copy, glib::ErrorDomain)]
++#[error_domain(name = "ApertureControlError")]
++pub enum ControlError {
++    /// The camera does not expose controls, or they could not be reached.
++    Unavailable,
++    /// The driver rejected the value.
++    NotSupported,
++}
++
++impl std::error::Error for ControlError {}
++
++impl std::fmt::Display for ControlError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::Unavailable => f.write_str("Camera controls are not available"),
++            Self::NotSupported => f.write_str("The camera rejected the control value"),
++        }
++    }
++}
+--- a/aperture/src/lib.rs
++++ b/aperture/src/lib.rs
+@@ -19,6 +19,7 @@
+ use gst::prelude::*;
+ 
+ mod camera;
++mod camera_control;
+ mod code_detector;
+ mod device_provider;
+ mod enums;
+@@ -28,9 +29,10 @@
+ mod viewfinder;
+ 
+ pub use camera::Camera;
++pub use camera_control::{CameraControl, CameraControlChoice};
+ pub use device_provider::DeviceProvider;
+ pub use enums::{CameraLocation, VideoFormat, ViewfinderState};
+-pub use error::{CaptureError, PipewireError, ProviderError};
++pub use error::{CaptureError, ControlError, PipewireError, ProviderError};
+ pub(crate) use pipeline_tee::PipelineTee;
+ pub use utils::{is_h264_encoding_supported, is_hardware_encoding_supported};
+ pub use viewfinder::Viewfinder;
+--- a/aperture/examples/controls.rs
++++ b/aperture/examples/controls.rs
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//! Exercise the camera control API against real hardware.
++//!
++//! Lists every camera the device provider finds and the controls it exposes,
++//! then, if one of them has a focus control, streams from it and drives the
++//! lens through its range.
++//!
++//! Run it inside a graphical session, since `aperture::init` initialises GTK:
++//!
++//! ```sh
++//! WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 ./controls
++//! ```
++
++use std::time::{Duration, Instant};
++
++use gst::prelude::*;
++use gtk::gio::prelude::ListModelExt;
++use gtk::glib;
++
++/// Let the GLib main context run for a while so the device provider can
++/// deliver cameras and the pipeline can get going.
++fn pump(duration: Duration) {
++    let context = glib::MainContext::default();
++    let deadline = Instant::now() + duration;
++    while Instant::now() < deadline {
++        while context.iteration(false) {}
++        std::thread::sleep(Duration::from_millis(20));
++    }
++}
++
++/// Read the focus actuator directly, so the example checks itself rather than
++/// just reporting that a write did not fail.
++fn actuator_position() -> String {
++    let subdev = std::process::Command::new("sh")
++        .arg("-c")
++        .arg(
++            "media-ctl -d /dev/media0 -p 2>/dev/null \
++             | grep -A3 'entity.*ak7375' | grep 'device node name' | awk '{print $NF}'",
++        )
++        .output()
++        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
++        .unwrap_or_default();
++
++    if subdev.is_empty() {
++        return "<no ak7375 on this machine>".into();
++    }
++
++    std::process::Command::new("v4l2-ctl")
++        .args(["-d", &subdev, "-C", "focus_absolute"])
++        .output()
++        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
++        .unwrap_or_else(|_| "<v4l2-ctl failed>".into())
++}
++
++fn main() {
++    aperture::init("org.gnome.Snapshot.ControlsExample");
++
++    let provider = aperture::DeviceProvider::instance();
++    provider
++        .start()
++        .expect("could not start the device provider");
++    pump(Duration::from_secs(3));
++
++    let mut focus_camera = None;
++
++    for position in 0..provider.n_items() {
++        let Some(camera) = provider.camera(position) else {
++            continue;
++        };
++
++        println!("\n=== {} ===", camera.display_name());
++        let controls = camera.supported_controls();
++        if controls.is_empty() {
++            println!("  (no controls)");
++            continue;
++        }
++
++        for control in &controls {
++            if control.is_enum() {
++                let choices: Vec<String> = control
++                    .choices()
++                    .iter()
++                    .map(|choice| format!("{}={}", choice.label(), choice.value()))
++                    .collect();
++                println!("  {:<14} enum [{}]", control.name(), choices.join(", "));
++            } else {
++                println!(
++                    "  {:<14} {}..{} default {}",
++                    control.name(),
++                    control.minimum(),
++                    control.maximum(),
++                    control.default_value()
++                );
++            }
++        }
++
++        if camera.control("LensPosition").is_some() && focus_camera.is_none() {
++            focus_camera = Some(camera);
++        }
++    }
++
++    let Some(camera) = focus_camera else {
++        println!("\nNo camera with a LensPosition control; nothing more to do.");
++        return;
++    };
++
++    // The node id is what the control API binds to. It is also what we need to
++    // point a pipeline at, and it comes straight out of the device properties.
++    let node_id = camera
++        .properties()
++        .get("object.id")
++        .and_then(|value| value.get::<&str>().ok().map(str::to_string))
++        .expect("camera has no object.id");
++
++    println!(
++        "\n=== streaming from {} (node {node_id}) ===",
++        camera.display_name()
++    );
++    let pipeline = gst::parse::launch(&format!(
++        "pipewiresrc path={node_id} ! videoconvert ! fakesink"
++    ))
++    .expect("could not build the pipeline");
++    pipeline
++        .set_state(gst::State::Playing)
++        .expect("could not start the pipeline");
++
++    // Controls are discarded while the camera is idle, so wait for frames.
++    pump(Duration::from_secs(10));
++    println!("autofocus left the lens at {}", actuator_position());
++
++    let af_mode = camera.control("AfMode").expect("AfMode disappeared");
++    let manual = af_mode
++        .choices()
++        .iter()
++        .find(|choice| choice.label() == "AfModeManual")
++        .map(|choice| choice.value())
++        .expect("no AfModeManual choice");
++
++    println!("\nset AfMode = AfModeManual ({manual})");
++    camera
++        .set_control(&af_mode, manual)
++        .expect("could not set AfMode");
++    pump(Duration::from_secs(3));
++
++    let lens = camera
++        .control("LensPosition")
++        .expect("LensPosition disappeared");
++    for fraction in [0.0, 0.25, 0.5, 1.0] {
++        let value = lens.minimum() + (lens.maximum() - lens.minimum()) * fraction;
++        camera
++            .set_control(&lens, value)
++            .expect("could not set LensPosition");
++        pump(Duration::from_secs(4));
++        println!("set LensPosition = {value:<5} -> {}", actuator_position());
++    }
++
++    // Hand the lens back to the autofocus rather than leaving it parked.
++    println!("\nrestoring continuous autofocus");
++    if let Some(continuous) = af_mode
++        .choices()
++        .iter()
++        .find(|choice| choice.label() == "AfModeContinuous")
++    {
++        let _ = camera.set_control(&af_mode, continuous.value());
++        pump(Duration::from_secs(6));
++        println!("autofocus took over again at {}", actuator_position());
++    }
++
++    let _ = pipeline.set_state(gst::State::Null);
++}
