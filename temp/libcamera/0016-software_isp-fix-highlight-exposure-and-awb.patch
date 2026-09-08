@@ -1,0 +1,310 @@
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -47,6 +47,15 @@
+ 	 * \brief Holds the sharpness of an image
+ 	 */
+ 	uint64_t sharpness;
++	/**
++	 * \brief Number of samples that contributed to \ref sum_
++	 *
++	 * Saturated samples are left out of \ref sum_ so that clipped
++	 * highlights cannot skew the AWB gains, so this is not the same as
++	 * the number of samples in \ref yHistogram and must be used as the
++	 * divisor whenever \ref sum_ is normalised.
++	 */
++	uint64_t sumCount;
+ };
+ 
+ } /* namespace libcamera */
+--- a/src/ipa/simple/algorithms/agc.cpp
++++ b/src/ipa/simple/algorithms/agc.cpp
+@@ -61,11 +61,29 @@
+  */
+ static constexpr float kDefaultExpMaxStep = 0.15;
+ 
++/*
++ * Maximum multiplicative correction for a single update while acquiring, i.e.
++ * while the exposure is still far from the target. 4.0 is two stops per
++ * update, which brings any realistic scene in within a couple of updates
++ * without the brightness visibly jumping around.
++ */
++static constexpr float kDefaultExpMaxRatio = 4.0;
++
++/*
++ * MSV error beyond which the loop switches from regulating to acquiring. The
++ * proportional term is a good regulator close to the target but its step is
++ * bounded by maxStep regardless of how wrong the exposure is, which makes
++ * acquisition take dozens of updates; statistics only arrive every
++ * kStatPerNumFrames frames, so that is seconds of a badly exposed preview.
++ */
++static constexpr float kAcquireError = 0.5;
++
+ Agc::Agc()
+ 	: exposureOptimal_(kExposureOptimal),
+ 	  exposureSatisfactory_(kDefaultExposureSatisfactory),
+ 	  proportionalGain_(kDefaultExpProportionalGain),
+-	  maxStep_(kDefaultExpMaxStep)
++	  maxStep_(kDefaultExpMaxStep),
++	  maxRatio_(kDefaultExpMaxRatio)
+ {
+ }
+ 
+@@ -94,16 +112,22 @@
+ 	if (step.has_value())
+ 		maxStep_ = step.value();
+ 
++	auto ratio = tuningData["maxRatio"].get<float>();
++	if (ratio.has_value())
++		maxRatio_ = std::max(ratio.value(), 1.0f);
++
+ 	LOG(IPASoftExposure, Debug)
+ 		<< "AGC: optimal " << exposureOptimal_
+ 		<< ", satisfactory " << exposureSatisfactory_
+ 		<< ", proportional gain " << proportionalGain_
+-		<< ", max step " << maxStep_;
++		<< ", max step " << maxStep_
++		<< ", max ratio " << maxRatio_;
+ 
+ 	return 0;
+ }
+ 
+-void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV)
++void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
++			 double exposureMSV, double meanY)
+ {
+ 	int32_t &exposure = frameContext.sensor.exposure;
+ 	double &again = frameContext.sensor.gain;
+@@ -113,15 +137,46 @@
+ 	if (std::abs(error) <= exposureSatisfactory_)
+ 		return;
+ 
+-	/*
+-	 * Compute a proportional correction factor. The sign of the error
+-	 * determines the direction: positive error means too dark (increase),
+-	 * negative means too bright (decrease).
+-	 */
+-	float step = std::clamp(static_cast<float>(error) * proportionalGain_,
+-				-maxStep_, maxStep_);
+-	float factor = 1.0f + step;
++	double factor;
+ 
++	if (std::abs(error) > kAcquireError) {
++		/*
++		 * Far from the target, so aim straight at it rather than
++		 * stepping towards it. The mean luminance is proportional to
++		 * the total exposure as long as the scene is not clipping, so
++		 * the ratio of where we want it to where it is gives the
++		 * correction directly.
++		 *
++		 * A clipping scene reads darker than it really is, which makes
++		 * this ratio too conservative rather than too aggressive: the
++		 * loop then converges over a few updates instead of one, and
++		 * never overshoots into a dark frame.
++		 */
++		const double black = context.activeState.blc.level;
++		const double targetY = black +
++				       (exposureOptimal_ - 0.5) / kExposureBinsCount *
++					       (255.0 - black);
++		const double num = std::max(targetY - black, 1.0);
++		const double den = std::max(meanY - black, 1.0);
++
++		/*
++		 * Damp it slightly. Mapping an MSV target onto a mean
++		 * luminance is not exact, so approach the target from one side
++		 * and let the proportional term below settle the last of it --
++		 * that term alone decides the steady state, which is why this
++		 * shortcut cannot change how bright a converged image is.
++		 */
++		factor = std::pow(num / den, 0.85);
++		factor = std::clamp<double>(factor, 1.0 / maxRatio_, maxRatio_);
++	} else {
++		/*
++		 * Close to the target: a proportional correction, which
++		 * converges smoothly without overshooting.
++		 */
++		factor = 1.0 + std::clamp(static_cast<float>(error) * proportionalGain_,
++					  -maxStep_, maxStep_);
++	}
++
+ 	if (factor > 1.0f) {
+ 		/* Scene too dark: increase exposure first, then gain. */
+ 		if (exposure < context.configuration.agc.exposureMax) {
+@@ -157,7 +212,7 @@
+ 	context.activeState.agc.again = again;
+ 
+ 	LOG(IPASoftExposure, Debug)
+-		<< "exposureMSV " << exposureMSV
++		<< "exposureMSV " << exposureMSV << " meanY " << meanY
+ 		<< " error " << error << " factor " << factor
+ 		<< " exp " << exposure << " again " << again;
+ }
+@@ -227,7 +282,24 @@
+ 	}
+ 
+ 	float exposureMSV = (denom == 0 ? 0 : static_cast<float>(num) / denom);
+-	updateExposure(context, frameContext, exposureMSV);
++
++	/*
++	 * Mean luminance over the whole histogram, used to size a correction
++	 * when the exposure is far from the target. The five coarse bins above
++	 * are too blunt for that: they saturate, so a completely blown frame
++	 * and a mildly bright one ask for corrections of a similar size.
++	 */
++	constexpr unsigned int kBinWidth = 256 / SwIspStats::kYHistogramSize;
++	uint64_t ySum = 0;
++	uint64_t yCount = 0;
++	for (unsigned int i = 0; i < SwIspStats::kYHistogramSize; i++) {
++		ySum += static_cast<uint64_t>(histogram[i]) *
++			(i * kBinWidth + kBinWidth / 2);
++		yCount += histogram[i];
++	}
++	double meanY = yCount ? static_cast<double>(ySum) / yCount : 0.0;
++
++	updateExposure(context, frameContext, exposureMSV, meanY);
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Agc, "Agc")
+--- a/src/ipa/simple/algorithms/agc.h
++++ b/src/ipa/simple/algorithms/agc.h
+@@ -27,12 +27,14 @@
+ 		     ControlList &metadata) override;
+ 
+ private:
+-	void updateExposure(IPAContext &context, IPAFrameContext &frameContext, double exposureMSV);
++	void updateExposure(IPAContext &context, IPAFrameContext &frameContext,
++			    double exposureMSV, double meanY);
+ 
+ 	float exposureOptimal_;
+ 	float exposureSatisfactory_;
+ 	float proportionalGain_;
+ 	float maxStep_;
++	float maxRatio_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -59,13 +59,28 @@
+ 		return;
+ 
+ 	/*
++	 * Saturated samples do not contribute to the sums, so if almost
++	 * everything is clipping there is too little unclipped data left to
++	 * derive meaningful channel ratios from. Keep the gains as they are
++	 * rather than chase the handful of remaining samples.
++	 */
++	const uint64_t nSamples = std::accumulate(
++		histogram.begin(), histogram.end(), uint64_t(0));
++	if (stats->sumCount * 16 < nSamples) {
++		LOG(IPASoftAwb, Debug)
++			<< "Only " << stats->sumCount << " of " << nSamples
++			<< " samples unsaturated, keeping the previous gains";
++		return;
++	}
++
++	/*
+ 	 * Black level must be subtracted to get the correct AWB ratios, they
+ 	 * would be off if they were computed from the whole brightness range
+-	 * rather than from the sensor range.
++	 * rather than from the sensor range. The divisor is the number of
++	 * samples that actually contributed to the sums, which is not the
++	 * number of samples in the histogram.
+ 	 */
+-	const uint64_t nPixels = std::accumulate(
+-		histogram.begin(), histogram.end(), uint64_t(0));
+-	const uint64_t offset = blackLevel * nPixels;
++	const uint64_t offset = blackLevel * stats->sumCount;
+ 	const uint64_t minValid = 1;
+ 	/*
+ 	 * Make sure the sums are at least minValid, while preventing unsigned
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -172,6 +172,15 @@
+ static constexpr unsigned int kGreenYMul = 150; /* 0.587 * 256 */
+ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
+ 
++/*
++ * Level at which a sample counts as saturated, as a fraction of an 8 bit
++ * full scale; the accumulation macro scales it by the pixel divisor so that
++ * it lands in the same place for every supported bit depth. Sensors start to
++ * compress somewhat below their nominal maximum, so this leaves a little
++ * headroom rather than testing for the maximum code itself.
++ */
++static constexpr unsigned int kSaturated = 248;
++
+ #define SWSTATS_START_LINE_STATS(pixel_t) \
+ 	pixel_t r, g, g2, b;              \
+ 	uint64_t yVal;                    \
+@@ -179,6 +188,7 @@
+ 	uint64_t sumR = 0;                \
+ 	uint64_t sumG = 0;                \
+ 	uint64_t sumB = 0;                \
++	uint64_t sumCount = 0;            \
+ 	pixel_t g0 = 0, g1 = 0;           \
+ 	unsigned int gCount = 0;          \
+ 	uint64_t sharpness = 0;           \
+@@ -186,9 +196,22 @@
+ 	unsigned int xSpan = window_.width;
+ 
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
+-	sumR += r;                         \
+-	sumG += g;                         \
+-	sumB += b;                         \
++	/*                                                                        \
++	 * Keep saturated samples out of the channel sums. The sums only feed     \
++	 * the AWB gains, which are ratios between channels: a clipped channel    \
++	 * stops growing while the others keep rising, so the ratios collapse     \
++	 * towards unity. Green saturates first on a Bayer sensor, which makes    \
++	 * a blown scene come out green. The luminance histogram below must       \
++	 * still count them, as AGC has to see that the scene is clipping.        \
++	 */                                                                       \
++	if (r < kSaturated * (div) &&      \
++	    g < kSaturated * (div) &&      \
++	    b < kSaturated * (div)) {      \
++		sumR += r;                 \
++		sumG += g;                 \
++		sumB += b;                 \
++		sumCount++;                \
++	}                                  \
+                                            \
+ 	yVal = r * kRedYMul;               \
+ 	yVal += g * kGreenYMul;            \
+@@ -213,6 +236,7 @@
+ 	stats.sum_.r() += sumR;     \
+ 	stats.sum_.g() += sumG;     \
+ 	stats.sum_.b() += sumB;     \
++	stats.sumCount += sumCount; \
+ 	/* Normalise by brightness so the metric tracks focus, not exposure. */ \
+ 	if (sumG)                   \
+ 		stats.sharpness += 1000 * sharpness / sumG;
+@@ -449,6 +473,7 @@
+ 		s.sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		s.yHistogram.fill(0);
+ 		s.sharpness = 0;
++		s.sumCount = 0;
+ 	}
+ }
+ 
+@@ -467,14 +492,22 @@
+ 		sharedStats_->sum_ = RGB<uint64_t>({ 0, 0, 0 });
+ 		sharedStats_->yHistogram.fill(0);
+ 		sharedStats_->sharpness = 0;
++		sharedStats_->sumCount = 0;
+ 		for (const auto &s : stats_) {
+ 			sharedStats_->sum_ += s.sum_;
+ 			for (unsigned int j = 0; j < SwIspStats::kYHistogramSize; j++)
+ 				sharedStats_->yHistogram[j] += s.yHistogram[j];
+ 			sharedStats_->sharpness += s.sharpness;
++			sharedStats_->sumCount += s.sumCount;
+ 		}
+ 
+ 		sharedStats_->sum_ >>= sumShift_;
++		/*
++		 * Scale the divisor the same way as the sums it belongs to, so
++		 * that a black level multiplied by the count stays in the same
++		 * domain as sum_ for the deeper bit depths that shift.
++		 */
++		sharedStats_->sumCount >>= sumShift_;
+ 	}
+ 
+ 	sharedStats_->valid = valid;
