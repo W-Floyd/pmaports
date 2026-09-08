@@ -46,4 +46,6 @@ algorithms:
       # settles.
       proportionalGain: 0.04
       maxStep: 0.15
+  # The rear camera has an AK7375 focus actuator.
+  - Af:
 ...
