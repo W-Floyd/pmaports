@@ -46,4 +46,6 @@ algorithms:
       # settles.
       proportionalGain: 0.04
       maxStep: 0.15
+  # The front camera has an AK7372 focus actuator on GENI i2c7 at 0x0c.
+  - Af:
 ...
