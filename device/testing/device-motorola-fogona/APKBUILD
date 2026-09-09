@@ -6,7 +6,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=0
+pkgrel=1
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -31,5 +31,5 @@ package() {
 
 sha512sums="
 85fc2b025a2dec37755eb78fecbc8ee1cb2d2690ea0cdb7d2833d98a7542d925b5ad7d718be1ca16c8f961789b3b1f130e57cceb7f8a4db20842a09223a76166  deviceinfo
-4e8e3fba36c3a566026ddb71a9e6f7a28469f9e849595f2a16a0e176564db025e1058f9f3ac53f76fe634746893ec59b2fe3c54a23e8fd19b576fd2f41c29f8e  kernel-cmdline.conf
+4be53d4cc75044ec699fbef79d4a60b933d954e3bf099fdc52b45b9849d27c512a059d95716b8b8f8a8b8a3c19021c44759d0de53c5b4d582b5656725b2a6d76  kernel-cmdline.conf
 "
