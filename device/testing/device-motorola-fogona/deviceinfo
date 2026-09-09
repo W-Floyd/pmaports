@@ -48,11 +48,17 @@ deviceinfo_flash_fastboot_partition_rootfs="userdata"
 deviceinfo_generate_bootimg="true"
 deviceinfo_rootfs_image_sector_size="4096"
 deviceinfo_flash_pagesize="4096"
-# Downstream builds boot with BOARD_BOOT_HEADER_VERSION := 4 (GKI: ramdisk in
-# init_boot, recovery in vendor_boot). No device in pmaports uses v4 -- the
-# highest anywhere is 2 -- so start at 2, as tb128fu does, and revisit if the
-# bootloader refuses the image.
-deviceinfo_header_version="2"
+# Downstream builds BOARD_BOOT_HEADER_VERSION := 4 and this bootloader appears
+# to require it: a v2 image flashes to `boot` without complaint but the
+# bootloader then reports "Boot Failed" with no kernel output at all -- not even
+# earlycon or fbcon -- which points at a failure before handoff rather than a
+# kernel problem. Tried twice.
+#
+# At >= 3 boot-deploy builds boot.img as kernel-only and puts the dtb, ramdisk
+# and cmdline in vendor_boot.img. That matters here beyond format correctness:
+# it never touches `init_boot`, which this bootloader refuses to accept modified
+# images for. Both `boot` and `vendor_boot` are flashable.
+deviceinfo_header_version="4"
 # VERIFIED against the stock vendor_boot.img header (CC U1TF34.100-35):
 #   kernel_addr=0x8000  ramdisk_addr=0x1000000  tags_addr=0x100
 #   dtb_addr=0x1f00000  page_size=4096
@@ -64,3 +70,15 @@ deviceinfo_flash_offset_ramdisk="0x01000000"
 deviceinfo_flash_offset_second="0x00000000"
 deviceinfo_flash_offset_tags="0x00000100"
 deviceinfo_flash_offset_dtb="0x01f00000"
+
+# boot-deploy's header_version >= 3 path does NOT pass --base to mkbootimg, and
+# ignores deviceinfo_flash_offset_base (that is only used by the v2 path). Modern
+# mkbootimg then defaults --base to 0x10000000, which put every address in
+# vendor_boot 0x10000000 above stock's:
+#
+#   ours   kernel 0x10008000  ramdisk 0x11000000  tags 0x10000100  dtb 0x11f00000
+#   stock  kernel 0x00008000  ramdisk 0x01000000  tags 0x00000100  dtb 0x01f00000
+#
+# mkbootimg's default per-field offsets already match this device, so only the
+# base needs correcting.
+deviceinfo_bootimg_custom_args="--base 0x00000000"

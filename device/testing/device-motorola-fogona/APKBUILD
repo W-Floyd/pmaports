@@ -6,14 +6,17 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=1
+pkgrel=5
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
+# android-tools rather than the standalone mkbootimg: at header_version 4
+# boot-deploy uses modern mkbootimg's --vendor_boot/--vendor_ramdisk syntax,
+# which the mkbootimg fork does not have.
 depends="
 	linux-postmarketos-qcom-sm6225
-	mkbootimg
+	android-tools
 	postmarketos-base
 "
 makedepends="devicepkg-dev"
@@ -30,6 +33,6 @@ package() {
 }
 
 sha512sums="
-85fc2b025a2dec37755eb78fecbc8ee1cb2d2690ea0cdb7d2833d98a7542d925b5ad7d718be1ca16c8f961789b3b1f130e57cceb7f8a4db20842a09223a76166  deviceinfo
+adfc4c221db66fd5bd15e1971c23dcdc675fdc4ebf193b5e9f1e71726005b902b3e3c2ff6845536497264c0730339ba680171d8e401ad2a01d6f0687ccb9e99f  deviceinfo
 4be53d4cc75044ec699fbef79d4a60b933d954e3bf099fdc52b45b9849d27c512a059d95716b8b8f8a8b8a3c19021c44759d0de53c5b4d582b5656725b2a6d76  kernel-cmdline.conf
 "
