@@ -48,4 +48,19 @@ algorithms:
       maxStep: 0.15
   # The rear camera has an AK7375 focus actuator.
   - Af:
+  # Samsung's Dual Aperture. The two f-numbers are real: the phone's own HAL
+  # reports android.lens.info.availableApertures = [1.50, 2.40] for this
+  # camera only, and the blades are driven by a second AK7372 at 0x4c.
+  #
+  # The actuator codes below are PLACEHOLDERS, not calibration. Driving that
+  # chip across its whole range moves the light reaching the sensor by less
+  # than 1%, so the blades are not travelling yet and the codes that select
+  # each stop are unknown. Correct them once an i2c trace from a stock
+  # session shows the real sequence.
+  - Aperture:
+      apertures:
+        - aperture: 1.5
+          code: 0
+        - aperture: 2.4
+          code: 1023
 ...
