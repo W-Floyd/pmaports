@@ -1,4 +1,4 @@
-From fe3c85afe64497862c9dcaf2795a1463e994107c Mon Sep 17 00:00:00 2001
+From 0044c4fdefc7087b45385869d97d635d8d4e75f2 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
 Subject: [PATCH 20/20] ipa: soft: Add an Aperture algorithm
@@ -22,19 +22,20 @@ aperture UI rather than offering one that moves nothing.
 
 Signed-off-by: William Floyd <git@notmy.space>
 ---
- src/ipa/simple/algorithms/aperture.cpp | 293 +++++++++++++++++++++++++
+ src/ipa/simple/algorithms/aperture.cpp | 299 +++++++++++++++++++++++++
  src/ipa/simple/algorithms/aperture.h   |  72 ++++++
  src/ipa/simple/algorithms/meson.build  |   1 +
- 3 files changed, 366 insertions(+)
+ src/libcamera/control_ids_core.yaml    |  40 ++--
+ 4 files changed, 395 insertions(+), 17 deletions(-)
  create mode 100644 src/ipa/simple/algorithms/aperture.cpp
  create mode 100644 src/ipa/simple/algorithms/aperture.h
 
 diff --git a/src/ipa/simple/algorithms/aperture.cpp b/src/ipa/simple/algorithms/aperture.cpp
 new file mode 100644
-index 0000000..bc209e1
+index 0000000..4dc49fb
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/aperture.cpp
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,299 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd <git@notmy.space>
@@ -46,7 +47,9 @@ index 0000000..bc209e1
 +
 +#include <algorithm>
 +#include <cmath>
++#include <sstream>
 +#include <stdint.h>
++#include <utility>
 +#include <vector>
 +
 +#include <libcamera/base/log.h>
@@ -107,7 +110,7 @@ index 0000000..bc209e1
 +	}
 +
 +	const ValueNode &list = tuningData["apertures"];
-+	if (list.size()) {
++	if (list.isList()) {
 +		std::vector<std::pair<double, int32_t>> entries;
 +
 +		for (const auto &entry : list.asList()) {
@@ -183,18 +186,6 @@ index 0000000..bc209e1
 +		LOG(IPASoftAperture, Info)
 +			<< "Discrete aperture: " << os.str()
 +			<< ", default f/" << fNumberDef_;
-+
-+		/*
-+		 * Advertise the exact set. ControlInfo::values() is what tells
-+		 * an application to draw a set of choices instead of a slider.
-+		 */
-+		std::vector<ControlValue> values;
-+		for (double f : apertures_)
-+			values.push_back(ControlValue(static_cast<float>(f)));
-+
-+		context.ctrlMap[&controls::LensAperture] =
-+			ControlInfo(Span<const ControlValue>(values),
-+				    ControlValue(static_cast<float>(fNumberDef_)));
 +	} else {
 +		LOG(IPASoftAperture, Info)
 +			<< "Continuous aperture f/" << fNumberMin_
@@ -202,12 +193,28 @@ index 0000000..bc209e1
 +			<< " (actuator codes " << irisCode(fNumberMin_)
 +			<< ".." << irisCode(fNumberMax_) << ")"
 +			<< ", default f/" << fNumberDef_;
-+
-+		context.ctrlMap[&controls::LensAperture] =
-+			ControlInfo(static_cast<float>(fNumberMin_),
-+				    static_cast<float>(fNumberMax_),
-+				    static_cast<float>(fNumberDef_));
 +	}
++
++	/*
++	 * Both kinds advertise a plain min/max range.
++	 *
++	 * Listing the exact stops in ControlInfo::values() would describe a
++	 * discrete mechanism far better, but consumers assume that a control
++	 * carrying values() is an int32 enumeration: cam's own control lister
++	 * calls def().get<int32_t>() on it, which asserts on a float and
++	 * aborts. Advertising the set that way breaks existing applications.
++	 *
++	 * A request between two stops is snapped to the nearest one and the
++	 * metadata reports what was actually selected, so a range stays
++	 * truthful for discrete hardware; it just cannot tell an application
++	 * to draw two buttons rather than a slider. Publishing the set as a
++	 * float array property, the way Android's
++	 * android.lens.info.availableApertures does, is the way to fix that.
++	 */
++	context.ctrlMap[&controls::LensAperture] =
++		ControlInfo(static_cast<float>(fNumberMin_),
++			    static_cast<float>(fNumberMax_),
++			    static_cast<float>(fNumberDef_));
 +
 +	return 0;
 +}
@@ -416,3 +423,56 @@ index 8950b00..a74adf6 100644
      'af.cpp',
 +    'aperture.cpp',
  ])
+diff --git a/src/libcamera/control_ids_core.yaml b/src/libcamera/control_ids_core.yaml
+index 6f87091..4af6abd 100644
+--- a/src/libcamera/control_ids_core.yaml
++++ b/src/libcamera/control_ids_core.yaml
+@@ -1386,25 +1386,31 @@ controls:
+         entrance pupil, so smaller values admit more light. Setting a smaller
+         f-number opens the iris.
+ 
+-        Cameras come in two kinds, and both are reported through this one
+-        control. Which kind a camera is can be told from the ControlInfo:
++        Cameras come in two kinds and both are reported through this one
++        control, which always advertises a min() and max() f-number.
+ 
+-        \li A camera with a continuously variable iris reports a min() and a
+-        max() f-number, and any value in that range may be requested.
++        \li A camera with a continuously variable iris honours any value in
++        that range.
+ 
+         \li A camera with a fixed set of apertures, such as a phone module
+-        with a two-position blade mechanism, reports the available f-numbers
+-        in values(). Only those values may be requested. min() and max() are
+-        the smallest and largest of them.
+-
+-        A camera whose aperture cannot be changed at all does not advertise
+-        this control. Applications should therefore treat its absence, rather
+-        than a single-valued range, as "no aperture control", and should
+-        consult values() before offering a continuous slider.
+-
+-        When a requested value cannot be honoured exactly, because it falls
+-        between two available apertures, the implementation selects the
+-        nearest available one and reports what it actually selected in the
+-        request metadata.
++        with a two-position blade mechanism, reports the smallest and largest
++        of its stops as the range. A request that falls between two stops
++        selects the nearest one.
++
++        In both cases the request metadata reports the aperture that was
++        actually selected, which for discrete hardware is not necessarily the
++        one that was requested. Applications that care should read it back
++        rather than assume the request was honoured exactly.
++
++        A camera whose aperture cannot be changed does not advertise this
++        control at all, so its absence, rather than a single-valued range,
++        means "no aperture control".
++
++        \todo The exact stops of a discrete mechanism are not currently
++        discoverable. They cannot be placed in ControlInfo::values(), because
++        consumers take a control carrying values() to be an int32
++        enumeration. Publishing them as a float array property, as Android's
++        android.lens.info.availableApertures does, would let an application
++        offer the real choices instead of a slider.
+ 
+ ...
