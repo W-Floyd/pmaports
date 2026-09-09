@@ -1,0 +1,360 @@
+From e8fbcddac247b36e67db40a7d51d7010809f8660 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 9 Sep 2026 17:29:50 +0000
+Subject: [PATCH 18/20] libcamera: Add a LensAperture control and iris-capable
+ lenses
+
+Cameras with a controllable aperture come in two kinds and libcamera
+could express neither: there was no aperture control at all, and
+CameraLens rejected any lens entity that did not implement
+V4L2_CID_FOCUS_ABSOLUTE.
+
+Add controls::LensAperture, an f-number. One control covers both kinds
+of hardware because ControlInfo can already describe either: a
+continuously variable iris reports a min/max range, while a mechanism
+with a fixed set of detents reports them in values(). An application can
+tell which it is by looking at values(), and a camera with a fixed
+aperture advertises nothing at all.
+
+Teach CameraLens about V4L2_CID_IRIS_ABSOLUTE, and require a lens to
+implement focus or iris rather than focus specifically. A phone module
+with a variable aperture typically wires the blade mechanism as its own
+device, separate from the focus actuator, so demanding focus would
+reject it.
+
+Since a sensor can now have two useful lens entities, sort them by what
+they can do instead of assuming the first one found is the focus lens.
+One entity may be both, so the two pointers may alias, and ownership
+moves to a vector.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ include/libcamera/internal/camera_lens.h      |  7 +++
+ include/libcamera/internal/camera_sensor.h    |  1 +
+ src/libcamera/camera_lens.cpp                 | 59 ++++++++++++++-----
+ src/libcamera/control_ids_core.yaml           | 31 ++++++++++
+ src/libcamera/sensor/camera_sensor_legacy.cpp | 48 +++++++++++++--
+ src/libcamera/sensor/camera_sensor_raw.cpp    | 48 +++++++++++++--
+ 6 files changed, 166 insertions(+), 28 deletions(-)
+
+diff --git a/include/libcamera/internal/camera_lens.h b/include/libcamera/internal/camera_lens.h
+index f347c5e..1029417 100644
+--- a/include/libcamera/internal/camera_lens.h
++++ b/include/libcamera/internal/camera_lens.h
+@@ -28,6 +28,10 @@ public:
+ 
+ 	int init();
+ 	int setFocusPosition(int32_t position);
++	int setIrisPosition(int32_t position);
++
++	bool hasFocus() const { return hasFocus_; }
++	bool hasIris() const { return hasIris_; }
+ 
+ 	const std::string &model() const { return model_; }
+ 
+@@ -45,6 +49,9 @@ private:
+ 	std::unique_ptr<V4L2Subdevice> subdev_;
+ 
+ 	std::string model_;
++
++	bool hasFocus_ = false;
++	bool hasIris_ = false;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/include/libcamera/internal/camera_sensor.h b/include/libcamera/internal/camera_sensor.h
+index e6b72d2..36d15c4 100644
+--- a/include/libcamera/internal/camera_sensor.h
++++ b/include/libcamera/internal/camera_sensor.h
+@@ -48,6 +48,7 @@ public:
+ 	virtual V4L2Subdevice *device() = 0;
+ 
+ 	virtual CameraLens *focusLens() = 0;
++	virtual CameraLens *irisLens() = 0;
+ 
+ 	virtual const std::vector<unsigned int> &mbusCodes() const = 0;
+ 	virtual std::vector<Size> sizes(unsigned int mbusCode) const = 0;
+diff --git a/src/libcamera/camera_lens.cpp b/src/libcamera/camera_lens.cpp
+index ccc2a6a..6c8cd6c 100644
+--- a/src/libcamera/camera_lens.cpp
++++ b/src/libcamera/camera_lens.cpp
+@@ -86,6 +86,9 @@ int CameraLens::init()
+  */
+ int CameraLens::setFocusPosition(int32_t position)
+ {
++	if (!hasFocus_)
++		return -ENODEV;
++
+ 	ControlList lensCtrls(subdev_->controls());
+ 	lensCtrls.set(V4L2_CID_FOCUS_ABSOLUTE, static_cast<int32_t>(position));
+ 
+@@ -95,33 +98,57 @@ int CameraLens::setFocusPosition(int32_t position)
+ 	return 0;
+ }
+ 
+-int CameraLens::validateLensDriver()
++/**
++ * \brief Set the aperture of the lens to a specific position
++ * \param[in] position The iris position, in the units of the lens driver's
++ * V4L2_CID_IRIS_ABSOLUTE control
++ *
++ * The meaning of \a position is driver-specific. Mapping it to a physical
++ * f-number is the job of whoever holds the calibration, normally the IPA.
++ *
++ * \return 0 on success, -ENODEV if the lens has no iris, or -EINVAL otherwise
++ */
++int CameraLens::setIrisPosition(int32_t position)
+ {
+-	int ret = 0;
+-	static constexpr uint32_t mandatoryControls[] = {
+-		V4L2_CID_FOCUS_ABSOLUTE,
+-	};
++	if (!hasIris_)
++		return -ENODEV;
++
++	ControlList lensCtrls(subdev_->controls());
++	lensCtrls.set(V4L2_CID_IRIS_ABSOLUTE, static_cast<int32_t>(position));
++
++	if (subdev_->setControls(&lensCtrls))
++		return -EINVAL;
+ 
++	return 0;
++}
++
++int CameraLens::validateLensDriver()
++{
+ 	const ControlInfoMap &controls = subdev_->controls();
+-	for (uint32_t ctrl : mandatoryControls) {
+-		if (!controls.count(ctrl)) {
+-			LOG(CameraLens, Error)
+-				<< "Mandatory V4L2 control " << utils::hex(ctrl)
+-				<< " not available";
+-			ret = -EINVAL;
+-		}
+-	}
+ 
+-	if (ret) {
++	hasFocus_ = controls.count(V4L2_CID_FOCUS_ABSOLUTE);
++	hasIris_ = controls.count(V4L2_CID_IRIS_ABSOLUTE);
++
++	/*
++	 * A lens entity is useful if it can move focus, change the aperture,
++	 * or both. Requiring focus unconditionally would reject an aperture
++	 * mechanism that is a separate device from the focus actuator, which
++	 * is how phone modules with a variable aperture are usually wired.
++	 */
++	if (!hasFocus_ && !hasIris_) {
++		LOG(CameraLens, Error)
++			<< "Lens supports neither "
++			<< utils::hex(V4L2_CID_FOCUS_ABSOLUTE) << " (focus) nor "
++			<< utils::hex(V4L2_CID_IRIS_ABSOLUTE) << " (iris)";
+ 		LOG(CameraLens, Error)
+ 			<< "The lens kernel driver needs to be fixed";
+ 		LOG(CameraLens, Error)
+ 			<< "See Documentation/lens_driver_requirements.rst in"
+ 			<< " the libcamera sources for more information";
+-		return ret;
++		return -EINVAL;
+ 	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ /**
+diff --git a/src/libcamera/control_ids_core.yaml b/src/libcamera/control_ids_core.yaml
+index 89991d0..6f87091 100644
+--- a/src/libcamera/control_ids_core.yaml
++++ b/src/libcamera/control_ids_core.yaml
+@@ -1376,4 +1376,35 @@ controls:
+         The nominal range is [-180, 180], where 0° leaves hues unchanged and the
+         range wraps around continuously, with 180° == -180°.
+ 
++  - LensAperture:
++      type: float
++      direction: inout
++      description: |
++        Set and report the lens aperture, as an f-number.
++
++        The value is the ratio of the lens focal length to the diameter of the
++        entrance pupil, so smaller values admit more light. Setting a smaller
++        f-number opens the iris.
++
++        Cameras come in two kinds, and both are reported through this one
++        control. Which kind a camera is can be told from the ControlInfo:
++
++        \li A camera with a continuously variable iris reports a min() and a
++        max() f-number, and any value in that range may be requested.
++
++        \li A camera with a fixed set of apertures, such as a phone module
++        with a two-position blade mechanism, reports the available f-numbers
++        in values(). Only those values may be requested. min() and max() are
++        the smallest and largest of them.
++
++        A camera whose aperture cannot be changed at all does not advertise
++        this control. Applications should therefore treat its absence, rather
++        than a single-valued range, as "no aperture control", and should
++        consult values() before offering a continuous slider.
++
++        When a requested value cannot be honoured exactly, because it falls
++        between two available apertures, the implementation selects the
++        nearest available one and reports what it actually selected in the
++        request metadata.
++
+ ...
+diff --git a/src/libcamera/sensor/camera_sensor_legacy.cpp b/src/libcamera/sensor/camera_sensor_legacy.cpp
+index 6a68382..cf87008 100644
+--- a/src/libcamera/sensor/camera_sensor_legacy.cpp
++++ b/src/libcamera/sensor/camera_sensor_legacy.cpp
+@@ -67,7 +67,8 @@ public:
+ 	const MediaEntity *entity() const override { return entity_; }
+ 	V4L2Subdevice *device() override { return subdev_.get(); }
+ 
+-	CameraLens *focusLens() override { return focusLens_.get(); }
++	CameraLens *focusLens() override { return focusLens_; }
++	CameraLens *irisLens() override { return irisLens_; }
+ 
+ 	const std::vector<unsigned int> &mbusCodes() const override { return mbusCodes_; }
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+@@ -139,7 +140,14 @@ private:
+ 
+ 	ControlList properties_;
+ 
+-	std::unique_ptr<CameraLens> focusLens_;
++	/*
++	 * Lens entities are owned here; focusLens_ and irisLens_ point into
++	 * this vector and may point at the same entity when one device does
++	 * both jobs.
++	 */
++	std::vector<std::unique_ptr<CameraLens>> lenses_;
++	CameraLens *focusLens_ = nullptr;
++	CameraLens *irisLens_ = nullptr;
+ };
+ 
+ /**
+@@ -656,15 +664,43 @@ int CameraSensorLegacy::discoverAncillaryDevices()
+ 
+ 	for (MediaEntity *ancillary : entity_->ancillaryEntities()) {
+ 		switch (ancillary->function()) {
+-		case MEDIA_ENT_F_LENS:
+-			focusLens_ = std::make_unique<CameraLens>(ancillary);
+-			ret = focusLens_->init();
++		case MEDIA_ENT_F_LENS: {
++			/*
++			 * A sensor can have more than one lens entity: a focus
++			 * actuator and an aperture mechanism are separate
++			 * devices on some modules. Sort them by what they can
++			 * actually do rather than assuming the first one found
++			 * is the focus lens. A single entity may be both.
++			 */
++			std::unique_ptr<CameraLens> lens =
++				std::make_unique<CameraLens>(ancillary);
++			ret = lens->init();
+ 			if (ret) {
+ 				LOG(CameraSensor, Error)
+ 					<< "Lens initialisation failed, lens disabled";
+-				focusLens_.reset();
++				break;
++			}
++
++			CameraLens *l = lens.get();
++			bool used = false;
++
++			if (l->hasFocus() && !focusLens_) {
++				focusLens_ = l;
++				used = true;
++			}
++			if (l->hasIris() && !irisLens_) {
++				irisLens_ = l;
++				used = true;
+ 			}
++
++			if (used)
++				lenses_.push_back(std::move(lens));
++			else
++				LOG(CameraSensor, Warning)
++					<< "Ignoring extra lens entity "
++					<< ancillary->name();
+ 			break;
++		}
+ 
+ 		default:
+ 			LOG(CameraSensor, Warning)
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index 10eba03..8530eee 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -68,7 +68,8 @@ public:
+ 	const MediaEntity *entity() const override { return entity_; }
+ 	V4L2Subdevice *device() override { return subdev_.get(); }
+ 
+-	CameraLens *focusLens() override { return focusLens_.get(); }
++	CameraLens *focusLens() override { return focusLens_; }
++	CameraLens *irisLens() override { return irisLens_; }
+ 
+ 	const std::vector<unsigned int> &mbusCodes() const override { return mbusCodes_; }
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+@@ -150,7 +151,14 @@ private:
+ 
+ 	ControlList properties_;
+ 
+-	std::unique_ptr<CameraLens> focusLens_;
++	/*
++	 * Lens entities are owned here; focusLens_ and irisLens_ point into
++	 * this vector and may point at the same entity when one device does
++	 * both jobs.
++	 */
++	std::vector<std::unique_ptr<CameraLens>> lenses_;
++	CameraLens *focusLens_ = nullptr;
++	CameraLens *irisLens_ = nullptr;
+ };
+ 
+ /**
+@@ -506,15 +514,43 @@ std::optional<int> CameraSensorRaw::init()
+ 	 */
+ 	for (MediaEntity *ancillary : entity_->ancillaryEntities()) {
+ 		switch (ancillary->function()) {
+-		case MEDIA_ENT_F_LENS:
+-			focusLens_ = std::make_unique<CameraLens>(ancillary);
+-			ret = focusLens_->init();
++		case MEDIA_ENT_F_LENS: {
++			/*
++			 * A sensor can have more than one lens entity: a focus
++			 * actuator and an aperture mechanism are separate
++			 * devices on some modules. Sort them by what they can
++			 * actually do rather than assuming the first one found
++			 * is the focus lens. A single entity may be both.
++			 */
++			std::unique_ptr<CameraLens> lens =
++				std::make_unique<CameraLens>(ancillary);
++			ret = lens->init();
+ 			if (ret) {
+ 				LOG(CameraSensor, Error)
+ 					<< "Lens initialisation failed, lens disabled";
+-				focusLens_.reset();
++				break;
+ 			}
++
++			CameraLens *l = lens.get();
++			bool used = false;
++
++			if (l->hasFocus() && !focusLens_) {
++				focusLens_ = l;
++				used = true;
++			}
++			if (l->hasIris() && !irisLens_) {
++				irisLens_ = l;
++				used = true;
++			}
++
++			if (used)
++				lenses_.push_back(std::move(lens));
++			else
++				LOG(CameraSensor, Warning)
++					<< "Ignoring extra lens entity "
++					<< ancillary->name();
+ 			break;
++		}
+ 
+ 		default:
+ 			LOG(CameraSensor, Warning)

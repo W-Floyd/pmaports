@@ -1,0 +1,326 @@
+From 8cb6e8629a590a988dfce2bddf83d5ed3536f7fd Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 9 Sep 2026 17:30:06 +0000
+Subject: [PATCH 19/20] software_isp: Plumb the aperture through to the soft
+ IPA
+
+Carry the iris lens's controls to the IPA and its chosen iris position
+back, alongside the existing focus path. As with focus, the ControlInfoMap
+is handed over at init() as well as configure(), so that an algorithm can
+decide while registering controls whether an aperture exists at all.
+
+The iris is passed as its own ControlInfoMap rather than merged into
+lensControls. A ControlInfoMap only borrows its ControlIdMap, every V4L2
+device owns its own, and the IPA keeps a copy of the map beyond the call,
+so a merged map built from two sub-devices would leave a dangling idmap.
+Keeping them separate also keeps the returned ControlLists valid, since a
+ControlList is likewise tied to one idmap.
+
+While here, only set V4L2_CID_FOCUS_ABSOLUTE when the lens actually has
+it. The old test was that the map was non-empty, which would set focus on
+an iris-only lens.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/software_isp.h      |  6 ++-
+ include/libcamera/ipa/soft.mojom              |  8 +++-
+ src/ipa/simple/ipa_context.h                  | 13 ++++++
+ src/ipa/simple/soft_simple.cpp                | 41 ++++++++++++++++++-
+ src/libcamera/pipeline/simple/simple.cpp      | 23 +++++++----
+ src/libcamera/software_isp/software_isp.cpp   | 17 +++++++-
+ 6 files changed, 93 insertions(+), 15 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 1d4b802..70a9175 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -86,11 +86,13 @@ public:
+ 	Signal<FrameBuffer *> outputBufferReady;
+ 	Signal<uint32_t, uint32_t> ispStatsReady;
+ 	Signal<uint32_t, const ControlList &> metadataReady;
+-	Signal<const ControlList &, const ControlList &> setSensorControls;
++	Signal<const ControlList &, const ControlList &, const ControlList &> setSensorControls;
+ 
+ private:
+ 	void saveIspParams();
+-	void setSensorCtrls(const ControlList &sensorControls, const ControlList &lensControls);
++	void setSensorCtrls(const ControlList &sensorControls,
++			    const ControlList &lensControls,
++			    const ControlList &irisControls);
+ 	void statsReady(uint32_t frame, uint32_t bufferId);
+ 	void inputReady(FrameBuffer *input);
+ 	void outputReady(FrameBuffer *output);
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index 3947d93..3c1e849 100644
+--- a/include/libcamera/ipa/soft.mojom
++++ b/include/libcamera/ipa/soft.mojom
+@@ -11,6 +11,7 @@ import "include/libcamera/ipa/core.mojom";
+ struct IPAConfigInfo {
+ 	libcamera.ControlInfoMap sensorControls;
+ 	libcamera.ControlInfoMap lensControls;
++	libcamera.ControlInfoMap irisControls;
+ };
+ 
+ interface IPASoftInterface {
+@@ -19,7 +20,8 @@ interface IPASoftInterface {
+ 	     libcamera.SharedFD fdParams,
+ 	     libcamera.IPACameraSensorInfo sensorInfo,
+ 	     libcamera.ControlInfoMap sensorControls,
+-	     libcamera.ControlInfoMap lensControls)
++	     libcamera.ControlInfoMap lensControls,
++	     libcamera.ControlInfoMap irisControls)
+ 		=> (int32 ret, libcamera.ControlInfoMap ipaControls, bool ccmEnabled);
+ 	start() => (int32 ret);
+ 	stop();
+@@ -34,7 +36,9 @@ interface IPASoftInterface {
+ };
+ 
+ interface IPASoftEventInterface {
+-	setSensorControls(libcamera.ControlList sensorControls, libcamera.ControlList lensControls);
++	setSensorControls(libcamera.ControlList sensorControls,
++			  libcamera.ControlList lensControls,
++			  libcamera.ControlList irisControls);
+ 	setIspParams();
+ 	metadataReady(uint32 frame, libcamera.ControlList metadata);
+ };
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 952b028..af61395 100644
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -40,6 +40,13 @@ struct IPASessionConfiguration {
+ 		double start, stop, step;
+ 		uint32_t skip;
+ 	} focus;
++	struct {
++		/*
++		 * Range of the V4L2_CID_IRIS_ABSOLUTE control. iris_max <=
++		 * iris_min means the camera has no aperture mechanism.
++		 */
++		int32_t iris_min, iris_max;
++	} aperture;
+ };
+ 
+ struct IPAActiveState {
+@@ -72,6 +79,8 @@ struct IPAActiveState {
+ 		std::optional<bool> focus_sweep;
+ 		/* controls::AfModeEnum, defaults to AfModeContinuous */
+ 		std::optional<int32_t> af_mode;
++		/* Requested aperture as an f-number */
++		std::optional<double> aperture;
+ 	} knobs;
+ };
+ 
+@@ -87,6 +96,10 @@ struct IPAFrameContext : public FrameContext {
+ 		int32_t focus_pos;
+ 	} lens;
+ 
++	struct {
++		int32_t iris_pos;
++	} iris;
++
+ 	RGB<float> gains;
+ 
+ 	float gamma;
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index efd6665..e2f1e37 100644
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -58,6 +58,7 @@ public:
+ 		 const IPACameraSensorInfo &sensorInfo,
+ 		 const ControlInfoMap &sensorControls,
+ 		 const ControlInfoMap &lensControls,
++		 const ControlInfoMap &irisControls,
+ 		 ControlInfoMap *ipaControls,
+ 		 bool *ccmEnabled) override;
+ 	int configure(const IPAConfigInfo &configInfo) override;
+@@ -76,12 +77,14 @@ protected:
+ private:
+ 	void updateExposure(double exposureMSV);
+ 	void updateFocusRange();
++	void updateApertureRange();
+ 
+ 	DebayerParams *params_;
+ 	SwIspStats *stats_;
+ 	std::unique_ptr<CameraSensorHelper> camHelper_;
+ 	ControlInfoMap sensorInfoMap_;
+ 	ControlInfoMap lensInfoMap_;
++	ControlInfoMap irisInfoMap_;
+ 
+ 	/* Local parameter storage */
+ 	struct IPAContext context_;
+@@ -101,6 +104,7 @@ int IPASoftSimple::init(const IPASettings &settings,
+ 			const IPACameraSensorInfo &sensorInfo,
+ 			const ControlInfoMap &sensorControls,
+ 			const ControlInfoMap &lensControls,
++			const ControlInfoMap &irisControls,
+ 			ControlInfoMap *ipaControls,
+ 			bool *ccmEnabled)
+ {
+@@ -120,6 +124,10 @@ int IPASoftSimple::init(const IPASettings &settings,
+ 	lensInfoMap_ = lensControls;
+ 	updateFocusRange();
+ 
++	/* Likewise for the aperture, so Aperture::init() knows what exists. */
++	irisInfoMap_ = irisControls;
++	updateApertureRange();
++
+ 	/* Load the tuning data file */
+ 	File file(settings.configurationFile);
+ 	if (!file.open(File::OpenModeFlag::ReadOnly)) {
+@@ -235,10 +243,34 @@ void IPASoftSimple::updateFocusRange()
+ 			   << context_.configuration.focus.focus_max << "]";
+ }
+ 
++/*
++ * Record the range of the iris actuator, or a zero range when the camera has
++ * no aperture mechanism. Called from both init() and configure() for the same
++ * reason as updateFocusRange().
++ */
++void IPASoftSimple::updateApertureRange()
++{
++	const auto it = irisInfoMap_.find(V4L2_CID_IRIS_ABSOLUTE);
++
++	if (it == irisInfoMap_.end()) {
++		LOG(IPASoft, Debug) << "No iris, aperture control disabled";
++		context_.configuration.aperture.iris_min = 0;
++		context_.configuration.aperture.iris_max = 0;
++		return;
++	}
++
++	context_.configuration.aperture.iris_min = it->second.min().get<int32_t>();
++	context_.configuration.aperture.iris_max = it->second.max().get<int32_t>();
++	LOG(IPASoft, Info) << "Iris range ["
++			   << context_.configuration.aperture.iris_min << ", "
++			   << context_.configuration.aperture.iris_max << "]";
++}
++
+ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ {
+ 	sensorInfoMap_ = configInfo.sensorControls;
+ 	lensInfoMap_ = configInfo.lensControls;
++	irisInfoMap_ = configInfo.irisControls;
+ 
+ 	const ControlInfo &exposureInfo = sensorInfoMap_.find(V4L2_CID_EXPOSURE)->second;
+ 	const ControlInfo &gainInfo = sensorInfoMap_.find(V4L2_CID_ANALOGUE_GAIN)->second;
+@@ -254,6 +286,7 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 	 * the AF algorithm ends up mapping every position onto zero.
+ 	 */
+ 	updateFocusRange();
++	updateApertureRange();
+ 
+ 	context_.configuration.agc.lineDuration =
+ 		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
+@@ -381,10 +414,14 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 		  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
+ 
+ 	ControlList lensCtrls(lensInfoMap_);
+-	if (!lensInfoMap_.empty())
++	if (lensInfoMap_.count(V4L2_CID_FOCUS_ABSOLUTE))
+ 		lensCtrls.set(V4L2_CID_FOCUS_ABSOLUTE, frameContext.lens.focus_pos);
+ 
+-	setSensorControls.emit(ctrls, lensCtrls);
++	ControlList irisCtrls(irisInfoMap_);
++	if (irisInfoMap_.count(V4L2_CID_IRIS_ABSOLUTE))
++		irisCtrls.set(V4L2_CID_IRIS_ABSOLUTE, frameContext.iris.iris_pos);
++
++	setSensorControls.emit(ctrls, lensCtrls, irisCtrls);
+ }
+ 
+ std::string IPASoftSimple::logPrefix() const
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 553e4c6..f90bb88 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -375,7 +375,8 @@ private:
+ 	void ispStatsReady(uint32_t frame, uint32_t bufferId);
+ 	void metadataReady(uint32_t frame, const ControlList &metadata);
+ 	void setSensorControls(const ControlList &sensorControls,
+-			       const ControlList &lensControls);
++			       const ControlList &lensControls,
++			       const ControlList &irisControls);
+ };
+ 
+ class SimpleCameraConfiguration : public CameraConfiguration
+@@ -1071,7 +1072,8 @@ void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata
+ }
+ 
+ void SimpleCameraData::setSensorControls(const ControlList &sensorControls,
+-					 const ControlList &lensControls)
++					 const ControlList &lensControls,
++					 const ControlList &irisControls)
+ {
+ 	delayedCtrls_->push(sensorControls);
+ 	/*
+@@ -1093,11 +1095,14 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls,
+ 	 * or not a frameStart signal exists.
+ 	 */
+ 	CameraLens *focusLens = sensor_->focusLens();
+-	if (!focusLens || !lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE))
+-		return;
+-
+-	focusLens->setFocusPosition(
+-		lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>());
++	if (focusLens && lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE))
++		focusLens->setFocusPosition(
++			lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>());
++
++	CameraLens *irisLens = sensor_->irisLens();
++	if (irisLens && irisControls.contains(V4L2_CID_IRIS_ABSOLUTE))
++		irisLens->setIrisPosition(
++			irisControls.get(V4L2_CID_IRIS_ABSOLUTE).get<int32_t>());
+ }
+ 
+ /* Retrieve all source pads connected to a sink pad through active routes. */
+@@ -1651,6 +1656,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			configInfo.lensControls = data->sensor_->focusLens()->controls();
+ 		else
+ 			configInfo.lensControls = ControlInfoMap();
++		if (data->sensor_->irisLens())
++			configInfo.irisControls = data->sensor_->irisLens()->controls();
++		else
++			configInfo.irisControls = ControlInfoMap();
+ 		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo);
+ 	}
+ }
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 196b277..503ff45 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -176,12 +176,23 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 	ControlInfoMap lensControls = focusLens ? focusLens->controls()
+ 					       : ControlInfoMap();
+ 
++	/*
++	 * The aperture mechanism is passed separately rather than merged into
++	 * lensControls: a ControlInfoMap only borrows its ControlIdMap, each
++	 * V4L2 device owns its own, and the IPA keeps the map past this call.
++	 * Merging maps from two sub-devices would leave a dangling idmap.
++	 */
++	CameraLens *irisLens = sensor->irisLens();
++	ControlInfoMap irisControls = irisLens ? irisLens->controls()
++					      : ControlInfoMap();
++
+ 	ret = ipa_->init(IPASettings{ ipaTuningFile, sensor->model() },
+ 			 debayer_->getStatsFD(),
+ 			 sharedParams_.fd(),
+ 			 sensorInfo,
+ 			 sensor->controls(),
+ 			 lensControls,
++			 irisControls,
+ 			 ipaControls,
+ 			 &ccmEnabled_);
+ 	if (ret) {
+@@ -456,9 +467,11 @@ void SoftwareIsp::saveIspParams()
+ 	debayerParams_ = *sharedParams_;
+ }
+ 
+-void SoftwareIsp::setSensorCtrls(const ControlList &sensorControls, const ControlList &lensControls)
++void SoftwareIsp::setSensorCtrls(const ControlList &sensorControls,
++				 const ControlList &lensControls,
++				 const ControlList &irisControls)
+ {
+-	setSensorControls.emit(sensorControls, lensControls);
++	setSensorControls.emit(sensorControls, lensControls, irisControls);
+ }
+ 
+ void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)
