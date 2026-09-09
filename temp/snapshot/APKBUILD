@@ -3,7 +3,7 @@
 maintainer="team/gnome <achill@achill.org>"
 pkgname=snapshot
 pkgver=50.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Take pictures and videos"
 url="https://gitlab.gnome.org/GNOME/snapshot"
 arch="all"
@@ -11,6 +11,7 @@ license="GPL-3.0-or-later"
 makedepends="
 	cargo
 	cargo-auditable
+	clang-dev
 	desktop-file-utils
 	glib-dev
 	gst-plugins-bad-dev
@@ -22,6 +23,7 @@ makedepends="
 	libglycin-gtk4-dev
 	libseccomp-dev
 	meson
+	pipewire-dev
 	"
 depends="
 	glycin-image-rs
@@ -38,6 +40,7 @@ source="https://download.gnome.org/sources/snapshot/${pkgver%%.*}/snapshot-$pkgv
 	cargo-auditable.patch
 	0001-aperture-Add-a-camera-control-API.patch
 	0002-Add-manual-focus-controls.patch
+	0003-Add-an-aperture-control.patch
 	"
 options="net" # cargo fetch for rustix update
 
@@ -68,4 +71,5 @@ e7f4013e91ec8de1aec64df188da654374e02b1a2588d5f9e3edbc31eb347e58648c3c5d595fe6a5
 236fdfe1f2c91ce4d24e9823c1d9d9448171f10065d4608ce0a0c9a003d48666dff98f458980aa1567ecb090c75be754de25fd845ad330d4d8fea2b20aed1d7a  cargo-auditable.patch
 d269a0e0aab8eb364334fb370bafe71a6aff09c66868b193dac329468fc9191aea4c294fa16236f391e7411954cd80f9bfa24b17b10887b844fa61e6ff334e1e  0001-aperture-Add-a-camera-control-API.patch
 64d26ddf5129d379ce0f68b54e05364498c853ae98cf6f24a8966a0bde74ec73243123778c11ad0fc021a4566f899c56fa4fffb24f2f691ec670ac986bb83de2  0002-Add-manual-focus-controls.patch
+ea98b0595903659f33d9d2f94d3e3a4ebc0f64931d324bd2f5c2776b6110baecbae4208eaee698f0a35808a064d5310a1bdb4dea6c9606b3f854fcacfad4e978  0003-Add-an-aperture-control.patch
 "
