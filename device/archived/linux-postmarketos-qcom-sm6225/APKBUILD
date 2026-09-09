@@ -5,7 +5,7 @@
 maintainer=""
 pkgname=linux-postmarketos-qcom-sm6225
 pkgver=6.1
-pkgrel=2
+pkgrel=3
 pkgdesc="Mainline Kernel fork for SM6225 devices"
 arch="aarch64"
 _carch="arm64"
@@ -47,7 +47,12 @@ build() {
 }
 
 package() {
-	install -Dm644 "$builddir/arch/$_carch/boot/Image.gz" \
+	# Uncompressed Image, not Image.gz. arm64 has no self-decompressing kernel,
+	# so a gzipped image relies on the bootloader to inflate it -- and fogona's
+	# ABL evidently does not. Stock's boot.img carries a raw ARM64 Image
+	# (46,819,840 bytes, "ARMd" magic at 0x38); every failed pmOS boot attempt
+	# here shipped a gzip (1f 8b) payload and produced no output whatsoever.
+	install -Dm644 "$builddir/arch/$_carch/boot/Image" \
 		"$pkgdir/boot/vmlinuz"
 
 	make modules_install dtbs_install \
