@@ -1,0 +1,14 @@
+# Allow runtime PM on the USB controller.
+#
+# dwc3_probe() calls pm_runtime_forbid(), so the controller comes up with
+# runtime PM refused and never suspends -- even with nothing enumerated at
+# all. On this device that left dwc3 holding a permanent interconnect vote
+# of avg 1000000 / peak 2500000 through qns_llcc, llcc_mc and ebi: a
+# standing ~1 GB/s DDR bandwidth request on behalf of an idle controller.
+#
+# Opting in drops that vote to zero. Both nodes need the rule -- the core
+# is what holds the vote, and the dwc3-qcom glue is its parent, which will
+# not follow the core down while runtime PM is forbidden on the parent.
+
+ACTION=="add", SUBSYSTEM=="platform", DRIVER=="dwc3", ATTR{power/control}="auto"
+ACTION=="add", SUBSYSTEM=="platform", DRIVER=="dwc3-qcom-legacy", ATTR{power/control}="auto"

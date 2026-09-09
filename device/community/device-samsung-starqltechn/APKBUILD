@@ -3,7 +3,7 @@ maintainer="Dzmitry Sankouski <dsankouski@gmail.com>"
 pkgname=device-samsung-starqltechn
 pkgdesc="Samsung Galaxy S9 SM-G9600"
 pkgver=14
-pkgrel=1
+pkgrel=2
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -25,6 +25,7 @@ depends="
 	"
 makedepends="devicepkg-dev dtc"
 source="
+	50-dwc3-runtime-pm.rules
 	boot_image.its
 	bootscript.sh
 	deviceinfo
@@ -49,10 +50,14 @@ package() {
 		"$pkgdir"/usr/share/u-boot/starqltechn/
 	install -D -m644 "$srcdir/"bootscript.sh \
 		"$pkgdir"/usr/share/u-boot/starqltechn/
+
+	install -D -m644 "$srcdir"/50-dwc3-runtime-pm.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/50-dwc3-runtime-pm.rules
 }
 
 
 sha512sums="
+2499783e3ae051d762dc1e08f67ce32bffd3aabaa3898dfbfa618041b5e2b32efec51daaccafdb60b405429930539f0d49f01d8b2c07f926acd39827075f898c  50-dwc3-runtime-pm.rules
 3047ff60cb25564bec0637030917981653a5a85024b221d58f510585e5b2102dc806f4970976fef0854ea3d5803ea0b545e9b2b5b1045a9868aba2e7eff7f7c1  boot_image.its
 2a83c5a12111dd1fcc9ebd4f417f478ac50c7ba6eb4c50ee906e61afc6cdcab9663f31d44e99eb76094aa93a5768af43dba458c6fbb400772d3565093a0a46e5  bootscript.sh
 d65394db6585ac962d60885c1e2d136317247f3190385ac58f71cc139286df4e0e0e73da63ef84021e3e1d0e7efaba08294501d587d30a0a39d2b70035f00ed6  deviceinfo
