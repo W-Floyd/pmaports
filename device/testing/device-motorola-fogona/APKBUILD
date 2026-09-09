@@ -1,0 +1,35 @@
+# Reference: <https://postmarketos.org/devicepkg>
+# Not in upstream pmaports: fogona has no port. This package is carried in this
+# repo's aports overlay and copied into the pmaports checkout by
+# sync-aports-overlay.sh.
+maintainer="William Floyd <git@notmy.space>"
+pkgname=device-motorola-fogona
+pkgdesc="Motorola Moto G Play (2024)"
+pkgver=0
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck"
+depends="
+	linux-postmarketos-qcom-sm6225
+	mkbootimg
+	postmarketos-base
+"
+makedepends="devicepkg-dev"
+source="deviceinfo
+	kernel-cmdline.conf
+	"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+}
+
+sha512sums="
+85fc2b025a2dec37755eb78fecbc8ee1cb2d2690ea0cdb7d2833d98a7542d925b5ad7d718be1ca16c8f961789b3b1f130e57cceb7f8a4db20842a09223a76166  deviceinfo
+4e8e3fba36c3a566026ddb71a9e6f7a28469f9e849595f2a16a0e176564db025e1058f9f3ac53f76fe634746893ec59b2fe3c54a23e8fd19b576fd2f41c29f8e  kernel-cmdline.conf
+"

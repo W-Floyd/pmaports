@@ -1,0 +1,66 @@
+# Reference: <https://postmarketos.org/deviceinfo>
+# Please use double quotes only. You can source this file in shell
+# scripts.
+#
+# UNVERIFIED. Nothing here has been confirmed against hardware -- there is no
+# mainline DTS for fogona, so nothing has booted. Values are derived from the
+# LineageOS device tree (naf419/android_device_motorola_fogona, BoardConfig.mk)
+# and from device-lenovo-tb128fu, the only other SM6225 port.
+# See ../../../../README.md, "What is actually unknown".
+
+deviceinfo_format_version="0"
+deviceinfo_name="Motorola Moto G Play (2024)"
+deviceinfo_manufacturer="Motorola"
+deviceinfo_codename="motorola-fogona"
+deviceinfo_year="2024"
+# One DTB per panel variant, as device-motorola-dubai does. This unit is the
+# Tianma ICNL9916C; the csot/nt36528 and txd/ili9883c variants are not written
+# yet. Panel identity does not affect step 1 (simple-framebuffer).
+deviceinfo_dtb="qcom/sm6225-motorola-fogona-icnl9916c"
+deviceinfo_arch="aarch64"
+
+# Device related
+deviceinfo_chassis="handset"
+deviceinfo_external_storage="true"
+deviceinfo_screen_width="720"
+deviceinfo_screen_height="1600"
+
+# Bootloader related
+deviceinfo_flash_method="fastboot"
+# fogona has a 6.4 GB dynamic `super` (system system_ext vendor product
+# system_dlkm vendor_dlkm). Writing a raw rootfs over it destroys the logical
+# partition metadata, so the stock system is gone afterwards and the other A/B
+# slot is the way back. `vbmeta` must be flashed with --disable-verity
+# --disable-verification or AVB rejects an unsigned kernel.
+# UNRESOLVED: `fastboot getvar all` shows a real raw `userdata` of 0xCCC9FB000
+# (51.2 GiB) -- eight times `super`, and no logical-partition metadata to
+# destroy. Writing the rootfs there instead would leave stock Android intact on
+# both slots. See README, "This makes the rootfs target an open question".
+# Bootloader reports max-download-size:0x10000000.
+deviceinfo_flash_fastboot_max_size="256"
+deviceinfo_flash_fastboot_partition_vbmeta="vbmeta"
+# CHANGED to userdata -- flagged for review. `super` destroys the dynamic
+# partition metadata and takes stock Android with it, and the only restore
+# package available is the wrong carrier channel with a downgraded vbmeta
+# rollback index. `userdata` is 51.2 GiB, raw, holds nothing of value, and
+# leaves stock bootable on slot A throughout. One line to change back.
+deviceinfo_flash_fastboot_partition_rootfs="userdata"
+deviceinfo_generate_bootimg="true"
+deviceinfo_rootfs_image_sector_size="4096"
+deviceinfo_flash_pagesize="4096"
+# Downstream builds boot with BOARD_BOOT_HEADER_VERSION := 4 (GKI: ramdisk in
+# init_boot, recovery in vendor_boot). No device in pmaports uses v4 -- the
+# highest anywhere is 2 -- so start at 2, as tb128fu does, and revisit if the
+# bootloader refuses the image.
+deviceinfo_header_version="2"
+# VERIFIED against the stock vendor_boot.img header (CC U1TF34.100-35):
+#   kernel_addr=0x8000  ramdisk_addr=0x1000000  tags_addr=0x100
+#   dtb_addr=0x1f00000  page_size=4096
+# All four offsets and the pagesize match exactly. Previously guesses from the
+# LineageOS BoardConfig; now confirmed against real firmware.
+deviceinfo_flash_offset_base="0x00000000"
+deviceinfo_flash_offset_kernel="0x00008000"
+deviceinfo_flash_offset_ramdisk="0x01000000"
+deviceinfo_flash_offset_second="0x00000000"
+deviceinfo_flash_offset_tags="0x00000100"
+deviceinfo_flash_offset_dtb="0x01f00000"
