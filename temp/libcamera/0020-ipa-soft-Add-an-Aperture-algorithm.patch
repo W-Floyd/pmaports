@@ -1,0 +1,418 @@
+From fe3c85afe64497862c9dcaf2795a1463e994107c Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 9 Sep 2026 17:30:06 +0000
+Subject: [PATCH 20/20] ipa: soft: Add an Aperture algorithm
+
+Map controls::LensAperture onto the iris actuator, supporting both kinds
+of hardware from one tuning description.
+
+A camera whose iris sits at a few detents lists them as f-number and
+actuator code pairs, and the algorithm advertises exactly that set
+through ControlInfo::values() so an application draws a set of choices.
+A request that falls between two of them selects the nearest, and the
+metadata reports what was actually selected rather than what was asked
+for.
+
+A camera with a continuously variable iris instead gives a piecewise
+linear map from f-number to actuator code, in the same flat form the Af
+algorithm already uses, and gets a plain min/max range.
+
+A camera with no iris registers no control, so applications hide their
+aperture UI rather than offering one that moves nothing.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/simple/algorithms/aperture.cpp | 293 +++++++++++++++++++++++++
+ src/ipa/simple/algorithms/aperture.h   |  72 ++++++
+ src/ipa/simple/algorithms/meson.build  |   1 +
+ 3 files changed, 366 insertions(+)
+ create mode 100644 src/ipa/simple/algorithms/aperture.cpp
+ create mode 100644 src/ipa/simple/algorithms/aperture.h
+
+diff --git a/src/ipa/simple/algorithms/aperture.cpp b/src/ipa/simple/algorithms/aperture.cpp
+new file mode 100644
+index 0000000..bc209e1
+--- /dev/null
++++ b/src/ipa/simple/algorithms/aperture.cpp
+@@ -0,0 +1,293 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd <git@notmy.space>
++ *
++ * Lens aperture control
++ */
++
++#include "aperture.h"
++
++#include <algorithm>
++#include <cmath>
++#include <stdint.h>
++#include <vector>
++
++#include <libcamera/base/log.h>
++
++#include "libipa/pwl.h"
++
++#include "control_ids.h"
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(IPASoftAperture)
++
++namespace ipa::soft::algorithms {
++
++Aperture::Aperture()
++{
++}
++
++/**
++ * \brief Read the aperture description out of the tuning file
++ *
++ * Two shapes are accepted, matching the two kinds of hardware:
++ *
++ * A camera whose iris can only sit at a few detents, such as a phone module
++ * with a two-position blade mechanism, lists them:
++ *
++ * \code{.unparsed}
++ *   - Aperture:
++ *       apertures:
++ *         - aperture: 1.5
++ *           code: 0
++ *         - aperture: 2.4
++ *           code: 512
++ * \endcode
++ *
++ * A camera with a continuously variable iris gives a map from f-number to
++ * actuator code, in the same flat x,y form the Af algorithm uses:
++ *
++ * \code{.unparsed}
++ *   - Aperture:
++ *       map: [ 1.8, 0, 16.0, 1023 ]
++ * \endcode
++ */
++int Aperture::init(IPAContext &context, const ValueNode &tuningData)
++{
++	const int32_t codeMin = context.configuration.aperture.iris_min;
++	const int32_t codeMax = context.configuration.aperture.iris_max;
++
++	/*
++	 * Don't advertise an aperture control when the camera has no iris, so
++	 * that applications hide their aperture UI rather than offering a
++	 * control that cannot move anything.
++	 */
++	if (codeMax <= codeMin) {
++		LOG(IPASoftAperture, Info)
++			<< "No iris, not registering aperture controls";
++		return 0;
++	}
++
++	const ValueNode &list = tuningData["apertures"];
++	if (list.size()) {
++		std::vector<std::pair<double, int32_t>> entries;
++
++		for (const auto &entry : list.asList()) {
++			auto f = entry["aperture"].get<double>();
++			auto code = entry["code"].get<int32_t>();
++
++			if (!f.has_value() || !code.has_value() || f.value() <= 0.0) {
++				LOG(IPASoftAperture, Error)
++					<< "Malformed aperture entry, needs a"
++					<< " positive 'aperture' and a 'code'";
++				return -EINVAL;
++			}
++
++			entries.emplace_back(f.value(),
++					     std::clamp(code.value(), codeMin, codeMax));
++		}
++
++		if (entries.empty()) {
++			LOG(IPASoftAperture, Error)
++				<< "Empty aperture list in the tuning file";
++			return -EINVAL;
++		}
++
++		/*
++		 * Sort by f-number so that min()/max() and the nearest-value
++		 * search below can assume ascending order, whatever order the
++		 * tuning file happened to list them in.
++		 */
++		std::sort(entries.begin(), entries.end(),
++			  [](const auto &a, const auto &b) {
++				  return a.first < b.first;
++			  });
++
++		for (const auto &[f, code] : entries) {
++			apertures_.push_back(f);
++			codes_.push_back(code);
++		}
++
++		discrete_ = true;
++		fNumberMin_ = apertures_.front();
++		fNumberMax_ = apertures_.back();
++		/* Default to the widest aperture, which is what stock does. */
++		fNumberDef_ = apertures_.front();
++	} else {
++		auto map = tuningData["map"].get<ipa::Pwl>();
++		if (!map.has_value() || map->empty()) {
++			LOG(IPASoftAperture, Warning)
++				<< "The camera has an iris but the tuning file"
++				<< " describes neither 'apertures' nor 'map';"
++				<< " not registering aperture controls";
++			return 0;
++		}
++
++		map_ = std::move(map.value());
++		discrete_ = false;
++		fNumberMin_ = map_.domain().start;
++		fNumberMax_ = map_.domain().end;
++		fNumberDef_ = fNumberMin_;
++	}
++
++	auto def = tuningData["default"].get<double>();
++	if (def.has_value())
++		fNumberDef_ = discrete_ ? nearestAperture(def.value())
++					: std::clamp(def.value(), fNumberMin_, fNumberMax_);
++
++	enabled_ = true;
++
++	if (discrete_) {
++		std::ostringstream os;
++		for (unsigned int i = 0; i < apertures_.size(); i++)
++			os << (i ? ", " : "") << "f/" << apertures_[i]
++			   << " (code " << codes_[i] << ")";
++		LOG(IPASoftAperture, Info)
++			<< "Discrete aperture: " << os.str()
++			<< ", default f/" << fNumberDef_;
++
++		/*
++		 * Advertise the exact set. ControlInfo::values() is what tells
++		 * an application to draw a set of choices instead of a slider.
++		 */
++		std::vector<ControlValue> values;
++		for (double f : apertures_)
++			values.push_back(ControlValue(static_cast<float>(f)));
++
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(Span<const ControlValue>(values),
++				    ControlValue(static_cast<float>(fNumberDef_)));
++	} else {
++		LOG(IPASoftAperture, Info)
++			<< "Continuous aperture f/" << fNumberMin_
++			<< "..f/" << fNumberMax_
++			<< " (actuator codes " << irisCode(fNumberMin_)
++			<< ".." << irisCode(fNumberMax_) << ")"
++			<< ", default f/" << fNumberDef_;
++
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(static_cast<float>(fNumberMin_),
++				    static_cast<float>(fNumberMax_),
++				    static_cast<float>(fNumberDef_));
++	}
++
++	return 0;
++}
++
++int Aperture::configure(IPAContext &context,
++			[[maybe_unused]] const IPAConfigInfo &configInfo)
++{
++	if (!enabled_)
++		return 0;
++
++	context.activeState.knobs.aperture = fNumberDef_;
++	return 0;
++}
++
++/**
++ * \brief Find the available aperture closest to a requested f-number
++ *
++ * Ties go to the wider (smaller f-number) of the two, which loses less light.
++ */
++double Aperture::nearestAperture(double fNumber) const
++{
++	double best = apertures_.front();
++	double bestDelta = std::abs(fNumber - best);
++
++	for (double f : apertures_) {
++		double delta = std::abs(fNumber - f);
++		if (delta < bestDelta) {
++			best = f;
++			bestDelta = delta;
++		}
++	}
++
++	return best;
++}
++
++/**
++ * \brief Convert an f-number to an actuator code
++ */
++int32_t Aperture::irisCode(double fNumber) const
++{
++	if (discrete_) {
++		/*
++		 * Match on the aperture value rather than the index, because
++		 * the caller may hold a value that has already been snapped.
++		 */
++		double f = nearestAperture(fNumber);
++		for (unsigned int i = 0; i < apertures_.size(); i++) {
++			if (apertures_[i] == f)
++				return codes_[i];
++		}
++		return codes_.front();
++	}
++
++	return static_cast<int32_t>(std::lround(map_.eval(map_.domain().clamp(fNumber))));
++}
++
++void Aperture::queueRequest(typename Module::Context &context,
++			    [[maybe_unused]] const uint32_t frame,
++			    [[maybe_unused]] typename Module::FrameContext &frameContext,
++			    const ControlList &controls)
++{
++	if (!enabled_)
++		return;
++
++	const auto &aperture = controls.get(controls::LensAperture);
++	if (!aperture.has_value())
++		return;
++
++	double requested = static_cast<double>(aperture.value());
++	double selected = discrete_
++				  ? nearestAperture(requested)
++				  : std::clamp(requested, fNumberMin_, fNumberMax_);
++
++	if (selected != requested)
++		LOG(IPASoftAperture, Debug)
++			<< "Requested f/" << requested
++			<< ", selected f/" << selected;
++
++	context.activeState.knobs.aperture = selected;
++}
++
++void Aperture::prepare(IPAContext &context,
++		       [[maybe_unused]] const uint32_t frame,
++		       IPAFrameContext &frameContext,
++		       [[maybe_unused]] DebayerParams *params)
++{
++	if (!enabled_)
++		return;
++
++	const double f = context.activeState.knobs.aperture.value_or(fNumberDef_);
++
++	frameContext.iris.iris_pos =
++		std::clamp(irisCode(f),
++			   context.configuration.aperture.iris_min,
++			   context.configuration.aperture.iris_max);
++}
++
++void Aperture::process([[maybe_unused]] IPAContext &context,
++		       [[maybe_unused]] const uint32_t frame,
++		       [[maybe_unused]] IPAFrameContext &frameContext,
++		       [[maybe_unused]] const SwIspStats *stats,
++		       ControlList &metadata)
++{
++	if (!enabled_)
++		return;
++
++	/*
++	 * Report the aperture actually selected, which for a discrete
++	 * mechanism is not necessarily the one that was requested.
++	 */
++	metadata.set(controls::LensAperture,
++		     static_cast<float>(context.activeState.knobs.aperture
++						.value_or(fNumberDef_)));
++}
++
++REGISTER_IPA_ALGORITHM(Aperture, "Aperture")
++
++} /* namespace ipa::soft::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/simple/algorithms/aperture.h b/src/ipa/simple/algorithms/aperture.h
+new file mode 100644
+index 0000000..0006198
+--- /dev/null
++++ b/src/ipa/simple/algorithms/aperture.h
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd <git@notmy.space>
++ *
++ * Lens aperture control
++ */
++
++#pragma once
++
++#include <stdint.h>
++#include <vector>
++
++#include "libipa/pwl.h"
++
++#include "algorithm.h"
++
++namespace libcamera {
++
++namespace ipa::soft::algorithms {
++
++class Aperture : public Algorithm
++{
++public:
++	Aperture();
++	~Aperture() = default;
++
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
++	void queueRequest(typename Module::Context &context,
++			  const uint32_t frame,
++			  typename Module::FrameContext &frameContext,
++			  const ControlList &controls) override;
++	void prepare(IPAContext &context, const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     DebayerParams *params) override;
++	void process(IPAContext &context, const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     const SwIspStats *stats,
++		     ControlList &metadata) override;
++
++private:
++	int32_t irisCode(double fNumber) const;
++	double nearestAperture(double fNumber) const;
++
++	/*
++	 * Tuning data, kept here rather than in IPAContext::configuration
++	 * because configure() clears that whereas init(), which reads the
++	 * tuning file, runs only once.
++	 */
++
++	/*
++	 * A discrete mechanism lists the f-numbers it can actually select,
++	 * sorted ascending, each paired with the actuator code that selects
++	 * it. Empty for a continuously variable iris.
++	 */
++	std::vector<double> apertures_;
++	std::vector<int32_t> codes_;
++
++	/* Maps f-number to actuator code for a continuous iris. */
++	ipa::Pwl map_;
++
++	double fNumberMin_ = 0.0;
++	double fNumberMax_ = 0.0;
++	double fNumberDef_ = 0.0;
++
++	bool discrete_ = false;
++	bool enabled_ = false;
++};
++
++} /* namespace ipa::soft::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/simple/algorithms/meson.build b/src/ipa/simple/algorithms/meson.build
+index 8950b00..a74adf6 100644
+--- a/src/ipa/simple/algorithms/meson.build
++++ b/src/ipa/simple/algorithms/meson.build
+@@ -7,4 +7,5 @@ soft_simple_ipa_algorithms = files([
+     'blc.cpp',
+     'ccm.cpp',
+     'af.cpp',
++    'aperture.cpp',
+ ])
