@@ -1,0 +1,10 @@
+#
+# The Bluetooth controller is published before it can be configured: hci0 is
+# registered as soon as the UART is bound, but the BCM4361B2 firmware is only
+# downloaded afterwards, and the management interface hides the controller for
+# the whole of it. An "add" rule therefore races the download and loses -- which
+# is what defeats bootmac here. The kernel sends a "change" event once the
+# controller is ready to be configured, so wait for that instead.
+#
+ACTION=="change", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST=="/run/systemd/system", TAG+="systemd", ENV{SYSTEMD_WANTS}="bt-address-from-efs.service"
+ACTION=="change", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST!="/run/systemd/system", RUN+="/usr/bin/bt-address-from-efs"

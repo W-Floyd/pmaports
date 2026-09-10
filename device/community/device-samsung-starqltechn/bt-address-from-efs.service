@@ -1,0 +1,9 @@
+[Unit]
+Description=Set the Bluetooth address from Samsung's efs partition
+Before=bluetooth.service
+ConditionPathExists=!/run/bt-address-from-efs.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bt-address-from-efs

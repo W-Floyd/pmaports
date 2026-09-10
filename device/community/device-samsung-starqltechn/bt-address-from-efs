@@ -1,0 +1,54 @@
+#!/bin/sh
+# Give the Bluetooth controller the address the factory assigned it.
+#
+# The BCM4361B2 powers up as 43:61:B2:00:1F:AC -- Broadcom's fallback of ac:1f:00
+# followed by the chip id. It is identical on every SM-G9600 and its OUI belongs
+# to nobody, so two of these phones in one room are the same device as far as
+# Bluetooth is concerned. Samsung's own address is in the efs partition, as ASCII
+# in /bluetooth/bt_addr, and a filesystem is not something the kernel can read
+# while it is bringing a controller up.
+#
+# Run from a udev rule on the controller's "change" event, which is sent once it
+# has finished loading firmware and is ready to be configured.
+set -eu
+
+DEV=/dev/disk/by-partlabel/efs
+MNT=/run/efs-btaddr
+STAMP=/run/bt-address-from-efs.done
+IDX=0
+
+# Setting the address moves the controller from unconfigured to configured,
+# which is itself announced, so without this the rule would trigger once more.
+[ -e "$STAMP" ] && exit 0
+
+cleanup() {
+	umount "$MNT" 2>/dev/null || true
+	rmdir "$MNT" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+[ -e "$DEV" ] || { echo "no efs partition at $DEV"; exit 0; }
+
+mkdir -p "$MNT"
+mount -o ro,nosuid,nodev,noexec "$DEV" "$MNT" || { echo "cannot mount efs"; exit 0; }
+
+ADDR=$(tr -d ' \t\r\n' < "$MNT/bluetooth/bt_addr" 2>/dev/null || true)
+
+case "$ADDR" in
+[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f])
+	;;
+*)
+	echo "efs holds no usable address (${ADDR:-empty})"
+	exit 0
+	;;
+esac
+
+# The address can only be set while the controller is powered down.
+btmgmt --index "$IDX" power off >/dev/null 2>&1 || true
+if btmgmt --index "$IDX" public-addr "$ADDR" >/dev/null 2>&1; then
+	echo "hci$IDX set to $ADDR"
+	touch "$STAMP"
+else
+	echo "could not set hci$IDX to $ADDR"
+fi
+btmgmt --index "$IDX" power on >/dev/null 2>&1 || true
