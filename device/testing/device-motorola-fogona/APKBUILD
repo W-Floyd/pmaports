@@ -6,7 +6,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=10
+pkgrel=12
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -14,9 +14,29 @@ options="!check !archcheck"
 # android-tools rather than the standalone mkbootimg: at header_version 4
 # boot-deploy uses modern mkbootimg's --vendor_boot/--vendor_ramdisk syntax,
 # which the mkbootimg fork does not have.
+# make-dynpart-mappings maps the logical partitions out of `super`, which is
+# how vendor and modem are reachable at all.
+#
+# msm-firmware-loader is deliberately NOT depended on yet. It is the right
+# answer in principle -- everything this device needs is already on it, and
+# none of it is ours to redistribute -- but its unit walks the vendor
+# partition, which is EROFS, and any path lookup there wedges unkillably in
+# d_alloc_parallel. That starves the whole system rather than just failing:
+# systemd-udevd never starts, so there are no by-uuid links, /boot misses its
+# mount and boot ends in emergency mode with no networking to debug from.
+# See TODO.md. Add it back once that hang is understood.
+#
+# Nothing working today needs it. Touch firmware is shipped on the rootfs at
+# /lib/firmware/postmarketos/chipone_firmware.bin, and the CW2217 fuel gauge
+# takes its battery profile from the device tree and has no firmware at all.
+# What is still waiting on the loader:
+#   modem/image/modem.mdt + wlanmdsp.mbn  - modem PIL, and WiFi behind it
+#   modem/image/bdwlan_fogona_ipa.bin     - this handset's WLAN board data
+#   modem/image/a610_zap.mdt              - GPU zap shader, for later
 depends="
 	linux-postmarketos-qcom-sm6225
 	android-tools
+	make-dynpart-mappings
 	postmarketos-base
 "
 makedepends="devicepkg-dev"
