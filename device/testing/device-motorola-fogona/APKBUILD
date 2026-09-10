@@ -6,7 +6,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=12
+pkgrel=13
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -42,6 +42,8 @@ depends="
 makedepends="devicepkg-dev"
 source="deviceinfo
 	kernel-cmdline.conf
+	50-fogona-mesa.conf
+	50-fogona-mesa.sh
 	"
 
 build() {
@@ -50,9 +52,22 @@ build() {
 
 package() {
 	devicepkg_package $startdir $pkgname
+
+	# Both channels are needed, and neither is redundant. environment.d is
+	# what reaches phoc, which runs under a systemd user manager -- note
+	# pam_env is not in this distro's base-session stack, so /etc/environment
+	# is not a reliable channel here (and belongs to linux-pam anyway).
+	# profile.d covers login shells, matching how other pmaports devices ship
+	# their Mesa and wlroots overrides.
+	install -Dm644 "$srcdir"/50-fogona-mesa.conf \
+		"$pkgdir"/usr/lib/environment.d/50-fogona-mesa.conf
+	install -Dm644 "$srcdir"/50-fogona-mesa.sh \
+		"$pkgdir"/etc/profile.d/50-fogona-mesa.sh
 }
 
 sha512sums="
 adfc4c221db66fd5bd15e1971c23dcdc675fdc4ebf193b5e9f1e71726005b902b3e3c2ff6845536497264c0730339ba680171d8e401ad2a01d6f0687ccb9e99f  deviceinfo
 3a1b6d06996bc3d2cbe9008c6d09992bf27783d2526f77c679ab64ec5d4c2deca680e93c9889c48b089538ee80085317c87cff7d49dd6bec384379be0b1d4b2a  kernel-cmdline.conf
+a013da73d5d520931c3ec92b3c2e9ac5f8b93d568795d0648381f87237dfe43632f91e3c281600145d4f9564a36ba3260e37569a8d7421f5db88e32ddc551400  50-fogona-mesa.conf
+6c506ad7cbb53c347f3c5dcdcef6c8f2425c771e2cdf4ff28621acf613df978470aed6cb06f7dabc76a3c5b4e7f898584edffa8f510744a8dec695d9d81354db  50-fogona-mesa.sh
 "
