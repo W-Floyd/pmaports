@@ -1,4 +1,4 @@
-From 0044c4fdefc7087b45385869d97d635d8d4e75f2 Mon Sep 17 00:00:00 2001
+From 41a104edbb6c86f216d325a42a77bae2d39ccc42 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
 Subject: [PATCH 20/20] ipa: soft: Add an Aperture algorithm
@@ -22,20 +22,59 @@ aperture UI rather than offering one that moves nothing.
 
 Signed-off-by: William Floyd <git@notmy.space>
 ---
- src/ipa/simple/algorithms/aperture.cpp | 299 +++++++++++++++++++++++++
+ src/apps/cam/camera_session.cpp        |  20 +-
+ src/ipa/simple/algorithms/aperture.cpp | 302 +++++++++++++++++++++++++
  src/ipa/simple/algorithms/aperture.h   |  72 ++++++
  src/ipa/simple/algorithms/meson.build  |   1 +
  src/libcamera/control_ids_core.yaml    |  40 ++--
- 4 files changed, 395 insertions(+), 17 deletions(-)
+ 5 files changed, 416 insertions(+), 19 deletions(-)
  create mode 100644 src/ipa/simple/algorithms/aperture.cpp
  create mode 100644 src/ipa/simple/algorithms/aperture.h
 
+diff --git a/src/apps/cam/camera_session.cpp b/src/apps/cam/camera_session.cpp
+index 17444a2..7d81e4d 100644
+--- a/src/apps/cam/camera_session.cpp
++++ b/src/apps/cam/camera_session.cpp
+@@ -197,15 +197,31 @@ void CameraSession::listControls() const
+ 				  << id->vendor() << "::" << id->name() << ":"
+ 				  << std::endl;
+ 
++			/*
++			 * Only an integer control can name its values, so
++			 * anything else is listed by value alone. Reading a
++			 * float control's values as int32 asserts.
++			 */
++			bool enumerated = id->type() == ControlTypeInteger32;
++
+ 			std::optional<int32_t> def;
+-			if (!info.def().isNone())
++			if (enumerated && !info.def().isNone())
+ 				def = info.def().get<int32_t>();
+ 
+ 			for (const auto &value : info.values()) {
++				std::cout << "  - ";
++
++				if (!enumerated) {
++					std::cout << value.toString();
++					if (value == info.def())
++						std::cout << " [default]";
++					std::cout << std::endl;
++					continue;
++				}
++
+ 				int32_t val = value.get<int32_t>();
+ 				const auto &it = id->enumerators().find(val);
+ 
+-				std::cout << "  - ";
+ 				if (it == id->enumerators().end())
+ 					std::cout << "UNKNOWN";
+ 				else
 diff --git a/src/ipa/simple/algorithms/aperture.cpp b/src/ipa/simple/algorithms/aperture.cpp
 new file mode 100644
-index 0000000..4dc49fb
+index 0000000..708b1c1
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/aperture.cpp
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,302 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd <git@notmy.space>
@@ -195,26 +234,29 @@ index 0000000..4dc49fb
 +			<< ", default f/" << fNumberDef_;
 +	}
 +
-+	/*
-+	 * Both kinds advertise a plain min/max range.
-+	 *
-+	 * Listing the exact stops in ControlInfo::values() would describe a
-+	 * discrete mechanism far better, but consumers assume that a control
-+	 * carrying values() is an int32 enumeration: cam's own control lister
-+	 * calls def().get<int32_t>() on it, which asserts on a float and
-+	 * aborts. Advertising the set that way breaks existing applications.
-+	 *
-+	 * A request between two stops is snapped to the nearest one and the
-+	 * metadata reports what was actually selected, so a range stays
-+	 * truthful for discrete hardware; it just cannot tell an application
-+	 * to draw two buttons rather than a slider. Publishing the set as a
-+	 * float array property, the way Android's
-+	 * android.lens.info.availableApertures does, is the way to fix that.
-+	 */
-+	context.ctrlMap[&controls::LensAperture] =
-+		ControlInfo(static_cast<float>(fNumberMin_),
-+			    static_cast<float>(fNumberMax_),
-+			    static_cast<float>(fNumberDef_));
++	if (discrete_) {
++		/*
++		 * List the exact stops. ControlInfo::values() is what tells an
++		 * application to offer a set of choices rather than a slider,
++		 * and it is the only route to the application: a static
++		 * property would not do, because the camera stack above
++		 * libcamera forwards controls generically but maps only a
++		 * hardcoded handful of properties.
++		 */
++		std::vector<ControlValue> values;
++		values.reserve(apertures_.size());
++		for (double f : apertures_)
++			values.push_back(ControlValue(static_cast<float>(f)));
++
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(Span<const ControlValue>(values),
++				    ControlValue(static_cast<float>(fNumberDef_)));
++	} else {
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(static_cast<float>(fNumberMin_),
++				    static_cast<float>(fNumberMax_),
++				    static_cast<float>(fNumberDef_));
++	}
 +
 +	return 0;
 +}
