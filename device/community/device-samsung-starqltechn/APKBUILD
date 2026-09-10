@@ -3,7 +3,7 @@ maintainer="Dzmitry Sankouski <dsankouski@gmail.com>"
 pkgname=device-samsung-starqltechn
 pkgdesc="Samsung Galaxy S9 SM-G9600"
 pkgver=14
-pkgrel=3
+pkgrel=4
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -28,6 +28,7 @@ source="
 	50-dwc3-runtime-pm.rules
 	50-libcamera.conf
 	52-iris-camera.conf
+	81-libssc-samsung-starqltechn.rules
 	boot_image.its
 	bootscript.sh
 	deviceinfo
@@ -56,6 +57,9 @@ package() {
 	install -D -m644 "$srcdir"/50-dwc3-runtime-pm.rules \
 		"$pkgdir"/usr/lib/udev/rules.d/50-dwc3-runtime-pm.rules
 
+	install -D -m644 "$srcdir"/81-libssc-samsung-starqltechn.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/81-libssc-samsung-starqltechn.rules
+
 	install -D -m644 -t "$pkgdir"/etc/wireplumber/wireplumber.conf.d/ \
 		"$srcdir"/50-libcamera.conf \
 		"$srcdir"/52-iris-camera.conf
@@ -66,6 +70,7 @@ sha512sums="
 2499783e3ae051d762dc1e08f67ce32bffd3aabaa3898dfbfa618041b5e2b32efec51daaccafdb60b405429930539f0d49f01d8b2c07f926acd39827075f898c  50-dwc3-runtime-pm.rules
 cde23d3e9dfaf6620486dd8eccb0b58466d23a807c90b3533c1c88b812c8c07e30e4c41fbc61c89237c99c9dc67e1e81906f333933c9afee1b01202e211be133  50-libcamera.conf
 b4315f1c4b526c7fa65b8a713f78e135854d65d315c9c493e044c346c092b5a74614a823d6f1d099ca0b67b8616ebf87fb5b08bfe849cc97e27e1f924d1a1f4f  52-iris-camera.conf
+d95be9453fe7627827a61ec618ad4f95882c74099302b5053ea0e1287bc6dc3b3b16a336db0c6a9dac82e31c4f8b604dbf76604e195d196ea3e8ce529992f5b0  81-libssc-samsung-starqltechn.rules
 3047ff60cb25564bec0637030917981653a5a85024b221d58f510585e5b2102dc806f4970976fef0854ea3d5803ea0b545e9b2b5b1045a9868aba2e7eff7f7c1  boot_image.its
 2a83c5a12111dd1fcc9ebd4f417f478ac50c7ba6eb4c50ee906e61afc6cdcab9663f31d44e99eb76094aa93a5768af43dba458c6fbb400772d3565093a0a46e5  bootscript.sh
 d65394db6585ac962d60885c1e2d136317247f3190385ac58f71cc139286df4e0e0e73da63ef84021e3e1d0e7efaba08294501d587d30a0a39d2b70035f00ed6  deviceinfo

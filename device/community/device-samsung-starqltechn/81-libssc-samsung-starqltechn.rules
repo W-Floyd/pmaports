@@ -1,0 +1,12 @@
+# iio-sensor-proxy with libssc: accelerometer mount matrix
+#
+# The SLPI firmware reports an all-zero mount matrix, so libssc falls back to
+# the identity matrix. The accelerometer is mounted rotated 180 degrees about
+# Z with respect to the display, which leaves every orientation reported 180
+# degrees out.
+#
+# Unlike most libssc devices this one does not need the Z axis inverted: lying
+# face up the sensor reads Z = +9.74 m/s2, so the tilt is already correct and
+# only the X and Y axes are negated.
+
+SUBSYSTEM=="misc", KERNEL=="fastrpc-*", ENV{ACCEL_MOUNT_MATRIX}+="-1, 0, 0; 0, -1, 0; 0, 0, 1"
