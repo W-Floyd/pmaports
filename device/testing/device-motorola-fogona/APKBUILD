@@ -6,7 +6,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=17
+pkgrel=18
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -71,6 +71,6 @@ package() {
 sha512sums="
 adfc4c221db66fd5bd15e1971c23dcdc675fdc4ebf193b5e9f1e71726005b902b3e3c2ff6845536497264c0730339ba680171d8e401ad2a01d6f0687ccb9e99f  deviceinfo
 3a1b6d06996bc3d2cbe9008c6d09992bf27783d2526f77c679ab64ec5d4c2deca680e93c9889c48b089538ee80085317c87cff7d49dd6bec384379be0b1d4b2a  kernel-cmdline.conf
-e25790e938db8c506e5b627b55902de57fcd59fdac87980ffdb136272e18b858297bf0d5d54f154ac13e711fd750c18ff530702eddf996f1fb7d6d8af2d481ea  50-fogona-mesa.conf
-c6c5c3fef01e85ae406f894e0cf6ea523b3d1c72e7a5b3466170d67669d41e201a66ba6c23340b373dc0e1f05f2baf63f09d3261b13be0c7217e095f4ed9b166  50-fogona-mesa.sh
+7095e69ebbc94959fea0fc46393b76535e8d445e3f1dac7763a18cbd1507eff1e7c1207062d90f5a6f25d34bc5338cfac5b85c572808060bc1f8614ac0dd7a1c  50-fogona-mesa.conf
+7095e69ebbc94959fea0fc46393b76535e8d445e3f1dac7763a18cbd1507eff1e7c1207062d90f5a6f25d34bc5338cfac5b85c572808060bc1f8614ac0dd7a1c  50-fogona-mesa.sh
 "
