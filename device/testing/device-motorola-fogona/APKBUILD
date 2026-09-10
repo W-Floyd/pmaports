@@ -6,7 +6,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=18
+pkgrel=19
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -35,10 +35,17 @@ options="!check !archcheck"
 # Not everything depends on it: touch firmware ships on the rootfs at
 # /lib/firmware/postmarketos/chipone_firmware.bin, and the CW2217 fuel gauge
 # takes its battery profile from the device tree.
+# mesa-vulkan-freedreno is Turnip, the Vulkan driver for the Adreno 610. It is
+# not required for the session -- wlroots and GTK render with GLES via
+# freedreno's gallium driver -- but without it the device has no Vulkan ICD at
+# all, so wlroots' Vulkan fallback path dead-ends and zink (present in
+# mesa-dri-gallium) has nothing to sit on. Added once the GPU actually worked;
+# it would have been dead weight before that.
 depends="
 	linux-postmarketos-qcom-sm6225
 	android-tools
 	make-dynpart-mappings
+	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
 "
