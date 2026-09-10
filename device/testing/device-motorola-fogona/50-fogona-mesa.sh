@@ -18,3 +18,13 @@ export MESA_LOADER_DRIVER_OVERRIDE=kms_swrast
 # also rules out client-buffer tiling as the cause. The real cause is still
 # open; see TODO.md.
 export WLR_DRM_NO_MODIFIERS=1
+
+# GTK4's GSK renderer defaults to GL, which segfaults under kms_swrast. Every
+# GTK4 app that renders a frame dies the same way -- gnome-control-center,
+# gnome-calls, phosh-mobile-settings all produced SIGSEGV cores with:
+#
+#   gsk_renderer_render -> libgtk-4 -> libEGL -> dri2_query_image (libgallium)
+#
+# Use the cairo renderer, which is software all the way down and does not go
+# near EGL. This predates the DSI work: the crashes happen on simpledrm too.
+export GSK_RENDERER=cairo
