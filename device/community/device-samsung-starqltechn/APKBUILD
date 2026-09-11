@@ -3,7 +3,7 @@ maintainer="Dzmitry Sankouski <dsankouski@gmail.com>"
 pkgname=device-samsung-starqltechn
 pkgdesc="Samsung Galaxy S9 SM-G9600"
 pkgver=14
-pkgrel=5
+pkgrel=7
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -74,6 +74,12 @@ package() {
 		"$pkgdir"/usr/lib/systemd/system/bt-address-from-efs.service
 	install -D -m644 "$srcdir"/85-bt-address-samsung-starqltechn.rules \
 		"$pkgdir"/usr/lib/udev/rules.d/85-bt-address-samsung-starqltechn.rules
+
+	# bootmac would put a generated address on this controller, and this
+	# device has the one the factory assigned it. Both answer the same udev
+	# event, so let only one of them.
+	mkdir -p "$pkgdir"/etc/systemd/system
+	ln -s /dev/null "$pkgdir"/etc/systemd/system/bootmac@bluetooth.service
 }
 
 
@@ -82,7 +88,7 @@ sha512sums="
 cde23d3e9dfaf6620486dd8eccb0b58466d23a807c90b3533c1c88b812c8c07e30e4c41fbc61c89237c99c9dc67e1e81906f333933c9afee1b01202e211be133  50-libcamera.conf
 b4315f1c4b526c7fa65b8a713f78e135854d65d315c9c493e044c346c092b5a74614a823d6f1d099ca0b67b8616ebf87fb5b08bfe849cc97e27e1f924d1a1f4f  52-iris-camera.conf
 d95be9453fe7627827a61ec618ad4f95882c74099302b5053ea0e1287bc6dc3b3b16a336db0c6a9dac82e31c4f8b604dbf76604e195d196ea3e8ce529992f5b0  81-libssc-samsung-starqltechn.rules
-331e684500bb3725a141673945113f59ffcfa8119035921e4a2150cc51c0d02cbca64b752040659dc97b56a07736608502d1f2ac4313edea04083e292472b205  85-bt-address-samsung-starqltechn.rules
+300157243c8aeccdc0968ec0d9c7f57758f21abe64417f3cdfa0ab607210bd04c050bbad786066c99adfaa4c99d68e2676c44a3981b3fee1901d32f78ab15ef0  85-bt-address-samsung-starqltechn.rules
 3047ff60cb25564bec0637030917981653a5a85024b221d58f510585e5b2102dc806f4970976fef0854ea3d5803ea0b545e9b2b5b1045a9868aba2e7eff7f7c1  boot_image.its
 2a83c5a12111dd1fcc9ebd4f417f478ac50c7ba6eb4c50ee906e61afc6cdcab9663f31d44e99eb76094aa93a5768af43dba458c6fbb400772d3565093a0a46e5  bootscript.sh
 78e669f5e0b18266148003bfd998a6a72e5b8c1c2fa4b8c1ef37e26fc867c2f966337a387f33bd51a255c9b1d41bf03fd1e7879260e0a70a8b1a019826c3d475  bt-address-from-efs

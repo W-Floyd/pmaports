@@ -1,0 +1,52 @@
+From: William Floyd <william.floyd@modopayments.com>
+Date: Fri, 11 Sep 2026 20:30:00 +0000
+Subject: [PATCH] udev: trigger on change as well as add
+
+A Bluetooth controller is published before it can be configured. One that
+loads firmware spends the whole download inside hdev->setup() with HCI_SETUP
+held, and the management interface deliberately hides it for all of that, so
+every attempt fails with "Invalid Index". On a Samsung Galaxy S9 the
+BCM4361B2 takes about ten seconds over it, which outlasts BT_TIMEOUT, and
+the controller keeps the default address every unit of that model shares.
+
+Retrying cannot fix this on its own: the rule fires at "add", which is
+simply too early, and how long the firmware takes is not ours to know.
+Raising the timeout would just be a longer guess.
+
+Kernels that report readiness send a change event once a controller can be
+configured. Match that too, rather than instead, so nothing regresses on
+kernels that do not send it: there, "add" behaves exactly as before.
+
+Reported upstream against systemd as issue #35003, closed as cant-fix --
+udev had nothing to wait for.
+
+Append SYSTEMD_WANTS rather than assigning it, too. Assigning replaces
+whatever an earlier rule asked for, so a device that configures its own
+controller from a lower-numbered rule silently loses it here and neither
+unit runs: this rule wins the assignment, and if it is masked, nothing
+starts at all. The variable is a space separated list and is meant to be
+added to.
+---
+ bootmac-bluetooth.rules | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+--- a/bootmac-bluetooth.rules
++++ b/bootmac-bluetooth.rules
+@@ -4,8 +4,15 @@
+ # SPDX-License-Identifier: GPL-3.0-or-later
+ #
+ 
++# A controller is published before it can be configured: one that loads
++# firmware holds HCI_SETUP for the whole download, and the management
++# interface hides it until that finishes, so "add" alone races the firmware
++# and loses. Kernels that report readiness send a change event once the
++# controller can be configured; match both, so this keeps working on kernels
++# that do not.
++#
+ # If systemd is available, use unit activation
+-ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST=="/run/systemd/system", TAG+="systemd", ENV{SYSTEMD_WANTS}="bootmac@bluetooth.service"
++ACTION=="add|change", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST=="/run/systemd/system", TAG+="systemd", ENV{SYSTEMD_WANTS}+="bootmac@bluetooth.service"
+ 
+ # Otherwise, run directly
+-ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST!="/run/systemd/system", RUN+="/usr/bin/bootmac --bluetooth"
++ACTION=="add|change", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TEST!="/run/systemd/system", RUN+="/usr/bin/bootmac --bluetooth"
