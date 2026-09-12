@@ -1,12 +1,12 @@
 maintainer="Dzmitry Sankouski <dsankouski@gmail.com>"
 pkgname=firmware-samsung-sdm845
 pkgver=20260323
-pkgrel=3
+pkgrel=4
 pkgdesc="Firmware for Samsung Galaxy S9 series phones based on SDM845 SoC"
 url="https://github.com/dsankouski/firmware-samsung-sdm845"
 arch="aarch64"
 license="proprietary"
-subpackages="$pkgname-brcm:brcm $pkgname-brcm-bt:brcm_bt"
+subpackages="$pkgname-brcm:brcm"
 options="!check !strip !spdx !archcheck !tracedeps textrels pmb:cross-native"
 
 _version="538a9464ebd63d6b65ba9f217f6056762b93150d"
@@ -15,7 +15,6 @@ source="$pkgname-$_version.tar.gz::$url/archive/$_version.tar.gz
 	sensors.files
 	brcm-vendor-fw.sh
 	brcm-vendor-fw.service
-	btattach-bcm.service
 "
 
 package() {
@@ -43,30 +42,9 @@ brcm() {
 		"$subpkgdir"/usr/lib/systemd/system/sysinit.target.wants/brcm-vendor-fw.service
 }
 
-brcm_bt() {
-	pkgdesc="BCM4361 Bluetooth attach service for the Galaxy S9"
-	depends="bluez $pkgname-brcm=$pkgver-r$pkgrel"
-
-	# Attached with btattach rather than serdev: the DTB for this device
-	# deliberately has no bluetooth node so /dev/ttyHS1 stays free. btbcm maps
-	# the HCI subversion (0x4309) to BCM4361B2 and requests
-	# brcm/BCM4361B2.hcd, which brcm-vendor-fw links from the vendor
-	# partition; that needs a kernel carrying the BCM4361B2 entry in
-	# bcm_uart_subver_table.
-	#
-	# Not install_if: pulling in bluez should be a deliberate choice, and this
-	# depends on DTS details that may change.
-	install -Dm644 "$srcdir"/btattach-bcm.service \
-		"$subpkgdir"/usr/lib/systemd/system/btattach-bcm.service
-	mkdir -p "$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants
-	ln -s ../btattach-bcm.service \
-		"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/btattach-bcm.service
-}
-
 sha512sums="
 55df6eac3260c64062e8d8334c3d315c1a14cdecef481353aac589f8f855a90effc738b36b42afb872e2caa2cff71c3e995738799506809aac8fe47ae4f683f4  firmware-samsung-sdm845-538a9464ebd63d6b65ba9f217f6056762b93150d.tar.gz
 e890c4b5acd5f992ea2eb5449b00f665d5ceff1919a5d8ef26d963be91a0870b80d1292329eb25e9af9065c8c73e8f414e85ba3526494c76fc9a64f399d24064  sensors.files
 777e18573c12a48806c52c969f9649051420c12b363b2c8af6b4064167f7d70d92958ae31efc1873ef7fc516ba212208239f36c7bbd16d352c3d4c243641b1df  brcm-vendor-fw.sh
 eea4c7cae45c2dade76327a527cae520b52b62b15dd3a87b4b70e9243109c952933d435c034039ba188bd41e6e6ac1ad0b09e8db2ecbdc4cf2e45197c6a759cd  brcm-vendor-fw.service
-ca9cf5dfad04d243bccf3fe3020690d9fc2b3363f8c983d39ea93abc9ff310c24190656424f612a364c6571dec3a2aebca42404d9b33bb2ac0a769db6cea61a7  btattach-bcm.service
 "
