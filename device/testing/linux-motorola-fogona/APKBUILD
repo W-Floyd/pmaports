@@ -1,0 +1,128 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# The fogona mainline kernel (7.3), as a package rather than a tarball copied
+# over SSH by hand. See /repo/HANDOFF.md section 2 for the branch layout: this
+# packages the tip of `fogona-mainline`, which is the top of a four-layer stack
+# (upstream-fixes -> sm6225 -> fogona-drivers -> fogona).
+#
+# WHAT THIS PACKAGE DOES AND DOES NOT OWN
+#
+# It owns the modules, the DTB and the staged Image. It does NOT produce the
+# thing you boot. This bootloader's `fastboot boot` takes the DTB, cmdline and
+# ramdisk from FLASH and ignores anything staged, so the only way to supply our
+# own is to chainload U-Boot with a FIT -- which is what `/repo/tools/mkboot.sh`
+# builds. So the flow stays:
+#
+#     pmbootstrap build --src=$HOME/fogona-mainline linux-motorola-fogona
+#     ... install the apk on the device (modules land in /lib/modules)
+#     sh /repo/tools/mkboot.sh <name>   # still how you get a bootable image
+#
+# The point of packaging is that modules stop being hand-copied: they are
+# versioned, `apk` knows what is installed, and they cannot drift out of sync
+# with the Image the way they did on 2026-09-11 (twice -- first missing
+# entirely, then stale under an unchanged version string; CONFIG_MODVERSIONS is
+# off, so neither failure is loud).
+#
+# BUILDING LOCALLY, WITHOUT PUSHING
+#
+# `--src` bind-mounts a local tree and skips `source=` and its checksums
+# entirely, which is the right mode during bringup while the branch is being
+# rebased:
+#
+#     pmbootstrap build --src=$HOME/fogona-mainline linux-motorola-fogona
+#
+# `_commit` below is for reproducible builds from the pushed branch. It has to
+# be a commit, never a branch: abuild checksums the source, and a moving branch
+# breaks its own checksum. Re-pin it and run `pmbootstrap checksum
+# linux-motorola-fogona` after any rebase -- and note that rebasing the stack
+# rewrites every hash above the layer you touched, so this changes far more
+# often than the diff does.
+
+maintainer="William Floyd <git@notmy.space>"
+_flavor="motorola-fogona"
+pkgname=linux-$_flavor
+pkgver=7.3_rc2
+pkgrel=0
+pkgdesc="Mainline kernel for the Motorola Moto G Play (2024) (fogona, SM6225)"
+arch="aarch64"
+_carch="arm64"
+url="https://github.com/W-Floyd/linux"
+license="GPL-2.0-only"
+
+# No pmb:kconfigcheck-* here on purpose. fogona.config is deliberately
+# bringup-minimal (HANDOFF section 3) -- the pmOS conveniences live in
+# fogona-extra.config and are opt-in -- so the community/testing kconfig
+# profiles do not pass and are not meant to yet.
+options="!strip !check !tracedeps pmb:cross-native"
+
+makedepends="
+	bash
+	bc
+	bison
+	findutils
+	flex
+	installkernel
+	openssl-dev
+	perl
+	python3
+	xz
+	zstd
+"
+# python3 above is not optional: drm/msm generates its register headers from
+# XML at build time (drivers/gpu/drm/msm/Makefile GENHDR -> gen_header.py), so
+# without it the build dies as a bare "Error 127" deep inside drivers/gpu/drm
+# with nothing naming Python. Kernels that do not enable DRM_MSM never hit it,
+# which is why the downstream templates omit it.
+# (And note comments cannot live *inside* makedepends -- it is a plain string,
+# so a '#' line is parsed as a package name: "dependency not found: #".)
+
+# Tip of `fogona-mainline`. Bump with every rebase; see the note above.
+_commit="07d5422849a8ead402dc86f718ca8612b67847f1"
+_config="config-$_flavor.$arch"
+
+source="
+	$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz
+	$_config
+"
+builddir="$srcdir/linux-$_commit"
+
+prepare() {
+	default_prepare
+	cp "$srcdir/$_config" .config
+}
+
+build() {
+	unset LDFLAGS
+	# GCC, not LLVM=1 as the other qcom mainline packages use. The tree was
+	# brought up and validated with gcc 15.2, and a compiler swap is not a
+	# free change on a port this young -- match the toolchain that booted.
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1))-$_flavor"
+}
+
+package() {
+	make modules_install zinstall dtbs_install \
+		ARCH="$_carch" \
+		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_MOD_PATH="$pkgdir"/usr \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
+
+	mkdir -p "$pkgdir"/boot/dtbs/qcom
+	cp -r "$pkgdir"/boot/dtbs-tmp/qcom/sm6225-motorola-fogona*.dtb \
+		"$pkgdir"/boot/dtbs/qcom
+	rm -rf "$pkgdir"/boot/dtbs-tmp
+
+	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
+}
+
+# The tarball hash is a placeholder until the branch is pushed -- regenerate
+# both with `pmbootstrap checksum linux-motorola-fogona`. It is not needed for
+# `--src` builds, which bypass source fetching and checksums.
+sha512sums="
+2f38d894f87eb7fb063dc81a7169080f03d31a28b9b01c726573110e3698039a322347748045c11a3c48ffe927673d2a389f365d4f74462cd414edba5859e290  linux-motorola-fogona-07d5422849a8ead402dc86f718ca8612b67847f1.tar.gz
+be85c3d6bfa0328b72e369d1281b5bbc141d0c9c40ac7583c1b5d53d6c98cf7f5c1f0418c3b3cf9b217fdb9dee8fe1e49dd741cc3ee640fc9d028e50eaf33912  config-motorola-fogona.aarch64
+"
