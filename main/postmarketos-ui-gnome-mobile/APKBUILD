@@ -4,7 +4,7 @@
 maintainer="Stefan Hansson <newbyte@postmarketos.org>"
 pkgname=postmarketos-ui-gnome-mobile
 pkgver=5
-pkgrel=0
+pkgrel=1
 pkgdesc="(Wayland) Gnome Shell patched to adapt better to phones (Experimental)"
 url="https://gnome.org/"
 arch="noarch !armhf !riscv64" # gnome-shell / riscv64: mutter-mobile
@@ -35,6 +35,7 @@ _pmb_recommends="
 	gnome-mobile-extensions-app
 	postmarketos-welcome
 	"
+_pmb_groups="feedbackd"
 subpackages="$pkgname-openrc"
 options="!check pmb:default-systemd pmb:support-openrc pmb:support-systemd"
 
