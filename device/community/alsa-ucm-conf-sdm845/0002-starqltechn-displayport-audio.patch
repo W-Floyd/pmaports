@@ -1,0 +1,78 @@
+From: William Floyd <git@notmy.space>
+Subject: [PATCH] starqltechn: add DisplayPort audio as its own use case
+
+The board can now carry audio over DisplayPort, so describe it.
+
+It is a separate verb rather than a device inside HiFi on purpose.
+msm_dp_audio_prepare() refuses unless the display is powered on, and the
+encoder is configured from hw_params, so that refusal lands during
+PulseAudio's profile probe. ACP discards a whole profile when any one of its
+mappings fails to open -- which is how the headset mic on a dead SLIMBUS
+backend once took the speakers down with it -- so a DisplayPort device inside
+HiFi would lose all audio whenever no display was attached. As its own verb
+it fails harmlessly and HiFi is untouched.
+
+MultiMedia5 carries it, MultiMedia1..4 being spoken for.
+---
+--- /dev/null
++++ b/ucm2/Samsung/starqltechn/DisplayPort.conf
+@@ -0,0 +1,45 @@
++# DisplayPort audio for Samsung Galaxy S9 SM-G9600 (starqltechn).
++#
++# Deliberately a separate verb rather than a device inside HiFi.
++#
++# msm_dp_audio_prepare() refuses with -EINVAL unless the DisplayPort display is
++# powered on, and with the encoder now configured from hw_params that refusal
++# lands during PulseAudio's profile probe.  ACP discards an entire profile when
++# any one of its mappings fails to open, so a DisplayPort device inside HiFi
++# would take the speakers and microphones down with it every time no display
++# was attached -- which is most of the time.
++#
++# As its own verb it can fail harmlessly: selecting this profile without a
++# display simply does not work, and HiFi is untouched.
++#
++# MultiMedia5 is used because MultiMedia1..4 already belong to HiFi.
++
++SectionVerb {
++	EnableSequence [
++		cset "name='DISPLAY_PORT_RX Audio Mixer MultiMedia5' 1"
++	]
++
++	DisableSequence [
++		cset "name='DISPLAY_PORT_RX Audio Mixer MultiMedia5' 0"
++	]
++
++	Value {
++		TQ "HiFi"
++	}
++}
++
++SectionDevice."DisplayPort" {
++	Comment "DisplayPort display"
++
++	EnableSequence [
++	]
++
++	DisableSequence [
++	]
++
++	Value {
++		PlaybackPriority 10
++		PlaybackPCM "hw:${CardId},4" # MultiMedia5
++		PlaybackChannels 2
++	}
++}
+--- a/ucm2/Samsung/starqltechn/starqltechn.conf
++++ b/ucm2/Samsung/starqltechn/starqltechn.conf
+@@ -5,6 +5,11 @@
+ 	Comment "HiFi quality Music."
+ }
+ 
++SectionUseCase."DisplayPort" {
++	File "/Samsung/starqltechn/DisplayPort.conf"
++	Comment "Audio over DisplayPort"
++}
++
+ SectionUseCase."Voice Call" {
+ 	File "/Samsung/starqltechn/VoiceCall.conf"
+ 	Comment "Make a phone call"
