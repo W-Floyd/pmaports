@@ -3,7 +3,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=21
+pkgrel=27
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -38,19 +38,41 @@ options="!check !archcheck"
 # all, so wlroots' Vulkan fallback path dead-ends and zink (present in
 # mesa-dri-gallium) has nothing to sit on. Added once the GPU actually worked;
 # it would have been dead weight before that.
+# linux-motorola-fogona is our own 7.3 tree. This used to be
+# linux-postmarketos-qcom-sm6225 (TQMatvey's 6.1) -- a packaged kernel that was
+# never the one the phone ran, which is how /lib/modules ended up hand-copied.
+# Note the apk does not produce the bootable image: this bootloader ignores a
+# staged kernel, so /repo/tools/mkboot.sh still builds the U-Boot FIT you
+# `fastboot boot`. What the package buys is that modules are versioned and
+# cannot drift out of sync with the Image.
+# u-boot-tools is for mkimage, which fogona-mkboot.sh needs to build the FIT on
+# the device, and dtc is what mkimage shells out to in order to compile the .its
+# -- without it mkimage fails with a bare "dtc: not found". android-tools already
+# covers mkbootimg and avbtool. Together they let the handset assemble and write
+# its own boot image, so a kernel update is `apk upgrade && reboot` rather than a
+# manual fastboot cycle -- the same thing boot-deploy does for 47 other devices,
+# except fogona's boot image is a U-Boot+FIT payload and needs its own assembly
+# step. u-boot-fogona supplies the payload those scripts weld the FIT onto;
+# fogona-mkboot exits with "missing: /usr/share/u-boot/fogona/u-boot-txt0.bin"
+# without it.
 depends="
-	linux-postmarketos-qcom-sm6225
+	linux-motorola-fogona
 	android-tools
 	make-dynpart-mappings
 	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
+	u-boot-tools
+	u-boot-fogona
+	dtc
 "
 makedepends="devicepkg-dev"
 source="deviceinfo
 	kernel-cmdline.conf
 	50-fogona-mesa.conf
 	50-fogona-mesa.sh
+	fogona-mkboot.sh
+	fogona-flash-boot.sh
 	"
 
 build() {
@@ -70,11 +92,21 @@ package() {
 		"$pkgdir"/usr/lib/environment.d/50-fogona-mesa.conf
 	install -Dm644 "$srcdir"/50-fogona-mesa.sh \
 		"$pkgdir"/etc/profile.d/50-fogona-mesa.sh
+
+	# On-device boot image assembly + flashing. See the scripts for why fogona
+	# cannot use boot-deploy's bootimg_override_* path (that layout puts the FIT
+	# in the ramdisk slot, which this bootloader does not hand over).
+	install -Dm755 "$srcdir"/fogona-mkboot.sh \
+		"$pkgdir"/usr/sbin/fogona-mkboot
+	install -Dm755 "$srcdir"/fogona-flash-boot.sh \
+		"$pkgdir"/usr/sbin/fogona-flash-boot
 }
 
 sha512sums="
-adfc4c221db66fd5bd15e1971c23dcdc675fdc4ebf193b5e9f1e71726005b902b3e3c2ff6845536497264c0730339ba680171d8e401ad2a01d6f0687ccb9e99f  deviceinfo
-3a1b6d06996bc3d2cbe9008c6d09992bf27783d2526f77c679ab64ec5d4c2deca680e93c9889c48b089538ee80085317c87cff7d49dd6bec384379be0b1d4b2a  kernel-cmdline.conf
+8c6a6f9dad39485916ac50f8c82994a5cd41d9c81f7a311901f75e11959e1b0e3de3882a4c11b647db4a862e996a2dad27909148572a4ac03d1f5c295dce43ac  deviceinfo
+4447ae70949a72934b420bc3ed15d4d55e1d9e1b49a40064d1ab0c46786f6ba8d1396b81889a626087ef9841f2882eed11bc361c7a6a27035125d7c8897c4d28  kernel-cmdline.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.sh
+f6d0fdf53fbdf12e7eb4e0d7205788899b6c3b46e8dadcb9b16b4622ba64e4e9ec0ceb96f33692246f11f818d52ca8d6ebb471cc4aefcb1c4275d84f6ffad699  fogona-mkboot.sh
+553d72161bb312ada97a0609b0cc606e4893ed9303ac2cea9882e8ef7515661105377f087029c3efbd49dba0da4625da1a4cc839449f1abca8e92a5614b2e22d  fogona-flash-boot.sh
 "

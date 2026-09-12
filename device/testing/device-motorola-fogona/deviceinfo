@@ -2,20 +2,27 @@
 # Please use double quotes only. You can source this file in shell
 # scripts.
 #
-# UNVERIFIED. Nothing here has been confirmed against hardware -- there is no
-# mainline DTS for fogona, so nothing has booted. Values are derived from the
-# LineageOS device tree (naf419/android_device_motorola_fogona, BoardConfig.mk)
-# and from device-lenovo-tb128fu, the only other SM6225 port.
-# See ../../../../README.md, "What is actually unknown".
+# Originally written from the LineageOS device tree
+# (naf419/android_device_motorola_fogona, BoardConfig.mk) and device-lenovo-tb128fu,
+# before anything booted. That header is no longer true: fogona boots mainline,
+# and the boot geometry below has since been verified against the stock
+# vendor_boot header read off this handset. Individual values say which are
+# confirmed and which are still inherited guesses.
 
 deviceinfo_format_version="0"
 deviceinfo_name="Motorola Moto G Play (2024)"
 deviceinfo_manufacturer="Motorola"
 deviceinfo_codename="motorola-fogona"
 deviceinfo_year="2024"
-# One DTB per panel variant, as device-motorola-dubai does. This unit is the
-# Tianma ICNL9916C; the csot/nt36528 and txd/ili9883c variants are not written
-# yet. Panel identity does not affect step 1 (simple-framebuffer).
+# One DTB per panel variant, as device-motorola-dubai does: fogona is
+# dual-sourced, so the panel cannot be assumed. This unit is the Tianma
+# ICNL9916C; csot/nt36528 and txd/ili9883c are not written yet.
+#
+# This must match a DTB the kernel package actually ships. Until 2026-09-12 the
+# tree built only `sm6225-motorola-fogona.dtb` while this asked for the
+# -icnl9916c name, so boot-deploy packed a stray 6 KiB DTB from elsewhere in
+# /boot/dtbs instead of fogona's 58 KiB one, and vendor_boot described the wrong
+# board. Fixed by naming the DTS for its panel, not by dropping the suffix.
 deviceinfo_dtb="qcom/sm6225-motorola-fogona-icnl9916c"
 deviceinfo_arch="aarch64"
 
