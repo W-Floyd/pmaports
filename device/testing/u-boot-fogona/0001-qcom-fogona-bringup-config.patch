@@ -1,0 +1,235 @@
+From 89671b60a68c274049639987e16b53520a1fe697 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 9 Sep 2026 22:04:04 +0000
+Subject: [PATCH] qcom: add Motorola Moto G Play (2024) (fogona) bringup config
+
+fogona's ABL refuses every non-stock device tree we can hand it, in any
+shape -- padded, header_version 2 with the DTB in its own field, nulled
+dtbo, empty dtbo table, purpose-built matching overlay, with or without
+an AVB footer. Chainloading U-Boot is the way past that, because U-Boot
+carries its own DT and ABL never parses one.
+
+The one non-obvious prerequisite is not in this commit because it is a
+post-link fixup: ABL validates text_offset in the arm64 image header,
+and CONFIG_POSITION_INDEPENDENT makes U-Boot report its link-time VA
+(0xffffffff80000000) where a kernel reports 0. Zeroing those 8 bytes at
+offset 8 is the difference between "black screen, back to fastboot" and
+U-Boot actually running.
+
+qcom-phone.env gains a bootcmd that probes the addresses a FIT can land
+at and boots the first one that passes iminfo, plus bootretry=-1 so a
+failed probe drops to fastboot instead of looping. The payload we ship
+is U-Boot padded to 8 MiB with a FIT appended, so the first candidate
+(0x40880000) is U-Boot's load address plus that offset.
+
+Caveat worth recording: U-Boot has no SMD/RPM regulator driver, and
+khaje's rails are pm6125 LDOs behind an RPM (Cortex-M3), not RPMh --
+drivers/power/regulator/ has RPMh only. So U-Boot cannot switch any rail
+here, which is why USB gadget and UFS do not come up in U-Boot even
+though Linux drives both fine once chainloaded.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ board/qualcomm/fogona.config                  |  16 +++
+ board/qualcomm/qcom-phone.env                 |  18 ++-
+ .../src/arm64/qcom/sm6225-motorola-fogona.dts | 134 ++++++++++++++++++
+ 3 files changed, 167 insertions(+), 1 deletion(-)
+ create mode 100644 board/qualcomm/fogona.config
+ create mode 100644 dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dts
+
+diff --git a/board/qualcomm/fogona.config b/board/qualcomm/fogona.config
+new file mode 100644
+index 00000000..22bc5109
+--- /dev/null
++++ b/board/qualcomm/fogona.config
+@@ -0,0 +1,16 @@
++# fogona bringup: come up as a USB fastboot device unconditionally.
++#
++# There is no serial console (ABL leaves the geni UART unclocked) and the only
++# key on TLMM is volume-up, so an interactive prompt is impractical. U-Boot's
++# fastboot gives both a control channel and, with CONSOLE_RECORD, a log dump
++# via `fastboot oem console`.
++CONFIG_USE_BOOTCOMMAND=y
++CONFIG_BOOTCOMMAND="scsi scan; run fastboot"
++CONFIG_BOOTDELAY=0
++
++# Tiny console font: the default 16x32 gives 45x50 chars on fogona's 720x1600
++# panel, so anything verbose scrolls off. 4x6 gives 180x266.
++# 4x6 was legible but too small to read comfortably; 6x8 gives 120x200.
++CONFIG_VIDEO_FONT_6X8=y
++# CONFIG_VIDEO_FONT_4X6 is not set
++# CONFIG_VIDEO_FONT_16X32 is not set
+diff --git a/board/qualcomm/qcom-phone.env b/board/qualcomm/qcom-phone.env
+index 5eaa2cea..da02dac9 100644
+--- a/board/qualcomm/qcom-phone.env
++++ b/board/qualcomm/qcom-phone.env
+@@ -1,5 +1,7 @@
+ bootdelay=0
+-bootretry=1
++# fogona: do NOT retry. bootretry re-runs bootcmd every second, which scrolls
++# the failure messages off the panel before they can be read.
++bootretry=-1
+ stdin=serial,button-kbd
+ stdout=serial,vidconsole
+ stderr=serial,vidconsole
+@@ -46,3 +48,17 @@ bootmenu_10=Power off=poweroff
+ # the boot menu
+ button_cmd_0_name=Volume Down
+ button_cmd_0=run menucmd
++
++# fogona bringup: no serial console and only one key on TLMM, so come up as a
++# USB fastboot device unconditionally. Gives a control channel plus a log dump
++# via `fastboot oem console` (CONSOLE_RECORD is enabled above).
++# fogona bringup: boot the FIT that ABL loaded as the boot image's ramdisk.
++#
++# NOT ramdisk_addr_r -- board_late_init() sets that to an lmb_alloc'd scratch
++# region for U-Boot to load things INTO, unrelated to where the previous stage
++# put anything. ABL records the real location in the device tree it hands us,
++# as /chosen/linux,initrd-start, so read it from our own fdt.
++#
++# This route needs no storage, no USB and no regulator control, none of which
++# U-Boot has on khaje (its rails are RPM/SMD; U-Boot only ships RPMh).
++bootcmd=for a in 0x40880000 0x40800000 0x41800000 0x40808000; do echo == probe $a; if iminfo $a; then bootm $a; fi; done; echo == no FIT at any candidate; bdinfo; run fastboot
+diff --git a/dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dts b/dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dts
+new file mode 100644
+index 00000000..62d318e8
+--- /dev/null
++++ b/dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dts
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * U-Boot board file: Motorola Moto G Play (2024) -- "fogona", SM6225 (khaje).
++ *
++ * Deliberately includes sm6115.dtsi and claims the sm6115 compatibles, because
++ * U-Boot's Qualcomm support has clock-sm6115.c and pinctrl-sm6115.c and no
++ * sm6225 equivalents. khaje is a bengal derivative, and mainline Linux's
++ * gcc-sm6115 was confirmed to bind on this silicon (measured: it claimed the
++ * clock controller at 0x1400000 and probed), so the same bet applies here.
++ *
++ * msm-id is measured, not inherited: /sys/devices/soc0/soc_id = 518 = 0x206,
++ * revision 1.0. fogona ships two base DTBs differing only in this property
++ * (0x24a and 0x206); this unit is 0x206.
++ *
++ * The framebuffer address is the same 0x5c000000 the fxtec sm6115 board uses,
++ * confirmed on fogona from the live device tree
++ * (splash_region@5c000000, 0xf00000) -- the panel is 720x1600 rather than
++ * 1080x2160.
++ */
++
++/dts-v1/;
++
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/linux-event-codes.h>
++#include "sm6115.dtsi"
++
++/ {
++	model = "Motorola Moto G Play (2024)";
++	compatible = "motorola,fogona", "qcom,sm6115";
++	chassis-type = "handset";
++
++	qcom,msm-id = <0x206 0x10000>;
++
++	chosen {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		framebuffer0: framebuffer@5c000000 {
++			compatible = "simple-framebuffer";
++			reg = <0x0 0x5c000000 0x0 (720 * 1600 * 4)>;
++			width = <720>;
++			height = <1600>;
++			stride = <(720 * 4)>;
++			format = "a8r8g8b8";
++			clocks = <&gcc GCC_DISP_HF_AXI_CLK>;
++		};
++	};
++	/*
++	 * UFS supplies. fogona's real rails are pm6125 LDOs behind RPM/SMD,
++	 * which U-Boot has no driver for -- and ABL has already powered them,
++	 * since it boots the device from UFS. An always-on fixed regulator is
++	 * an honest stand-in for bringup.
++	 */
++	vreg_ufs_bringup: regulator-ufs-bringup {
++		compatible = "regulator-fixed";
++		regulator-name = "vreg_ufs_bringup";
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	/*
++	 * Volume-up is the only key on TLMM (gpio 5); power and volume-down
++	 * hang off the PMIC. One key is enough for U-Boot's "press any key".
++	 */
++	gpio-keys {
++		compatible = "gpio-keys";
++
++		key-volume-up {
++			label = "Volume Up";
++			gpios = <&tlmm 5 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_VOLUMEUP>;
++		};
++	};
++};
++
++&ufs_mem_hc {
++	vcc-supply = <&vreg_ufs_bringup>;
++	vccq2-supply = <&vreg_ufs_bringup>;
++	vdd-hba-supply = <&vreg_ufs_bringup>;
++	status = "okay";
++};
++
++&ufs_mem_phy {
++	vdda-phy-supply = <&vreg_ufs_bringup>;
++	vdda-pll-supply = <&vreg_ufs_bringup>;
++	status = "okay";
++};
++
++/*
++ * USB. fogona is USB 2.0 only -- Motorola's schematics break out USB0_CC1/CC2
++ * to testpoints but carry no SBU, and USB0_SS_* / USB0_DP_AUX_* have no
++ * cross-sheet routing at all. So enable the HS phy and pin dwc3 to
++ * high-speed, dropping the superspeed phy that sm6115.dtsi expects; otherwise
++ * dwc3 waits on a qmpphy this board does not have.
++ *
++ * Supplies come from the bringup fixed regulator for the same reason as UFS:
++ * the real rails are pm6125 LDOs behind RPM/SMD, and ABL has already brought
++ * them up (it serves fastboot over this very port).
++ */
++&usb {
++	status = "okay";
++};
++
++&usb_dwc3 {
++	phys = <&usb_hsphy>;
++	phy-names = "usb2-phy";
++	maximum-speed = "high-speed";
++	dr_mode = "peripheral";
++};
++
++&usb_hsphy {
++	vdd-supply = <&vreg_ufs_bringup>;
++	vdda-pll-supply = <&vreg_ufs_bringup>;
++	vdda-phy-dpdm-supply = <&vreg_ufs_bringup>;
++	status = "okay";
++};
++
++/*
++ * khaje reserves GPIOs 14-17. From Qualcomm's own downstream driver:
++ *
++ *   static const int khaje_reserved_gpios[] = { 14, 15, 16, 17, -1 };
++ *       -- drivers/pinctrl/qcom/pinctrl-khaje.c
++ *
++ * Touching them during gpio init is what crashes TLMM on this SoC; it cost
++ * another porter a day ("it would always crash at gpio init ... just had to
++ * add the dummy pins to the reserved list and it boots"). ngpios stays 114,
++ * which Qualcomm's driver, mainline pinctrl-sm6115 and the unmerged
++ * pinctrl-sm6225 all agree on -- the datasheet's "GPIOs (125)" counts
++ * something else, most likely PMIC GPIOs.
++ */
++&tlmm {
++	gpio-reserved-ranges = <14 4>;
++};
+-- 
+2.55.0
+
