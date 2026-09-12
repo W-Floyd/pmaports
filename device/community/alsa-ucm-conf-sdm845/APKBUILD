@@ -2,7 +2,7 @@
 maintainer="Casey Connolly <kcxt@postmarketos.org>"
 pkgname=alsa-ucm-conf-sdm845
 pkgver=3
-pkgrel=0
+pkgrel=1
 pkgdesc="ALSA UCM configuration for Qualcomm SDM845 devices"
 url="https://gitlab.com/sdm845-mainline/alsa-ucm-conf"
 arch="aarch64"
@@ -10,9 +10,11 @@ license="BSD-3-Clause"
 provides="alsa-ucm-conf=0.$pkgver-r$pkgrel" # versioned provides need to be below default version
 replaces="soc-qcom-sdm845-ucm"
 _commit="1b8d290e5aa2ca16b7f2fa8d74910ad19ef88b3a"
-source="$pkgname-$_commit.tar.gz::https://gitlab.com/sdm845-mainline/alsa-ucm-conf/-/archive/$_commit/alsa-ucm-conf-$_commit.tar.gz"
+source="$pkgname-$_commit.tar.gz::https://gitlab.com/sdm845-mainline/alsa-ucm-conf/-/archive/$_commit/alsa-ucm-conf-$_commit.tar.gz
+	0001-starqltechn-headset-mic-and-jack-names.patch
+	"
 options="!check"
-builddir="$srcdir/$pkgname-$_commit"
+builddir="$srcdir/alsa-ucm-conf-$_commit"
 
 package() {
 	# install audio config files
@@ -23,4 +25,5 @@ package() {
 
 sha512sums="
 6efa31efc346bdd2c6b07b56ee9b70374745fc4cb8b1585a5125d4674a67cb88ee32f8ae61cad33f2ba4cb54d884d48450fc7e6bcddef8aab7837ff089dad26d  alsa-ucm-conf-sdm845-1b8d290e5aa2ca16b7f2fa8d74910ad19ef88b3a.tar.gz
+04b7a0751fb6c08134eddbe32659c7dc935a5fa56494c3f45074ae11372ab84e00f2b68ba711c331a9f56fa766aea14841e816d0cddebe529278595252ff5450  0001-starqltechn-headset-mic-and-jack-names.patch
 "

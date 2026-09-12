@@ -1,0 +1,248 @@
+
+Ordering matters in the verb sequence and is called out in a comment there:
+q6routing tracks a single backend per front end in session->port_id, so
+claiming a new backend powers up the new DAPM path while leaving the old one
+connected, and the later "turn the old one off" cset is a no-op because
+port_id no longer matches. The stale path keeps SLIMBUS_1_TX in
+MultiMedia4's DPCM backend list, which is what fails to start. Releasing
+SLIMBUS_1_TX before claiming SLIMBUS_0_TX avoids it.
+---
+--- a/ucm2/Samsung/starqltechn/HiFi.conf
++++ b/ucm2/Samsung/starqltechn/HiFi.conf
+@@ -7,14 +7,37 @@
+ #	- Headphones			: WCD934x driver : MultiMedia3 <-> SLIMBUS_1_RX (AIF2_PB, RX2, RX3)
+ # Capture Devices
+ #	- Internal Mics		: WCD934x driver : MultiMedia2 <-> SLIMBUS_0_TX (AIF1_CAP, DMIC0, TX7, DMIC2, TX8)
+-#	- Headset Mic			: WCD934x driver : MultiMedia4 <-> SLIMBUS_1_TX (AIF2_CAP, ADC2, TX0)
++#	- Headset Mic			: WCD934x driver : MultiMedia4 <-> SLIMBUS_0_TX (AIF1_CAP, ADC2, TX0)
++#
++# NOTE: the headset mic deliberately runs over SLIMBUS_0_TX / AIF1_CAP, not the
++# SLIMBUS_1_TX / AIF2_CAP path the hardware documentation implies.  The ADSP on
++# this device rejects AFE_PORT_CMD_DEVICE_START for SLIMBUS_1_TX (port 0x4003)
++# with ADSP_EALREADY, so every capture open on that backend fails at prepare().
++# Because PipeWire's ACP discards a whole profile when any one mapping fails to
++# open, that single broken backend took the entire HiFi profile down with it.
++#
++# Consequence of the workaround: AIF1_CAP carries either the two internal DMICs
++# (TX7+TX8) or the headset mic (TX0), never both -- a 3-channel AIF1_CAP
++# configuration makes the SLIMBUS NGD time out (Tx:MT:0x2, MC:0x2c failed:-110).
++# The Handset and HeadsetMic sequences below therefore switch the codec's TX
++# ports over rather than adding to them.
+ 
+ SectionVerb {
+ 	EnableSequence [
+ 		cset "name='QUAT_MI2S_RX Audio Mixer MultiMedia1' 1"
+ 		cset "name='SLIMBUS_1_RX Audio Mixer MultiMedia3' 1"
+ 		cset "name='MultiMedia2 Mixer SLIMBUS_0_TX' 1"
++		# Order matters. q6routing tracks a single backend per front end in
++		# session->port_id: claiming a new backend powers up the new DAPM
++		# path but leaves the old one connected, and the later "turn the old
++		# one off" is then a no-op because port_id no longer matches it. The
++		# stale path keeps SLIMBUS_1_TX in MultiMedia4's DPCM backend list,
++		# and starting that port is what fails. So take ownership of
++		# SLIMBUS_1_TX and release it properly *before* claiming
++		# SLIMBUS_0_TX.
+ 		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 1"
++		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 0"
++		cset "name='MultiMedia4 Mixer SLIMBUS_0_TX' 1"
+ 		# Q6Voice Routes for Call Audio Setup
+ 		cset "name='QUAT_MI2S_RX Voice Mixer VoiceMMode1' 1"
+ 		cset "name='VoiceMMode1 Capture Mixer SLIMBUS_0_TX' 1"
+@@ -25,9 +48,9 @@
+ 		cset "name='SLIM RX3 MUX' AIF2_PB"
+ 		cset "name='RX INT1 DEM MUX' CLSH_DSM_OUT"
+ 		cset "name='RX INT2 DEM MUX' CLSH_DSM_OUT"
+-		# Headset
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 1"
+-		cset "name='CDC_IF TX0 MUX' DEC0"
++		# Headset mic analog front end (port is switched in by the device)
++		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='ADC MUX0' AMIC"
+ 		cset "name='AMIC MUX0' ADC2"
+ 		# Mics
+@@ -41,7 +64,7 @@
+ 		cset "name='QUAT_MI2S_RX Audio Mixer MultiMedia1' 0"
+ 		cset "name='SLIMBUS_1_RX Audio Mixer MultiMedia3' 0"
+ 		cset "name='MultiMedia2 Mixer SLIMBUS_0_TX' 0"
+-		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 0"
++		cset "name='MultiMedia4 Mixer SLIMBUS_0_TX' 0"
+ 		# Q6Voice Routes for Call Audio Setup
+ 		cset "name='QUAT_MI2S_RX Voice Mixer VoiceMMode1' 0"
+ 		cset "name='VoiceMMode1 Capture Mixer SLIMBUS_0_TX' 0"
+@@ -49,7 +72,7 @@
+ 		cset "name='SLIM RX2 MUX' ZERO"
+ 		cset "name='SLIM RX3 MUX' ZERO"
+ 		# Headset
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='CDC_IF TX0 MUX' ZERO"
+ 		cset "name='AMIC MUX0' ZERO"
+ 		# Mics
+@@ -109,7 +132,7 @@
+ 		PlaybackPCM "hw:${CardId},2" # MultiMedia3
+ 		PlaybackMixer "default:${CardId}"
+ 		PlaybackChannels 2
+-		JackControl "Headset Jack"
++		JackControl "Headphone Jack"
+ 	}
+ }
+ 
+@@ -117,6 +140,7 @@
+ 	Comment "Bottom and Top microphones"
+ 
+ 	EnableSequence [
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='AIF1_CAP Mixer SLIM TX7' 1"
+ 		cset "name='AIF1_CAP Mixer SLIM TX8' 1"
+ 		cset "name='CDC_IF TX7 MUX' DEC7"
+@@ -147,16 +171,23 @@
+ 	Comment "Headset Microphone"
+ 
+ 	EnableSequence [
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 1"
++		cset "name='AIF1_CAP Mixer SLIM TX7' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX8' 0"
++		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 1"
+ 		cset "name='CDC_IF TX0 MUX' DEC0"
+ 		cset "name='ADC MUX0' AMIC"
+ 		cset "name='AMIC MUX0' ADC2"
+ 	]
+ 
+ 	DisableSequence [
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='CDC_IF TX0 MUX' ZERO"
+ 		cset "name='AMIC MUX0' ZERO"
++		cset "name='AIF1_CAP Mixer SLIM TX7' 1"
++		cset "name='AIF1_CAP Mixer SLIM TX8' 1"
++		cset "name='CDC_IF TX7 MUX' DEC7"
++		cset "name='CDC_IF TX8 MUX' DEC8"
+ 	]
+ 
+ 	Value {
+@@ -165,7 +196,6 @@
+ 		CaptureMixerElem "DEC0"
+ 		CaptureVolume "DEC0 Volume"
+ 		CaptureChannels 1
+-		JackControl "Headset Jack"
++		JackControl "Headset Mic Jack"
+ 	}
+ }
+-
+--- a/ucm2/Samsung/starqltechn/VoiceCall.conf
++++ b/ucm2/Samsung/starqltechn/VoiceCall.conf
+@@ -7,7 +7,10 @@
+ #  - Headphones			: WCD934x driver : MultiMedia3 <-> SLIMBUS_1_RX (AIF2_PB, RX2, RX3)
+ # Capture Devices
+ #  - Internal Mics	: WCD934x driver : MultiMedia2 <-> SLIMBUS_0_TX (AIF1_CAP, DMIC0, TX7, DMIC2, TX8)
+-#  - Headphones Mic	: WCD934x driver : MultiMedia4 <-> SLIMBUS_1_TX (AIF2_CAP, ADC2, TX0)
++#  - Headphones Mic	: WCD934x driver : MultiMedia4 <-> SLIMBUS_0_TX (AIF1_CAP, ADC2, TX0)
++#
++# See HiFi.conf for why the headset mic runs over SLIMBUS_0_TX rather than the
++# SLIMBUS_1_TX / AIF2_CAP path: the ADSP rejects DEVICE_START on port 0x4003.
+ 
+ SectionVerb {
+ 	EnableSequence [
+@@ -15,7 +18,17 @@
+ 		cset "name='QUAT_MI2S_RX Audio Mixer MultiMedia5' 1"
+ 		cset "name='SLIMBUS_1_RX Audio Mixer MultiMedia3' 1"
+ 		cset "name='MultiMedia2 Mixer SLIMBUS_0_TX' 1"
++		# Order matters. q6routing tracks a single backend per front end in
++		# session->port_id: claiming a new backend powers up the new DAPM
++		# path but leaves the old one connected, and the later "turn the old
++		# one off" is then a no-op because port_id no longer matches it. The
++		# stale path keeps SLIMBUS_1_TX in MultiMedia4's DPCM backend list,
++		# and starting that port is what fails. So take ownership of
++		# SLIMBUS_1_TX and release it properly *before* claiming
++		# SLIMBUS_0_TX.
+ 		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 1"
++		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 0"
++		cset "name='MultiMedia4 Mixer SLIMBUS_0_TX' 1"
+ 		# Q6Voice Routes for Call Audio Setup
+ 		cset "name='QUAT_MI2S_RX Voice Mixer VoiceMMode1' 1"
+ 		cset "name='VoiceMMode1 Capture Mixer SLIMBUS_0_TX' 1"
+@@ -26,9 +39,9 @@
+ 		cset "name='SLIM RX3 MUX' AIF2_PB"
+ 		cset "name='RX INT1 DEM MUX' CLSH_DSM_OUT"
+ 		cset "name='RX INT2 DEM MUX' CLSH_DSM_OUT"
+-		# Headset
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 1"
+-		cset "name='CDC_IF TX0 MUX' DEC0"
++		# Headset mic analog front end (port is switched in by the device)
++		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='ADC MUX0' AMIC"
+ 		cset "name='AMIC MUX0' ADC2"
+ 		# Mics
+@@ -43,7 +56,7 @@
+ 		cset "name='SLIMBUS_1_RX Audio Mixer MultiMedia3' 0"
+ 		cset "name='QUAT_MI2S_RX Audio Mixer MultiMedia5' 0"
+ 		cset "name='MultiMedia2 Mixer SLIMBUS_0_TX' 0"
+-		cset "name='MultiMedia4 Mixer SLIMBUS_1_TX' 0"
++		cset "name='MultiMedia4 Mixer SLIMBUS_0_TX' 0"
+ 		# Q6Voice Routes for Call Audio Setup
+ 		cset "name='QUAT_MI2S_RX Voice Mixer VoiceMMode1' 0"
+ 		cset "name='VoiceMMode1 Capture Mixer SLIMBUS_0_TX' 0"
+@@ -51,7 +64,7 @@
+ 		cset "name='SLIM RX2 MUX' ZERO"
+ 		cset "name='SLIM RX3 MUX' ZERO"
+ 		# Headset
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='CDC_IF TX0 MUX' ZERO"
+ 		cset "name='AMIC MUX0' ZERO"
+ 		# Mics
+@@ -109,7 +122,7 @@
+ 		PlaybackPriority 30
+ 		PlaybackPCM "hw:${CardId},2" # MultiMedia3
+ 		PlaybackMixer "default:${CardId}"
+-		JackControl "Headset Jack"
++		JackControl "Headphone Jack"
+ 		PlaybackChannels 2
+ 	}
+ }
+@@ -118,6 +131,7 @@
+ 	Comment "Bottom and Top microphones"
+ 
+ 	EnableSequence [
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='AIF1_CAP Mixer SLIM TX7' 1"
+ 		cset "name='AIF1_CAP Mixer SLIM TX8' 1"
+ 		cset "name='CDC_IF TX7 MUX' DEC7"
+@@ -150,7 +164,10 @@
+ 	Comment "Headset Microphone"
+ 
+ 	EnableSequence [
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 1"
++		cset "name='AIF1_CAP Mixer SLIM TX7' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX8' 0"
++		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 1"
+ 		cset "name='CDC_IF TX0 MUX' DEC0"
+ 		cset "name='ADC MUX0' AMIC"
+ 		cset "name='AMIC MUX0' ADC2"
+@@ -158,9 +175,13 @@
+ 	]
+ 
+ 	DisableSequence [
+-		cset "name='AIF2_CAP Mixer SLIM TX0' 0"
++		cset "name='AIF1_CAP Mixer SLIM TX0' 0"
+ 		cset "name='CDC_IF TX0 MUX' ZERO"
+ 		cset "name='AMIC MUX0' ZERO"
++		cset "name='AIF1_CAP Mixer SLIM TX7' 1"
++		cset "name='AIF1_CAP Mixer SLIM TX8' 1"
++		cset "name='CDC_IF TX7 MUX' DEC7"
++		cset "name='CDC_IF TX8 MUX' DEC8"
+ 	]
+ 
+ 	Value {
+@@ -169,6 +190,6 @@
+ 		CaptureMixerElem "DEC0"
+ 		CaptureVolume "DEC0 Volume"
+ 		CaptureChannels 1
++		JackControl "Headset Mic Jack"
+ 	}
+ }
+-
