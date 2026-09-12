@@ -11,7 +11,7 @@ provides="alsa-ucm-conf=0.${pkgver%_*}" # versioned provides need to be below de
 provider_priority=1
 source="$pkgname-$_commit.tar.gz::https://github.com/AYNTechnologies/alsa-ucm-conf/archive/$_commit.tar.gz"
 options="!check"
-builddir="$srcdir/$pkgname-$_commit"
+builddir="$srcdir/alsa-ucm-conf-$_commit"
 
 package() {
 	mkdir -p "$pkgdir"/usr/share/alsa
