@@ -124,8 +124,11 @@ ub_size=$(stat -c %s "$UBOOT")
 	exit 1
 }
 cp "$UBOOT" "$WORK/payload.bin"
-dd if=/dev/zero of="$WORK/payload.bin" bs=1 seek="$ub_size" \
-	count=$((FIT_OFFSET - ub_size)) conv=notrunc status=none
+# truncate, not `dd bs=1 seek=... count=...`: extending a file with truncate
+# zero-fills it in one call, while the dd form issues one write syscall per byte
+# -- 6.6 million of them for this gap, which takes minutes on this SoC and looks
+# exactly like a hang.
+truncate -s "$FIT_OFFSET" "$WORK/payload.bin"
 cat "$WORK/fit.itb" >> "$WORK/payload.bin"
 
 mkbootimg --header_version 4 --kernel "$WORK/payload.bin" \
