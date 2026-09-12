@@ -1,0 +1,84 @@
+maintainer="team/phosh <achill@achill.org>"
+pkgname=gmobile
+pkgver=0.7.3
+pkgrel=1
+pkgdesc="Functions useful in mobile related, glib based projects"
+url="https://gitlab.gnome.org/World/Phosh/gmobile"
+arch="all"
+license="GPL-3.0-only"
+makedepends="
+	meson
+	glib-dev
+	json-glib-dev
+	gobject-introspection-dev
+	vala
+	"
+subpackages="
+	$pkgname-dbg
+	$pkgname-dev
+	$pkgname-examples
+	$pkgname-udev
+	"
+replaces="phoc"
+# Carried in this repo's aports overlay, not upstream pmaports. Adds fogona's
+# display-panel description so phosh keeps the clock and status icons clear of
+# the camera cutout; without an entry gmobile reports no cutout and phosh lays
+# the top bar out as a plain rectangle.
+#
+# The geometry is Motorola's own, not measured: config_mainBuiltInDisplayCutout
+# out of the stock product RRO (framework-res__auto_generated_rro_product.apk,
+# which self-identifies as motogplay2024) reads
+#   M -35,0 L 35,0 L 35,80 L -35,80 Z
+# Android centres that on the top edge, so on a 720-wide panel it becomes
+# x 325..395 -- gmobile wants absolute panel coordinates, as motorola,dubai's
+# entry shows. border-radius is rounded_corner_radius (24dp) from stock
+# framework-res, at ro.sf.lcd_density=280, so 24 * 280/160 = 42px. width and
+# height are millimetres from panel-chipone-icnl9916-720x1600.c.
+#
+# Upstream this to gmobile and drop the override; nothing here is fogona-
+# specific tooling, just a device description they already accept for others.
+source="https://sources.phosh.mobi/releases/gmobile/gmobile-$pkgver.tar.xz
+	motorola-fogona.json
+	"
+
+prepare() {
+	default_prepare
+
+	# abuild forbids a comma in a source filename, but gmobile looks the file up
+	# by DT compatible, so it must be "motorola,fogona.json" once installed.
+	cp "$srcdir"/motorola-fogona.json \
+		"$builddir/data/devices/display-panels/motorola,fogona.json"
+
+	# Register it in the GResource manifest -- gmobile compiles these in, so a
+	# file that is not listed here is silently absent at runtime.
+	sed -i 's|\(.*devices/display-panels/motorola,dubai.json.*\)|<file preprocess="json-stripblanks">devices/display-panels/motorola,fogona.json</file>\n\1|' \
+		"$builddir"/data/gmobile.gresources.xml
+
+	grep -q "motorola,fogona.json" "$builddir"/data/gmobile.gresources.xml \
+		|| die "failed to register motorola,fogona in the gresource manifest"
+}
+
+build() {
+	abuild-meson build
+	meson compile -C build
+}
+
+check() {
+	meson test -C build
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C build
+}
+
+examples() {
+	pkgdesc="$pkgdesc (examples)"
+	depends="phoc phosh"
+
+	amove usr/bin
+}
+
+sha512sums="
+77c443e3460dea37f9549d38f311ea1a807d76fce89179f0e41d88ecd696249a56de6bc1a2c6b0f8da606ddee0158defeb7adc7622ef79d07a49346a5ce3eac3  gmobile-0.7.3.tar.xz
+e9134b014880d4b7468fd4bb583eaf9cc56a176e8d139d00ce6da2d0fa481ef65cb491f651ab73f3837c3b991b7ca7a8c74fe97a4f5b0ed85138913d3637579e  motorola-fogona.json
+"
