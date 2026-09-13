@@ -27,10 +27,20 @@
 # is the real deadline, not "before the ath10k module", and that is what the
 # unit orders against.
 #
-# The output goes in the firmware search root rather than /usr/lib/firmware, so
-# it shadows any packaged board-2.bin without owning or deleting the file --
-# the search path is consulted first. Read the root from sysfs rather than
-# hardcoding it, the way tqftpserv derives its own prefix.
+# WHERE THE OUTPUT GOES, AND WHY NOT /usr/lib/firmware/ath10k
+#
+# pmOS has a precedence stack for firmware, and this writes into the top of it.
+# msm-firmware-loader begins by reading whatever firmware_class.path was set to
+# before it ran -- /usr/lib/firmware/postmarketos -- and symlinking that
+# directory's contents into its target/, and its later scan of the vendor
+# partitions deliberately SKIPS any blob whose name is already there. So
+# postmarketos/ overrides the vendor partition, and the search root overrides
+# /usr/lib/firmware.
+#
+# Writing board-2.bin into postmarketos/ath10k therefore beats both the vendor
+# partition and linux-firmware-ath10k, while colliding with neither -- which is
+# what lets that package stay installed as the fallback for the case below,
+# where there is no blob to repack and we leave without writing anything.
 set -eu
 
 # WHICH PA VARIANT
@@ -65,7 +75,11 @@ SEARCH_ROOT=$(cat /sys/module/firmware_class/parameters/path 2>/dev/null || true
 [ -n "$SEARCH_ROOT" ] || SEARCH_ROOT=/run/msm-firmware-loader/target
 
 BDF="$SEARCH_ROOT/$BDF_NAME"
-OUT_DIR="$SEARCH_ROOT/ath10k/WCN3990/hw1.0"
+
+# The override directory itself, not the search root's symlink to it: the
+# symlink only exists because the loader made it this boot, while this path is
+# the one the package installs into and the one that survives.
+OUT_DIR=/usr/lib/firmware/postmarketos/ath10k/WCN3990/hw1.0
 OUT="$OUT_DIR/board-2.bin"
 
 # Not an error worth failing the boot over: without the vendor partition

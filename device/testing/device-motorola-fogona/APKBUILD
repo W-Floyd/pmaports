@@ -3,7 +3,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=31
+pkgrel=32
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -33,7 +33,8 @@ triggers="$pkgname.trigger=/boot"
 # EROFS without wedging, and assembles 292 files into the firmware search path.
 # What it provides:
 #   modem/image/modem.mdt + wlanmdsp      - modem PIL, and WiFi behind it
-#   modem/image/bdwlan_fogona_ipa.bin     - this handset's WLAN board data
+#   modem/image/bdwlan_fogona_{i,e}pa.bin - WLAN board data, one blob per PA
+#                                           variant; the SKU picks which
 #   modem/image/a610_zap.mdt              - GPU zap shader; resolves, though
 #                                           the A610 needs more DTS work first
 #
@@ -85,9 +86,11 @@ triggers="$pkgname.trigger=/boot"
 # of its own, wlanmdsp runs on the modem DSP, and ath10k_snoc waits for a QMI
 # service the modem publishes.
 #
-# The two ath10k files it then wants are supplied here rather than by
-# linux-firmware-ath10k, and NOT depending on that package is deliberate: it
-# owns the same two paths, so both installed would be a file conflict.
+# The two ath10k files it then wants are supplied here, in the postmarketos/
+# override directory rather than firmware/ath10k/ -- so linux-firmware-ath10k
+# stays installed underneath as the floor, with no path collision. It is the
+# fallback for a boot where the vendor partition never mounts and there is no
+# calibration blob to repack: degraded WiFi on generic board data beats none.
 #   firmware-5.bin  is a 60-byte metadata container, not firmware -- the real
 #                   image is wlanmdsp on the modem DSP. It is generated at
 #                   build time by ath10k-fwencoder, which is what the other
@@ -103,6 +106,7 @@ triggers="$pkgname.trigger=/boot"
 depends="
 	linux-motorola-fogona
 	android-tools
+	linux-firmware-ath10k
 	make-dynpart-mappings
 	mesa-vulkan-freedreno
 	msm-firmware-loader
@@ -173,8 +177,15 @@ package() {
 	# WLAN board data: the generated metadata container, and the boot-time
 	# job that repacks this handset's own calibration blob into a board-2.bin
 	# the driver will match. Both in the script's header.
+	#
+	# postmarketos/ rather than firmware/ath10k/ is what keeps this from
+	# colliding with linux-firmware-ath10k: msm-firmware-loader links this
+	# directory's contents into the firmware search root, which is consulted
+	# first, so these override both the vendor partition and that package while
+	# owning none of its paths -- and it stays installed underneath as the
+	# fallback for a boot where the vendor partition never mounts.
 	install -Dm644 firmware-5.bin \
-		-t "$pkgdir"/usr/lib/firmware/ath10k/WCN3990/hw1.0/
+		-t "$pkgdir"/usr/lib/firmware/postmarketos/ath10k/WCN3990/hw1.0/
 	install -Dm755 "$srcdir"/fogona-wlan-bdf.sh \
 		"$pkgdir"/usr/sbin/fogona-wlan-bdf
 	install -Dm644 "$srcdir"/fogona-wlan-bdf.service \
@@ -189,6 +200,6 @@ sha512sums="
 ef03bcff5e8690e29b61da452258111b8e700cec8fe0545d08e42dd71c7cedbeeb24c0ef6e51c6e36690acfb8d13a1c9617ce258fcaa1ebf739a6eabfd01d9e9  fogona-mkboot.sh
 553d72161bb312ada97a0609b0cc606e4893ed9303ac2cea9882e8ef7515661105377f087029c3efbd49dba0da4625da1a4cc839449f1abca8e92a5614b2e22d  fogona-flash-boot.sh
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
-d378da92a24afec9766cdfa887508be519c427ecf899fedefb5650dd15668d3fcad63b3f4bc5941a310d4e1ecb8d3059cda451d52043439a5feb6994750f9936  fogona-wlan-bdf.sh
+e8c3fce01d80b15a37e0799484d4b9c56081ddb0ff0f4a2ff8517d0b88cf592bcd3d43bdce2420c02f518c5b9dfbbd2f3e9b7bb613f3ac93d402c9a83bb2fa97  fogona-wlan-bdf.sh
 039c27e59f2cc3aa60b82c45f28472c142012871020c54745ce94ca24a7eecede6d0c62e2d7b7d28130358d11435fd5cb73335c11ee97fcad77d8267a04ab6b1  fogona-wlan-bdf.service
 "
