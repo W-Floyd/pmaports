@@ -7,15 +7,27 @@
 #
 # WHAT THIS PACKAGE DOES AND DOES NOT OWN
 #
-# It owns the modules, the DTB and the staged Image. It does NOT produce the
-# thing you boot. This bootloader's `fastboot boot` takes the DTB, cmdline and
-# ramdisk from FLASH and ignores anything staged, so the only way to supply our
-# own is to chainload U-Boot with a FIT -- which is what `/repo/tools/mkboot.sh`
-# builds. So the flow stays:
+# It owns the modules, the DTB and the staged Image. It does NOT itself produce
+# the thing you boot. This bootloader's `fastboot boot` takes the DTB, cmdline
+# and ramdisk from FLASH and ignores anything staged, so the only way to supply
+# our own is to chainload U-Boot with a FIT.
 #
-#     pmbootstrap build --src=$HOME/fogona-mainline linux-motorola-fogona
-#     ... install the apk on the device (modules land in /lib/modules)
-#     sh /repo/tools/mkboot.sh <name>   # still how you get a bootable image
+# Since device-motorola-fogona r30 the handset welds that FIT itself: installing
+# this package trips an apk trigger on /boot that runs fogona-mkboot and
+# fogona-flash-boot, so the whole flow is
+#
+#     pmbootstrap build --envkernel linux-motorola-fogona
+#     ... install the apk on the device
+#     reboot
+#
+# with no host and no cable. `/repo/tools/mkboot.sh` still builds the same image
+# on the build host, and that is the route to use for something that might not
+# boot, because `fastboot boot` writes nothing.
+#
+# Prefer --envkernel over --src: --src rebuilds the whole kernel inside the
+# chroot and trips the rsync `!`-gitignore bug (HANDOFF section 8). Note
+# package() runs `zinstall`, so the build must have produced Image.gz and not
+# only Image.
 #
 # The point of packaging is that modules stop being hand-copied: they are
 # versioned, `apk` knows what is installed, and they cannot drift out of sync
