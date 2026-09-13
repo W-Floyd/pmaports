@@ -1,0 +1,20 @@
+[Unit]
+Description=Build ath10k board data from fogona's own calibration blob
+Documentation=file:/usr/sbin/fogona-wlan-bdf
+# The blob only exists once msm-firmware-loader has mounted the modem partition
+# and linked its image/ directory into the firmware search path.
+After=msm-firmware-loader.service
+Requires=msm-firmware-loader.service
+# The real deadline is the modem, not the ath10k module: ath10k_snoc loads early
+# but does not fetch board data until the WLFW QMI service appears, and that
+# only happens once rmtfs boots the modem. Be finished before then.
+Before=rmtfs.service
+ConditionPathExists=/sys/module/firmware_class/parameters/path
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-wlan-bdf
+
+[Install]
+WantedBy=multi-user.target

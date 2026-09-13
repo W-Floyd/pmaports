@@ -3,7 +3,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=30
+pkgrel=31
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -63,6 +63,43 @@ triggers="$pkgname.trigger=/boot"
 # step. u-boot-fogona supplies the payload those scripts weld the FIT onto;
 # fogona-mkboot exits with "missing: /usr/share/u-boot/fogona/u-boot-txt0.bin"
 # without it.
+# rmtfs and tqftpserv are the whole userspace side of the modem, and both are
+# load-bearing rather than optional. rmtfs serves the modem's EFS out of
+# modemst1/modemst2/fsg over QMI, and with -s it publishes that service before
+# starting the remoteproc -- so the modem never boots into a world with no rmtfs
+# behind it. Without it the modem watchdogs ~40 s in with "DOG detects stalled
+# initialization", which is what this device did for months. tqftpserv serves
+# the firmware the modem then asks for over TFTP, and needs no configuration
+# here: it derives its prefix from /sys/module/firmware_class/parameters/path
+# at runtime, so it follows the loader.
+#
+# Neither -openrc nor -systemd is listed: both carry install_if on the init
+# system, so the right one follows automatically, as does rmtfs-udev -- and
+# that rule matters, because it re-triggers the service when qcom_rmtfs_mem1
+# appears, which the unit's static ConditionPathExists cannot do while
+# rmtfs_mem is a module. pd-mapper is deliberately absent: the fxtec-era recipe
+# wants it, but it moved into the kernel as CONFIG_QCOM_PD_MAPPER and the
+# package was retired from Alpine.
+#
+# WiFi rides on the modem rather than beside it -- the WCN3988 has no firmware
+# of its own, wlanmdsp runs on the modem DSP, and ath10k_snoc waits for a QMI
+# service the modem publishes.
+#
+# The two ath10k files it then wants are supplied here rather than by
+# linux-firmware-ath10k, and NOT depending on that package is deliberate: it
+# owns the same two paths, so both installed would be a file conflict.
+#   firmware-5.bin  is a 60-byte metadata container, not firmware -- the real
+#                   image is wlanmdsp on the modem DSP. It is generated at
+#                   build time by ath10k-fwencoder, which is what the other
+#                   WCN3990 devices in pmaports do (firmware-xiaomi-lavender,
+#                   firmware-asus-x00td) rather than copying linux-firmware's.
+#                   See the build() comment for what the feature list changes.
+#   board-2.bin     is built on the handset, from the handset's own calibration
+#                   blob, by fogona-wlan-bdf at boot. See that script's header:
+#                   it cannot be packaged, because Motorola publishes nothing
+#                   redistributable.
+# qca-swiss-army-knife supplies ath10k-fwencoder for the first and, at runtime,
+# ath10k-bdencoder for the second.
 depends="
 	linux-motorola-fogona
 	android-tools
@@ -70,11 +107,14 @@ depends="
 	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
+	qca-swiss-army-knife
+	rmtfs
+	tqftpserv
 	u-boot-tools
 	u-boot-fogona
 	dtc
 "
-makedepends="devicepkg-dev"
+makedepends="devicepkg-dev qca-swiss-army-knife"
 source="deviceinfo
 	kernel-cmdline.conf
 	50-fogona-mesa.conf
@@ -82,10 +122,25 @@ source="deviceinfo
 	fogona-mkboot.sh
 	fogona-flash-boot.sh
 	fogona-video.conf
+	fogona-wlan-bdf.sh
+	fogona-wlan-bdf.service
 	"
 
 build() {
 	devicepkg_build $startdir $pkgname
+
+	# The feature list is the one the other WCN3990 devices in pmaports use,
+	# and it differs from linux-firmware's stock firmware-5.bin by three
+	# flags. One of them is observable here: without
+	# single-chan-info-per-channel ath10k parses this firmware's chan_info
+	# events with the *paired* handler, which reads the frequency from a
+	# cached index it never got, and every scan logs "chan info: invalid
+	# frequency 0 (idx 41 out of bounds)". WLAN.HL.3.2.4 sends one event per
+	# channel, so the unpaired handler is the correct one.
+	ath10k-fwencoder --create \
+		--features=wowlan,no-nwifi-decap-4addr-padding,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
+		--set-wmi-op-version=tlv --set-htt-op-version=tlv \
+		--set-fw-api=5
 }
 
 package() {
@@ -114,6 +169,16 @@ package() {
 	# binds depends on module load order. See the file for why iris is the one.
 	install -Dm644 "$srcdir"/fogona-video.conf \
 		"$pkgdir"/etc/modprobe.d/fogona-video.conf
+
+	# WLAN board data: the generated metadata container, and the boot-time
+	# job that repacks this handset's own calibration blob into a board-2.bin
+	# the driver will match. Both in the script's header.
+	install -Dm644 firmware-5.bin \
+		-t "$pkgdir"/usr/lib/firmware/ath10k/WCN3990/hw1.0/
+	install -Dm755 "$srcdir"/fogona-wlan-bdf.sh \
+		"$pkgdir"/usr/sbin/fogona-wlan-bdf
+	install -Dm644 "$srcdir"/fogona-wlan-bdf.service \
+		"$pkgdir"/usr/lib/systemd/system/fogona-wlan-bdf.service
 }
 
 sha512sums="
@@ -124,4 +189,6 @@ sha512sums="
 ef03bcff5e8690e29b61da452258111b8e700cec8fe0545d08e42dd71c7cedbeeb24c0ef6e51c6e36690acfb8d13a1c9617ce258fcaa1ebf739a6eabfd01d9e9  fogona-mkboot.sh
 553d72161bb312ada97a0609b0cc606e4893ed9303ac2cea9882e8ef7515661105377f087029c3efbd49dba0da4625da1a4cc839449f1abca8e92a5614b2e22d  fogona-flash-boot.sh
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
+d378da92a24afec9766cdfa887508be519c427ecf899fedefb5650dd15668d3fcad63b3f4bc5941a310d4e1ecb8d3059cda451d52043439a5feb6994750f9936  fogona-wlan-bdf.sh
+039c27e59f2cc3aa60b82c45f28472c142012871020c54745ce94ca24a7eecede6d0c62e2d7b7d28130358d11435fd5cb73335c11ee97fcad77d8267a04ab6b1  fogona-wlan-bdf.service
 "
