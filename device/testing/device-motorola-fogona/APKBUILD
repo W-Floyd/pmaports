@@ -3,7 +3,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=28
+pkgrel=29
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -73,6 +73,7 @@ source="deviceinfo
 	50-fogona-mesa.sh
 	fogona-mkboot.sh
 	fogona-flash-boot.sh
+	fogona-video.conf
 	"
 
 build() {
@@ -100,6 +101,11 @@ package() {
 		"$pkgdir"/usr/sbin/fogona-mkboot
 	install -Dm755 "$srcdir"/fogona-flash-boot.sh \
 		"$pkgdir"/usr/sbin/fogona-flash-boot
+
+	# Both venus and iris match video-codec@5a00000; without this, which one
+	# binds depends on module load order. See the file for why iris is the one.
+	install -Dm644 "$srcdir"/fogona-video.conf \
+		"$pkgdir"/etc/modprobe.d/fogona-video.conf
 }
 
 sha512sums="
@@ -109,4 +115,5 @@ sha512sums="
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.sh
 ef03bcff5e8690e29b61da452258111b8e700cec8fe0545d08e42dd71c7cedbeeb24c0ef6e51c6e36690acfb8d13a1c9617ce258fcaa1ebf739a6eabfd01d9e9  fogona-mkboot.sh
 553d72161bb312ada97a0609b0cc606e4893ed9303ac2cea9882e8ef7515661105377f087029c3efbd49dba0da4625da1a4cc839449f1abca8e92a5614b2e22d  fogona-flash-boot.sh
+87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
 "
