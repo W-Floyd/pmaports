@@ -3,11 +3,19 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=29
+pkgrel=30
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
+
+# Flash the boot partition automatically when /boot changes, so a kernel
+# upgrade is `apk upgrade && reboot` rather than two manual commands. This was
+# deliberately NOT wired for a long time -- a package install that silently
+# rewrites a boot partition is a surprise -- so the trigger is careful: it is a
+# no-op anywhere that is not this handset, it never fails the apk transaction,
+# and /etc/fogona-no-autoflash switches it off. See the trigger for the detail.
+triggers="$pkgname.trigger=/boot"
 # android-tools rather than the standalone mkbootimg: at header_version 4
 # boot-deploy uses modern mkbootimg's --vendor_boot/--vendor_ramdisk syntax,
 # which the mkbootimg fork does not have.
