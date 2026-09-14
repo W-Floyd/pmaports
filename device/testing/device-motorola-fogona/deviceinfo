@@ -53,6 +53,22 @@ deviceinfo_flash_fastboot_partition_vbmeta="vbmeta"
 # leaves stock bootable on slot A throughout. One line to change back.
 deviceinfo_flash_fastboot_partition_rootfs="userdata"
 deviceinfo_generate_bootimg="true"
+
+# The boot partition holds U-Boot, not a kernel: ABL never publishes the
+# ramdisk location, so U-Boot is chainloaded and loads the kernel, DTB and
+# initramfs from /boot over UFS itself. A kernel upgrade needs no reflash.
+# Same mechanism as device-samsung-starqltechn:
+#   uboot_boardname          mkinitfs stages /usr/share/u-boot/fogona/* into
+#                            boot-deploy's work dir
+#   bootimg_override_payload that file replaces vmlinuz in the boot image. No
+#                            compression -- ABL wants a raw arm64 image
+#   flash_kernel_on_update   boot-deploy resolves the A/B slot and dd's it
+# boot-deploy's ab_get_slot() greps /proc/cmdline for androidboot.slot_suffix,
+# so U-Boot must keep passing it (bootargs_disk in qcom-phone.env) or findfs
+# looks for a partition called plain `boot` and the apk transaction fails.
+deviceinfo_uboot_boardname="fogona"
+deviceinfo_bootimg_override_payload="u-boot-fogona.bin"
+deviceinfo_flash_kernel_on_update="true"
 deviceinfo_rootfs_image_sector_size="4096"
 deviceinfo_flash_pagesize="4096"
 # Downstream builds BOARD_BOOT_HEADER_VERSION := 4 and this bootloader appears

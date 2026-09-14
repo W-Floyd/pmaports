@@ -1,108 +1,26 @@
 # Reference: <https://postmarketos.org/devicepkg>
+# Background and hardware notes live in /repo; keep this file to what a reader
+# needs in order to change it safely.
 maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=33
+pkgrel=34
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
 
-# Flash the boot partition automatically when /boot changes, so a kernel
-# upgrade is `apk upgrade && reboot` rather than two manual commands. This was
-# deliberately NOT wired for a long time -- a package install that silently
-# rewrites a boot partition is a surprise -- so the trigger is careful: it is a
-# no-op anywhere that is not this handset, it never fails the apk transaction,
-# and /etc/fogona-no-autoflash switches it off. See the trigger for the detail.
-triggers="$pkgname.trigger=/boot"
-# android-tools rather than the standalone mkbootimg: at header_version 4
-# boot-deploy uses modern mkbootimg's --vendor_boot/--vendor_ramdisk syntax,
-# which the mkbootimg fork does not have.
-# make-dynpart-mappings maps the logical partitions out of `super`, which is
-# how vendor and modem are reachable at all.
-#
-# msm-firmware-loader is back, and this time it works. It was dropped in
-# pkgrel 12 because its unit walks the vendor partition, which is EROFS, and any
-# lookup there wedged unkillably -- starving systemd-udevd so boot ended in
-# emergency mode. That was never an erofs bug: iomap's IOMAP_INLINE path failed
-# to advance its iterator, so the caller's loop spun forever. Fixed in the
-# kernel; see TODO.md.
-#
-# Verified on hardware after that fix: the loader completes, mounts vendor as
-# EROFS without wedging, and assembles 292 files into the firmware search path.
-# What it provides:
-#   modem/image/modem.mdt + wlanmdsp      - modem PIL, and WiFi behind it
-#   modem/image/bdwlan_fogona_{i,e}pa.bin - WLAN board data, one blob per PA
-#                                           variant; the SKU picks which
-#   modem/image/a610_zap.mdt              - GPU zap shader; resolves, though
-#                                           the A610 needs more DTS work first
-#
-# Not everything depends on it: touch firmware ships on the rootfs at
-# /lib/firmware/postmarketos/chipone_firmware.bin, and the CW2217 fuel gauge
-# takes its battery profile from the device tree.
-# mesa-vulkan-freedreno is Turnip, the Vulkan driver for the Adreno 610. It is
-# not required for the session -- wlroots and GTK render with GLES via
-# freedreno's gallium driver -- but without it the device has no Vulkan ICD at
-# all, so wlroots' Vulkan fallback path dead-ends and zink (present in
-# mesa-dri-gallium) has nothing to sit on. Added once the GPU actually worked;
-# it would have been dead weight before that.
-# linux-motorola-fogona is our own 7.3 tree. This used to be
-# linux-postmarketos-qcom-sm6225 (TQMatvey's 6.1) -- a packaged kernel that was
-# never the one the phone ran, which is how /lib/modules ended up hand-copied.
-# Note the apk does not produce the bootable image: this bootloader ignores a
-# staged kernel, so /repo/tools/mkboot.sh still builds the U-Boot FIT you
-# `fastboot boot`. What the package buys is that modules are versioned and
-# cannot drift out of sync with the Image.
-# u-boot-tools is for mkimage, which fogona-mkboot.sh needs to build the FIT on
-# the device, and dtc is what mkimage shells out to in order to compile the .its
-# -- without it mkimage fails with a bare "dtc: not found". android-tools already
-# covers mkbootimg and avbtool. Together they let the handset assemble and write
-# its own boot image, so a kernel update is `apk upgrade && reboot` rather than a
-# manual fastboot cycle -- the same thing boot-deploy does for 47 other devices,
-# except fogona's boot image is a U-Boot+FIT payload and needs its own assembly
-# step. u-boot-fogona supplies the payload those scripts weld the FIT onto;
-# fogona-mkboot exits with "missing: /usr/share/u-boot/fogona/u-boot-txt0.bin"
-# without it.
-# rmtfs and tqftpserv are the whole userspace side of the modem, and both are
-# load-bearing rather than optional. rmtfs serves the modem's EFS out of
-# modemst1/modemst2/fsg over QMI, and with -s it publishes that service before
-# starting the remoteproc -- so the modem never boots into a world with no rmtfs
-# behind it. Without it the modem watchdogs ~40 s in with "DOG detects stalled
-# initialization", which is what this device did for months. tqftpserv serves
-# the firmware the modem then asks for over TFTP, and needs no configuration
-# here: it derives its prefix from /sys/module/firmware_class/parameters/path
-# at runtime, so it follows the loader.
-#
-# Neither -openrc nor -systemd is listed: both carry install_if on the init
-# system, so the right one follows automatically, as does rmtfs-udev -- and
-# that rule matters, because it re-triggers the service when qcom_rmtfs_mem1
-# appears, which the unit's static ConditionPathExists cannot do while
-# rmtfs_mem is a module. pd-mapper is deliberately absent: the fxtec-era recipe
-# wants it, but it moved into the kernel as CONFIG_QCOM_PD_MAPPER and the
-# package was retired from Alpine.
-#
-# WiFi rides on the modem rather than beside it -- the WCN3988 has no firmware
-# of its own, wlanmdsp runs on the modem DSP, and ath10k_snoc waits for a QMI
-# service the modem publishes.
-#
-# The two ath10k files it then wants are supplied here, in the postmarketos/
-# override directory rather than firmware/ath10k/ -- so linux-firmware-ath10k
-# stays installed underneath as the floor, with no path collision. It is the
-# fallback for a boot where the vendor partition never mounts and there is no
-# calibration blob to repack: degraded WiFi on generic board data beats none.
-#   firmware-5.bin  is a 60-byte metadata container, not firmware -- the real
-#                   image is wlanmdsp on the modem DSP. It is generated at
-#                   build time by ath10k-fwencoder, which is what the other
-#                   WCN3990 devices in pmaports do (firmware-xiaomi-lavender,
-#                   firmware-asus-x00td) rather than copying linux-firmware's.
-#                   See the build() comment for what the feature list changes.
-#   board-2.bin     is built on the handset, from the handset's own calibration
-#                   blob, by fogona-wlan-bdf at boot. See that script's header:
-#                   it cannot be packaged, because Motorola publishes nothing
-#                   redistributable.
-# qca-swiss-army-knife supplies ath10k-fwencoder for the first and, at runtime,
-# ath10k-bdencoder for the second.
+# android-tools       mkbootimg/avbtool for boot-deploy's header_version 4 path
+# make-dynpart-mappings  maps vendor and modem out of the dynamic `super`
+# mesa-vulkan-freedreno  Turnip; the only Vulkan ICD for the A610
+# msm-firmware-loader    mounts vendor and links 292 blobs into the fw search
+#                        path: modem PIL + wlanmdsp, WLAN board data, zap shader
+# qca-swiss-army-knife   ath10k-fwencoder here, ath10k-bdencoder at runtime
+# rmtfs, tqftpserv       the modem's EFS and firmware servers; without rmtfs the
+#                        modem watchdogs ~40 s in. Their -openrc/-systemd
+#                        subpackages carry install_if, so do not list them.
+# u-boot-fogona          the payload boot-deploy wraps into the boot image
 depends="
 	linux-motorola-fogona
 	android-tools
@@ -114,17 +32,13 @@ depends="
 	qca-swiss-army-knife
 	rmtfs
 	tqftpserv
-	u-boot-tools
 	u-boot-fogona
-	dtc
 "
 makedepends="devicepkg-dev qca-swiss-army-knife"
 source="deviceinfo
 	kernel-cmdline.conf
 	50-fogona-mesa.conf
 	50-fogona-mesa.sh
-	fogona-mkboot.sh
-	fogona-flash-boot.sh
 	fogona-video.conf
 	fogona-wlan-bdf.sh
 	fogona-wlan-bdf.service
@@ -133,30 +47,14 @@ source="deviceinfo
 build() {
 	devicepkg_build $startdir $pkgname
 
-	# This feature list is not cosmetic -- two of its flags are why WiFi on
-	# this device is usable at all, and neither is in linux-firmware's stock
-	# firmware-5.bin.
-	#
-	# mfp-support is the big one. ath10k_peer_assoc_h_crypto() sends the
-	# peer's PMF flag to the firmware ONLY if the firmware file declares mfp:
-	#
-	#     if (sta->mfp && test_bit(ATH10K_FW_FEATURE_MFP_SUPPORT, ...))
-	#             arg->peer_flags |= ar->wmi.peer_flags->pmf;
-	#
-	# Without it, a WPA3 or WPA2/WPA3-transition AP negotiates 802.11w, the
-	# host associates with sta->mfp set, and the firmware is never told -- so
-	# protected management frames, ADDBA among them, are mishandled, block-ack
-	# never establishes and aggregation never starts. Measured on hardware
-	# against a LAN iperf3 server, same AP: 17.9/20 Mbit/s up/down with 154 ms
-	# RTT before, 78/234 Mbit/s with 30 ms RTT after, on a link whose PHY rate
-	# never changed. It reads as "the radio is slow" and it is a one-bit
-	# metadata omission.
-	#
-	# single-chan-info-per-channel is the smaller one: without it ath10k
-	# parses this firmware's chan_info events with the *paired* handler, reads
-	# the frequency from a cached index it never got, and every scan logs
-	# "chan info: invalid frequency 0 (idx 41 out of bounds)" -- 48 times in
-	# one boot before, 0 after. WLAN.HL.3.2.4 sends one event per channel.
+	# firmware-5.bin is a 60-byte metadata container, not firmware -- the real
+	# image is wlanmdsp on the modem DSP. Two feature flags are load-bearing
+	# and absent from linux-firmware's copy:
+	#   mfp-support                  ath10k only forwards a peer's PMF flag to
+	#                                the firmware if the file declares it;
+	#                                without it 802.11w APs never get block-ack
+	#   single-chan-info-per-channel this firmware sends one chan_info event per
+	#                                channel; the paired handler misreads them
 	ath10k-fwencoder --create \
 		--features=wowlan,no-nwifi-decap-4addr-padding,mfp-support,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
 		--set-wmi-op-version=tlv --set-htt-op-version=tlv \
@@ -166,40 +64,25 @@ build() {
 package() {
 	devicepkg_package $startdir $pkgname
 
-	# Both channels are needed, and neither is redundant. environment.d is
-	# what reaches phoc, which runs under a systemd user manager -- note
-	# pam_env is not in this distro's base-session stack, so /etc/environment
-	# is not a reliable channel here (and belongs to linux-pam anyway).
-	# profile.d covers login shells, matching how other pmaports devices ship
-	# their Mesa and wlroots overrides.
+	# Both channels are needed: environment.d reaches phoc under the systemd
+	# user manager, profile.d covers login shells. pam_env is not in this
+	# distro's base-session stack, so /etc/environment would not work.
 	install -Dm644 "$srcdir"/50-fogona-mesa.conf \
 		"$pkgdir"/usr/lib/environment.d/50-fogona-mesa.conf
 	install -Dm644 "$srcdir"/50-fogona-mesa.sh \
 		"$pkgdir"/etc/profile.d/50-fogona-mesa.sh
-
-	# On-device boot image assembly + flashing. See the scripts for why fogona
-	# cannot use boot-deploy's bootimg_override_* path (that layout puts the FIT
-	# in the ramdisk slot, which this bootloader does not hand over).
-	install -Dm755 "$srcdir"/fogona-mkboot.sh \
-		"$pkgdir"/usr/sbin/fogona-mkboot
-	install -Dm755 "$srcdir"/fogona-flash-boot.sh \
-		"$pkgdir"/usr/sbin/fogona-flash-boot
 
 	# Both venus and iris match video-codec@5a00000; without this, which one
 	# binds depends on module load order. See the file for why iris is the one.
 	install -Dm644 "$srcdir"/fogona-video.conf \
 		"$pkgdir"/etc/modprobe.d/fogona-video.conf
 
-	# WLAN board data: the generated metadata container, and the boot-time
-	# job that repacks this handset's own calibration blob into a board-2.bin
-	# the driver will match. Both in the script's header.
-	#
-	# postmarketos/ rather than firmware/ath10k/ is what keeps this from
-	# colliding with linux-firmware-ath10k: msm-firmware-loader links this
-	# directory's contents into the firmware search root, which is consulted
-	# first, so these override both the vendor partition and that package while
-	# owning none of its paths -- and it stays installed underneath as the
-	# fallback for a boot where the vendor partition never mounts.
+	# postmarketos/ rather than firmware/ath10k/: msm-firmware-loader links
+	# this directory into the firmware search root, which is consulted first,
+	# so these override the vendor partition and linux-firmware-ath10k without
+	# owning any of its paths -- leaving it installed as the fallback.
+	# board-2.bin is not here; fogona-wlan-bdf builds it at boot from the
+	# handset's own calibration blob, which is not redistributable.
 	install -Dm644 firmware-5.bin \
 		-t "$pkgdir"/usr/lib/firmware/postmarketos/ath10k/WCN3990/hw1.0/
 	install -Dm755 "$srcdir"/fogona-wlan-bdf.sh \
@@ -209,12 +92,10 @@ package() {
 }
 
 sha512sums="
-8c6a6f9dad39485916ac50f8c82994a5cd41d9c81f7a311901f75e11959e1b0e3de3882a4c11b647db4a862e996a2dad27909148572a4ac03d1f5c295dce43ac  deviceinfo
+a7f374b9cf3299d3397d7bfd73d54fd123f0d6a231abd63c7cc3c1ce54b1a04a437452d42eb5562012fb2e71f6a4c7902e45ab47601c4de1c97ab942dca3d7bf  deviceinfo
 4447ae70949a72934b420bc3ed15d4d55e1d9e1b49a40064d1ab0c46786f6ba8d1396b81889a626087ef9841f2882eed11bc361c7a6a27035125d7c8897c4d28  kernel-cmdline.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.sh
-ef03bcff5e8690e29b61da452258111b8e700cec8fe0545d08e42dd71c7cedbeeb24c0ef6e51c6e36690acfb8d13a1c9617ce258fcaa1ebf739a6eabfd01d9e9  fogona-mkboot.sh
-553d72161bb312ada97a0609b0cc606e4893ed9303ac2cea9882e8ef7515661105377f087029c3efbd49dba0da4625da1a4cc839449f1abca8e92a5614b2e22d  fogona-flash-boot.sh
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
 e8c3fce01d80b15a37e0799484d4b9c56081ddb0ff0f4a2ff8517d0b88cf592bcd3d43bdce2420c02f518c5b9dfbbd2f3e9b7bb613f3ac93d402c9a83bb2fa97  fogona-wlan-bdf.sh
 039c27e59f2cc3aa60b82c45f28472c142012871020c54745ce94ca24a7eecede6d0c62e2d7b7d28130358d11435fd5cb73335c11ee97fcad77d8267a04ab6b1  fogona-wlan-bdf.service

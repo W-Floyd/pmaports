@@ -1,46 +1,25 @@
 # Maintainer: William Floyd <git@notmy.space>
 #
-# U-Boot for fogona, chainloaded by ABL.
+# U-Boot for fogona, chainloaded by ABL because ABL never publishes the ramdisk
+# location, so a directly-booted kernel cannot find its initramfs. U-Boot loads
+# the kernel, DTB and initramfs from /boot over UFS itself.
+# Background: /repo/investigations/boot-chain.md.
 #
-# WHY THIS EXISTS
+# Two artifacts:
+#   u-boot-txt0.bin    no control DTB, so U-Boot inherits ABL's and cannot
+#                      reach storage. Diagnostic only.
+#   u-boot-fogona.bin  the above plus U-Boot's own sm6225-motorola-fogona.dtb,
+#                      which carries the snps femto USB PHY, the sm8150 UFS PHY
+#                      tables and the PM6125 side keys. This is the bootable
+#                      one, and the one boot-deploy picks up.
 #
-# Not because ABL refuses our devicetree -- that claim was retracted, see
-# /repo/investigations/boot-chain.md. The real reason is the ramdisk: ABL's
-# RamdiskLoadAddress PCD is overridden per platform here, so a directly-booted
-# kernel cannot find its initramfs. U-Boot sidesteps that by loading the
-# kernel, DTB and initramfs itself.
-#
-# Since 2026-09-14 it loads them from the rootfs (UFS -> blkmap over userdata
-# -> the ESP subpartition holding /boot), so there is no FIT welded into the
-# payload any more. See the commits in the pinned tree.
-#
-# THE POST-LINK FIXUP IS NOT OPTIONAL
-#
-# ABL validates text_offset in the arm64 image header. CONFIG_POSITION_INDEPENDENT
-# makes U-Boot report its link-time VA (0xffffffff80000000) where a kernel reports
-# 0, and ABL cannot use that -- the symptom is a black screen and a bootloop back
-# to fastboot, indistinguishable from a dozen other failures. Zeroing those 8
-# bytes at offset 0x08 is the difference between that and U-Boot running. It is a
-# post-link step, so it lives in package() rather than in the tree.
-#
-# TWO ARTIFACTS, AND THE DIFFERENCE MATTERS
-#
-# u-boot-txt0.bin      u-boot-nodtb.bin with text_offset zeroed. No control DTB,
-#                      so U-Boot takes its FDT from ABL -- which means none of
-#                      our devicetree applies.
-# u-boot-fogona.bin    the above with U-Boot's OWN sm6225-motorola-fogona.dtb
-#                      appended. This is the one that carries the snps femto USB
-#                      PHY, the sm8150 UFS PHY tables and the PM6125 side keys,
-#                      and it is what every image tested on hardware has been.
-#
-# Use u-boot-fogona.bin. u-boot-txt0.bin is kept only because
-# fogona-mkboot.sh still defaults to it; that default should move.
-#
-# Ships u-boot-nodtb.bin, NOT u-boot.bin: the latter is 118 KiB larger because
-# it already has a DTB appended, and mistaking the two costs a boot.
+# /usr/share/u-boot/fogona and the u-boot-fogona.bin name are an interface:
+# mkinitfs stages that directory (deviceinfo_uboot_boardname) and boot-deploy
+# selects the file (deviceinfo_bootimg_override_payload). Renaming either
+# silently stops the bootloader from reaching the hardware.
 pkgname=u-boot-fogona
 pkgver=2026.10_rc4
-pkgrel=1
+pkgrel=2
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
 url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"
@@ -56,6 +35,10 @@ makedepends="
 	swig
 	"
 options="!check !strip !tracedeps"
+# Deploy on upgrade, as u-boot-tolino-shine3 and u-boot-librem5 do. Theirs dd
+# themselves into place; ours has to go through mkinitfs + boot-deploy because
+# the payload needs wrapping in an Android boot image first.
+install="$pkgname.post-upgrade"
 
 # Tip of `fogona-uboot`, the board layer of the three-branch stack in ~/uboot
 # (upstream-fixes-uboot -> sm6225-uboot -> fogona-uboot). Bump on every rebase.
@@ -93,6 +76,10 @@ package() {
 	local _dtb="$builddir/.output/dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dtb"
 	[ -f "$_dtb" ] || die "U-Boot's own fogona DTB was not built: $_dtb"
 
+	# ABL validates text_offset in the arm64 image header, and
+	# CONFIG_POSITION_INDEPENDENT makes U-Boot report its link-time VA there
+	# where a kernel reports 0. Zeroing those 8 bytes at 0x08 is the difference
+	# between U-Boot running and a black screen. Post-link, hence here.
 	python3 -c "
 import sys
 p = '$builddir/.output/u-boot-nodtb.bin'

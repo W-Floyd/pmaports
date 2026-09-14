@@ -1,0 +1,17 @@
+#!/bin/sh
+# Get the U-Boot that was just installed onto the boot partition.
+#
+# Same idea as u-boot-tolino-shine3 and u-boot-librem5, which dd themselves
+# into place on upgrade. fogona cannot dd: the payload has to be wrapped in an
+# Android boot image first. mkinitfs stages it and boot-deploy does the rest --
+# see device-motorola-fogona's deviceinfo.
+
+[ -f /usr/share/deviceinfo/deviceinfo ] || exit 0
+
+# pmbootstrap runs mkinitfs once itself at the end of "pmbootstrap install".
+[ -f /in-pmbootstrap ] && exit 0
+
+command -v mkinitfs > /dev/null 2>&1 || exit 0
+
+echo "==> u-boot-fogona: regenerating and flashing the boot image"
+mkinitfs
