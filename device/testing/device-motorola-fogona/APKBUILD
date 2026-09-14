@@ -3,7 +3,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=32
+pkgrel=33
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -133,16 +133,32 @@ source="deviceinfo
 build() {
 	devicepkg_build $startdir $pkgname
 
-	# The feature list is the one the other WCN3990 devices in pmaports use,
-	# and it differs from linux-firmware's stock firmware-5.bin by three
-	# flags. One of them is observable here: without
-	# single-chan-info-per-channel ath10k parses this firmware's chan_info
-	# events with the *paired* handler, which reads the frequency from a
-	# cached index it never got, and every scan logs "chan info: invalid
-	# frequency 0 (idx 41 out of bounds)". WLAN.HL.3.2.4 sends one event per
-	# channel, so the unpaired handler is the correct one.
+	# This feature list is not cosmetic -- two of its flags are why WiFi on
+	# this device is usable at all, and neither is in linux-firmware's stock
+	# firmware-5.bin.
+	#
+	# mfp-support is the big one. ath10k_peer_assoc_h_crypto() sends the
+	# peer's PMF flag to the firmware ONLY if the firmware file declares mfp:
+	#
+	#     if (sta->mfp && test_bit(ATH10K_FW_FEATURE_MFP_SUPPORT, ...))
+	#             arg->peer_flags |= ar->wmi.peer_flags->pmf;
+	#
+	# Without it, a WPA3 or WPA2/WPA3-transition AP negotiates 802.11w, the
+	# host associates with sta->mfp set, and the firmware is never told -- so
+	# protected management frames, ADDBA among them, are mishandled, block-ack
+	# never establishes and aggregation never starts. Measured on hardware
+	# against a LAN iperf3 server, same AP: 17.9/20 Mbit/s up/down with 154 ms
+	# RTT before, 78/234 Mbit/s with 30 ms RTT after, on a link whose PHY rate
+	# never changed. It reads as "the radio is slow" and it is a one-bit
+	# metadata omission.
+	#
+	# single-chan-info-per-channel is the smaller one: without it ath10k
+	# parses this firmware's chan_info events with the *paired* handler, reads
+	# the frequency from a cached index it never got, and every scan logs
+	# "chan info: invalid frequency 0 (idx 41 out of bounds)" -- 48 times in
+	# one boot before, 0 after. WLAN.HL.3.2.4 sends one event per channel.
 	ath10k-fwencoder --create \
-		--features=wowlan,no-nwifi-decap-4addr-padding,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
+		--features=wowlan,no-nwifi-decap-4addr-padding,mfp-support,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
 		--set-wmi-op-version=tlv --set-htt-op-version=tlv \
 		--set-fw-api=5
 }
