@@ -4,12 +4,15 @@
 #
 # WHY THIS EXISTS
 #
-# fogona's ABL will not boot a mainline kernel. It refuses every non-stock
-# devicetree in any shape (see the patch's commit message, and
-# /repo/investigations/boot-chain.md), does not publish the ramdisk location, and
-# applies dtbo overlays that fault against a non-stock base DTB. U-Boot gets past
-# all of it by carrying its own DT and its own FIT, so ABL never has to parse
-# anything of ours.
+# Not because ABL refuses our devicetree -- that claim was retracted, see
+# /repo/investigations/boot-chain.md. The real reason is the ramdisk: ABL's
+# RamdiskLoadAddress PCD is overridden per platform here, so a directly-booted
+# kernel cannot find its initramfs. U-Boot sidesteps that by loading the
+# kernel, DTB and initramfs itself.
+#
+# Since 2026-09-14 it loads them from the rootfs (UFS -> blkmap over userdata
+# -> the ESP subpartition holding /boot), so there is no FIT welded into the
+# payload any more. See the commits in the pinned tree.
 #
 # THE POST-LINK FIXUP IS NOT OPTIONAL
 #
@@ -18,17 +21,28 @@
 # 0, and ABL cannot use that -- the symptom is a black screen and a bootloop back
 # to fastboot, indistinguishable from a dozen other failures. Zeroing those 8
 # bytes at offset 0x08 is the difference between that and U-Boot running. It is a
-# post-link step, so it lives in package() rather than in the patch.
+# post-link step, so it lives in package() rather than in the tree.
 #
-# Note we ship u-boot-nodtb.bin, NOT u-boot.bin: no control DTB is embedded, so
-# U-Boot takes its FDT from ABL. (u-boot.bin is 118 KiB larger because it has one
-# appended -- mistaking the two costs a boot.)
+# TWO ARTIFACTS, AND THE DIFFERENCE MATTERS
+#
+# u-boot-txt0.bin      u-boot-nodtb.bin with text_offset zeroed. No control DTB,
+#                      so U-Boot takes its FDT from ABL -- which means none of
+#                      our devicetree applies.
+# u-boot-fogona.bin    the above with U-Boot's OWN sm6225-motorola-fogona.dtb
+#                      appended. This is the one that carries the snps femto USB
+#                      PHY, the sm8150 UFS PHY tables and the PM6125 side keys,
+#                      and it is what every image tested on hardware has been.
+#
+# Use u-boot-fogona.bin. u-boot-txt0.bin is kept only because
+# fogona-mkboot.sh still defaults to it; that default should move.
+#
+# Ships u-boot-nodtb.bin, NOT u-boot.bin: the latter is 118 KiB larger because
+# it already has a DTB appended, and mistaking the two costs a boot.
 pkgname=u-boot-fogona
 pkgver=2026.10_rc4
-_realver=2026.10-rc4
-pkgrel=0
+pkgrel=1
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
-url="https://www.denx.de/wiki/U-Boot"
+url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"
 license="GPL-2.0-or-later"
 makedepends="
@@ -42,21 +56,27 @@ makedepends="
 	swig
 	"
 options="!check !strip !tracedeps"
-source="u-boot-$_realver.tar.gz::https://github.com/u-boot/u-boot/archive/refs/tags/v$_realver.tar.gz
-	0001-qcom-fogona-bringup-config.patch
-	"
-builddir="$srcdir/u-boot-$_realver"
+
+# Tip of `fogona-uboot`, the board layer of the three-branch stack in ~/uboot
+# (upstream-fixes-uboot -> sm6225-uboot -> fogona-uboot). Bump on every rebase.
+#
+# Pin a commit, never a branch: abuild checksums the tarball and a moving
+# branch breaks its own checksum. See /repo/aports/README.md.
+_commit="ce7a1dcb1267526ea93efcb3f013a67e90b68817"
+
+source="$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
+builddir="$srcdir/u-boot-$_commit"
 
 build() {
 	# qcom_defconfig is the generic Qualcomm phone target; fogona.config is the
-	# board fragment added by the patch.
+	# board fragment carried in the pinned tree.
 	# qcom-phone.config is NOT optional: it sets
 	# CONFIG_ENV_DEFAULT_ENV_TEXT_FILE="board/qualcomm/qcom-phone.env", which is
-	# where fogona's bootcmd (the FIT address probe) lives. Without it the build
-	# succeeds and produces a U-Boot with the generic env and no way to find our
-	# FIT -- silently wrong, and indistinguishable from every other boot failure
-	# on this device. It also brings CONSOLE_RECORD + FASTBOOT_CMD_OEM_CONSOLE,
-	# the only diagnostic channel U-Boot has here.
+	# where fogona's bootcmd, the blkmap setup and the boot menu live. Without
+	# it the build succeeds and produces a U-Boot with the generic env that
+	# cannot find the rootfs -- silently wrong, and indistinguishable from
+	# every other boot failure on this device. It also brings CONSOLE_RECORD +
+	# FASTBOOT_CMD_OEM_CONSOLE, the only diagnostic channel U-Boot has here.
 	make O=.output qcom_defconfig
 	cat board/qualcomm/qcom-phone.config >> .output/.config
 	cat board/qualcomm/fogona.config >> .output/.config
@@ -70,8 +90,9 @@ build() {
 package() {
 	install -d "$pkgdir"/usr/share/u-boot/fogona
 
-	# u-boot-nodtb.bin + zeroed text_offset == the binary that boots. Verified
-	# byte-exact against the previously hand-built artifact.
+	local _dtb="$builddir/.output/dts/upstream/src/arm64/qcom/sm6225-motorola-fogona.dtb"
+	[ -f "$_dtb" ] || die "U-Boot's own fogona DTB was not built: $_dtb"
+
 	python3 -c "
 import sys
 p = '$builddir/.output/u-boot-nodtb.bin'
@@ -81,8 +102,12 @@ if d[0x38:0x3c] != b'ARM\x64':
 d[8:16] = b'\0' * 8
 open('$pkgdir/usr/share/u-boot/fogona/u-boot-txt0.bin', 'wb').write(bytes(d))
 "
+	# The bootable artifact: text_offset-zeroed U-Boot with its own DTB
+	# appended. Without the DTB, U-Boot inherits ABL's and none of the board
+	# devicetree applies.
+	cat "$pkgdir"/usr/share/u-boot/fogona/u-boot-txt0.bin "$_dtb" \
+		> "$pkgdir"/usr/share/u-boot/fogona/u-boot-fogona.bin
 }
 sha512sums="
-5a704445b131849ea6246c77fb134be962b3ea9398beda409c3248be306f4c975b8ed0b549ba0e6fad1df05a7da5b47f5eeaffbf147500d371a6faf47e938917  u-boot-2026.10-rc4.tar.gz
-1349f6402198cddc96955d424c662111cd27c95e81310429cfdb44f0a7567a1e744134c1fdb79d07f98141186c24eea578fa2d3ae93968856ce53848f9d23a21  0001-qcom-fogona-bringup-config.patch
+db1c872cbbffe898cd17d4bb24201827a701a0332fd5d65ef4f1343b9e8ee39f14e5d6c2cffe9cd5dfcaead69329d9782d9771822bd9279f721fb7fe92aa3b22  u-boot-fogona-ce7a1dcb1267526ea93efcb3f013a67e90b68817.tar.gz
 "
