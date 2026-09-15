@@ -197,6 +197,15 @@ Android devices need the kernel and initramfs to be flashed to a dedicated parti
 datatype = "boolean"
 default_value = false
 
+[variable.flash.flash_vendor_boot]
+description = """
+For fastboot devices with bootimg header version 3 or newer, boot-deploy flashes vendor_boot alongside boot on update. Set this to `false` to flash boot only and leave the existing vendor_boot in place.
+
+Needed by devices that chainload a bootloader from `boot` (e.g. U-Boot): there the vendor bootloader consumes the stock vendor_boot -- its base devicetree and the dtbo overlays applied to it -- before the chainloaded stage runs, so rewriting vendor_boot with a mainline-derived image can leave the device unbootable.
+"""
+datatype = "boolean"
+default_value = true
+
 [variable.flash.bootimg_amazon_omap_header_size]
 description = "Prepend a certificate exploit header to boot.img, required by the exploit chain used for most OMAP based Amazon Kindles. Value is typically 1024, 848 for amazon-soho."
 datatype = "integer"
