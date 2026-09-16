@@ -1,0 +1,40 @@
+# fogona: a copy of /usr/lib/systemd/system/sshd.service with one line removed,
+# `After=network.target`.
+#
+# Why a whole-unit override and not a drop-in: ordering dependencies cannot be
+# reset. A drop-in containing `After=` followed by the entries to keep was
+# tried first and does not work -- `systemctl show -p After sshd.service` still
+# listed network.target, both after `daemon-reload` and after a full reboot,
+# because network.target keeps the reverse edge (`Before=sshd.service`).
+# systemd documents the empty-string reset for requirement dependencies, not
+# for Before=/After=.
+#
+# Why remove it at all: the panel bring-up stall
+# (/repo/investigations/display-vblank-boot-stall.md) wedges NetworkManager,
+# and sshd was ordered a few tens of milliseconds behind it purely by this
+# line. A stalled handset therefore has a working IP but nothing listening on
+# it -- the initramfs brings usb0 up at 172.16.42.1 and that survives into
+# userspace, which is why a stalled handset answers ping while refusing every
+# TCP port. That is the entire reason a stall leaves no journal and no way in:
+# the system is not dead, the one service that could report on it is queued
+# behind the thing that hung.
+#
+# sshd does not need the network to start. sshd_config sets no ListenAddress,
+# so it binds 0.0.0.0 and serves interfaces that appear later, and
+# Restart=always covers anything transient. basic.target, still ordered before
+# it as a default dependency, is all it actually requires.
+#
+# Revisit if the stall is fixed, or if the packaged unit changes.
+[Unit]
+Description=OpenSSH Daemon
+Wants=sshdgenkeys.service
+After=sshdgenkeys.service
+
+[Service]
+ExecStart=/usr/sbin/sshd.pam -D
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

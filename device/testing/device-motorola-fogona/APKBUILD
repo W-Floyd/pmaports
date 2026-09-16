@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=40
+pkgrel=41
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -49,6 +49,7 @@ source="deviceinfo
 	fogona-video.conf
 	fogona-wlan-bdf.sh
 	fogona-wlan-bdf.service
+	sshd-early.service
 	"
 
 build() {
@@ -105,6 +106,20 @@ package() {
 		"$pkgdir"/usr/sbin/fogona-wlan-bdf
 	install -Dm644 "$srcdir"/fogona-wlan-bdf.service \
 		"$pkgdir"/usr/lib/systemd/system/fogona-wlan-bdf.service
+
+	# TEMPORARY, paired with the unfixed panel bring-up stall. sshd is
+	# normally ordered After=network.target, which puts it behind
+	# NetworkManager -- and the stall wedges NetworkManager, so a stalled
+	# handset answers ping (the initramfs address on usb0 survives) while
+	# refusing every TCP port. That is why a stall leaves no journal and no
+	# way in. See /repo/investigations/display-vblank-boot-stall.md.
+	#
+	# /etc rather than /usr/lib because openssh owns the path there and two
+	# packages cannot own one file; and a whole unit rather than a drop-in
+	# because Before=/After= cannot be reset -- see the file's own header.
+	# Drop both this and the file once the stall is fixed.
+	install -Dm644 "$srcdir"/sshd-early.service \
+		"$pkgdir"/etc/systemd/system/sshd.service
 }
 
 sha512sums="
@@ -115,4 +130,5 @@ c8f918c29903cfc929fc2025cbd9147124bc8bdcf0b3c446213d279d0774621f98310fafd32f2afc
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
 e8c3fce01d80b15a37e0799484d4b9c56081ddb0ff0f4a2ff8517d0b88cf592bcd3d43bdce2420c02f518c5b9dfbbd2f3e9b7bb613f3ac93d402c9a83bb2fa97  fogona-wlan-bdf.sh
 039c27e59f2cc3aa60b82c45f28472c142012871020c54745ce94ca24a7eecede6d0c62e2d7b7d28130358d11435fd5cb73335c11ee97fcad77d8267a04ab6b1  fogona-wlan-bdf.service
+564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service
 "
