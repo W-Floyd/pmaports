@@ -1,0 +1,72 @@
+From 9476dba253a3da6027deadb917a57a142bc5eecf Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 16 Sep 2026 14:35:36 +0000
+Subject: [PATCH] flash: don't build vendor_boot when the boot payload is
+ overridden
+
+deviceinfo_bootimg_override_payload declares that boot.img holds
+something other than the kernel -- in every in-tree case a U-Boot
+chainloaded from `boot`. At header_version 3/4 create_bootimg still
+packed the initramfs and dtb into a vendor_boot.img alongside it, an
+image describing a boot that cannot happen, since the kernel it pairs
+with was replaced.
+
+On such a device the vendor bootloader runs before the chainloaded stage
+and reads the stock vendor_boot for its own devicetree, so writing a
+mainline-derived one over it can leave the device unbootable. Build
+boot.img alone instead.
+
+vendor_flash_android_bootimg() needs no change: its existing
+[ -e "$work_dir/vendor_boot.img" ] test already skips the flash when no
+image was built.
+
+No in-tree device changes behaviour. Every device setting
+bootimg_override_payload or uboot_boardname has header_version unset, and
+every header_version 3/4 device boots a mainline kernel directly, so
+nothing currently reaches both branches.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ boot-deploy-functions.sh | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/boot-deploy-functions.sh b/boot-deploy-functions.sh
+index 675fb0d..0d1f9c3 100755
+--- a/boot-deploy-functions.sh
++++ b/boot-deploy-functions.sh
+@@ -863,19 +863,28 @@ create_bootimg() {
+ 	if [ "$deviceinfo_header_version" = "3" ] || [ "$deviceinfo_header_version" = "4" ]; then
+ 		require_package "mkbootimg" "android-tools" "generate_bootimg"
+ 
++		# An overridden payload is a bootloader chainloaded from `boot`,
++		# not a kernel: a vendor_boot built here would pair with a kernel
++		# that isn't there, and the vendor bootloader that runs first
++		# still needs the stock one.
++		local _vendor_args=""
++		if [ -z "$deviceinfo_bootimg_override_payload" ]; then
++			_vendor_args="--dtb $_dtb --vendor_ramdisk $_ramdisk --vendor_boot $_vendor_bootimg"
++		fi
++
+ 		# shellcheck disable=SC2039 disable=SC2086
+ 		mkbootimg \
+ 			--header_version "${deviceinfo_header_version}" \
+-			--dtb "${_dtb}" \
+ 			--kernel "${_kernelfile}" \
+-			--vendor_ramdisk "$_ramdisk" \
+ 			--vendor_cmdline "$(get_cmdline)" \
+ 			--pagesize "${deviceinfo_flash_pagesize}" \
+ 			${deviceinfo_bootimg_custom_args} \
+-			--vendor_boot "$_vendor_bootimg" \
++			${_vendor_args} \
+ 			-o "$_bootimg" || exit 1
+ 
+-		additional_files="$additional_files $(basename $_vendor_bootimg)"
++		if [ -z "$deviceinfo_bootimg_override_payload" ]; then
++			additional_files="$additional_files $(basename $_vendor_bootimg)"
++		fi
+ 	else
+ 		local _header_version_arg="--header_version ${deviceinfo_header_version}"
+ 		# don't add --header_version if deviceinfo_header_version is empty
+-- 
+2.55.0
+
