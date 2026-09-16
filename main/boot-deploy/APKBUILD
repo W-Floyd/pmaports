@@ -10,6 +10,7 @@ source="
 	https://gitlab.postmarketos.org/postmarketOS/boot-deploy/-/archive/$pkgver/boot-deploy-$pkgver.tar.gz
 
 	os-customization
+	0001-extlinux-set-prompt-0.patch
 	"
 depends="generate-kernel-cmdline"
 # needed for /usr/lib/os-release
@@ -33,4 +34,5 @@ package() {
 sha512sums="
 a1fa5bb4380cbdf593db78353a533a3b8115d382a0f3ad9ee212b03fba13ea7276fcd026b266ac3194fe578f7338f65a5759fe257c008e0fe8b7bef031004e0b  boot-deploy-0.25.0.tar.gz
 a243975b9850d9933e0f917f7eb38fc4a76ea658c3dcc56f035f60ee6c62d6740c1107143b8210bdc0231d4c9b6b2003e458120985604eb09649322d359ae89f  os-customization
+6a9cd1ef72fce96e3f2ccb429318ed35470790f813104fe41f59b949a2baa958d163cbaa63c887bf03b4aaa7bec6c25c3cbc16415c644e8d548fbadb578eacb6  0001-extlinux-set-prompt-0.patch
 "

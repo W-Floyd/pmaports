@@ -1,0 +1,92 @@
+From 912087a974cce3a6ebbadd618e4e4b7d74ea5d1e Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 16 Sep 2026 22:15:21 +0000
+Subject: [PATCH] extlinux: set prompt 0 so the menu does not block the boot
+
+The generated extlinux.conf carries `menu title`, and U-Boot's parser
+treats any menu directive as a request to prompt:
+
+    case T_MENU:
+            cfg->prompt = 1;
+
+A prompting menu then ignores `timeout`. cread_line only honours its
+timeout while nothing is waiting on stdin --
+
+    while (!tstc()) {
+            if (get_ticks() >= etime)
+                    return -2;
+
+-- so on a device whose stdin always has something pending the prompt is
+entered immediately, an empty choice is read, " not found" is printed, and
+menu_interactive_choice() sets m->timeout = 0 and blocks for ever.
+
+Seen on a Motorola Moto G Play 2024: its buttons are on stdin and the PON
+block latches volume-down in hardware, and its UART is left unclocked by the
+previous stage, so both stdin sources report data. The handset has no
+keyboard, so the prompt cannot be answered -- the only way out is fastboot.
+
+Devices that do not feed stdin only pay a needless one second pause, which
+is why this has gone unnoticed.
+
+prompt 0 makes menu_get_choice() take menu_default_choice() directly, so the
+default label boots without consulting stdin at all.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ boot-deploy-functions.sh          | 1 +
+ extlinux-examples/extlinux.conf.1 | 1 +
+ extlinux-examples/extlinux.conf.2 | 1 +
+ extlinux-examples/extlinux.conf.3 | 1 +
+ 4 files changed, 4 insertions(+)
+
+diff --git a/boot-deploy-functions.sh b/boot-deploy-functions.sh
+index 675fb0d..f0d806b 100755
+--- a/boot-deploy-functions.sh
++++ b/boot-deploy-functions.sh
+@@ -1172,6 +1172,7 @@ create_extlinux_config() {
+ timeout 1
+ default $distro_name
+ menu title boot prev kernel
++prompt 0
+ 
+ label $distro_name
+ 	kernel /$kernel_filename
+diff --git a/extlinux-examples/extlinux.conf.1 b/extlinux-examples/extlinux.conf.1
+index 504c221..067a416 100644
+--- a/extlinux-examples/extlinux.conf.1
++++ b/extlinux-examples/extlinux.conf.1
+@@ -1,6 +1,7 @@
+ timeout 1
+ default postmarketOS
+ menu title boot prev kernel
++prompt 0
+ 
+ label postmarketOS
+ 	kernel /vmlinuz
+diff --git a/extlinux-examples/extlinux.conf.2 b/extlinux-examples/extlinux.conf.2
+index 9aaf156..6a5b2f4 100644
+--- a/extlinux-examples/extlinux.conf.2
++++ b/extlinux-examples/extlinux.conf.2
+@@ -1,6 +1,7 @@
+ timeout 1
+ default postmarketOS
+ menu title boot prev kernel
++prompt 0
+ 
+ label postmarketOS
+ 	kernel /vmlinuz
+diff --git a/extlinux-examples/extlinux.conf.3 b/extlinux-examples/extlinux.conf.3
+index 62e9b34..8b3fa36 100644
+--- a/extlinux-examples/extlinux.conf.3
++++ b/extlinux-examples/extlinux.conf.3
+@@ -1,6 +1,7 @@
+ timeout 1
+ default postmarketOS
+ menu title boot prev kernel
++prompt 0
+ 
+ label postmarketOS
+ 	kernel /vmlinuz
+-- 
+2.55.0
+
