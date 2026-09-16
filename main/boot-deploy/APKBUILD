@@ -10,7 +10,6 @@ source="
 	https://gitlab.postmarketos.org/postmarketOS/boot-deploy/-/archive/$pkgver/boot-deploy-$pkgver.tar.gz
 
 	os-customization
-	0001-flash-skip-vendor_boot-for-overridden-payload.patch
 	"
 depends="generate-kernel-cmdline"
 # needed for /usr/lib/os-release
@@ -34,5 +33,4 @@ package() {
 sha512sums="
 a1fa5bb4380cbdf593db78353a533a3b8115d382a0f3ad9ee212b03fba13ea7276fcd026b266ac3194fe578f7338f65a5759fe257c008e0fe8b7bef031004e0b  boot-deploy-0.25.0.tar.gz
 a243975b9850d9933e0f917f7eb38fc4a76ea658c3dcc56f035f60ee6c62d6740c1107143b8210bdc0231d4c9b6b2003e458120985604eb09649322d359ae89f  os-customization
-0d4efe0bd423003491901f303eda37d6d2e240cce1d6c1f9e62162fa14ad32b2c0a796e3dbfbcf14839df9ba816c8cfc086ea4b234895cf9ad72cdc3a052bab5  0001-flash-skip-vendor_boot-for-overridden-payload.patch
 "
