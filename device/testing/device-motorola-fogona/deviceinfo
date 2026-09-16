@@ -93,7 +93,28 @@ deviceinfo_flash_pagesize="4096"
 # and cmdline in vendor_boot.img. That matters here beyond format correctness:
 # it never touches `init_boot`, which this bootloader refuses to accept modified
 # images for. Both `boot` and `vendor_boot` are flashable.
-deviceinfo_header_version="4"
+# header_version is deliberately NOT declared here, and the version is passed
+# to mkbootimg through bootimg_custom_args instead. device-jolla-c2 does the
+# same thing for the same reason; see its deviceinfo.
+#
+# boot-deploy's >= 3 path builds boot.img and vendor_boot.img as a matched pair
+# and flashes both. fogona owns only `boot`: ABL runs first, builds its
+# devicetree by selecting a stock qcom,khaje base DTB out of vendor_boot and
+# applying the dtbo overlays to it, and only then hands off to the chainloaded
+# U-Boot. A mainline-derived vendor_boot gives those overlays a base they
+# cannot apply to, so ABL never hands off and the A/B counter drains.
+#
+# Retested 2026-09-16, including the suggestion that clearing dtbo would make a
+# mainline vendor_boot acceptable: mainline vendor_boot + zeroed dtbo does not
+# boot either. The stock pair has to survive untouched. Proven earlier from
+# ABL's own logfs -- see /repo/investigations/boot-chain.md.
+#
+# Leaving header_version undeclared keeps boot-deploy on its pre-v3 path, which
+# builds no vendor_boot at all, while --header_version 4 below still produces
+# the v4 image this bootloader requires. Verified: the resulting boot.img
+# reports "boot image header version: 4" and vendor_boot is untouched.
+#
+# Revisit if boot-deploy!117 lands -- that would let this be declared honestly.
 # VERIFIED against the stock vendor_boot.img header (CC U1TF34.100-35):
 #   kernel_addr=0x8000  ramdisk_addr=0x1000000  tags_addr=0x100
 #   dtb_addr=0x1f00000  page_size=4096
@@ -116,4 +137,8 @@ deviceinfo_flash_offset_dtb="0x01f00000"
 #
 # mkbootimg's default per-field offsets already match this device, so only the
 # base needs correcting.
-deviceinfo_bootimg_custom_args="--base 0x00000000"
+deviceinfo_bootimg_custom_args="--base 0x00000000 --header_version 4"
+# The pre-v3 path packs a ramdisk into boot.img. U-Boot never reads it -- it
+# loads /boot/initramfs itself -- so the real one would be 12.7 MB rewritten to
+# flash on every kernel update for nothing. Same dummy device-jolla-c2 uses.
+deviceinfo_bootimg_override_initramfs="dummy-initramfs"
