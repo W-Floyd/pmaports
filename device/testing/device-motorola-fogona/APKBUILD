@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=39
+pkgrel=40
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -16,6 +16,12 @@ options="!check !archcheck"
 # mesa-vulkan-freedreno  Turnip; the only Vulkan ICD for the A610
 # msm-firmware-loader    mounts vendor and links 292 blobs into the fw search
 #                        path: modem PIL + wlanmdsp, WLAN board data, zap shader
+# qbootctl               marks the A/B slot successful on each good boot. Its
+#                        -systemd subpackage carries install_if, so do not list
+#                        that. Without it the slot stays Successful=0, ABL
+#                        decrements its retry counter every boot, and since
+#                        slot _b is not bootable, exhausting _a means the
+#                        handset stops booting at all.
 # qca-swiss-army-knife   ath10k-fwencoder here, ath10k-bdencoder at runtime
 # rmtfs, tqftpserv       the modem's EFS and firmware servers; without rmtfs the
 #                        modem watchdogs ~40 s in. Their -openrc/-systemd
@@ -29,6 +35,7 @@ depends="
 	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
+	qbootctl
 	qca-swiss-army-knife
 	rmtfs
 	tqftpserv
@@ -102,7 +109,7 @@ package() {
 
 sha512sums="
 3af42f5e38dfba5ad5048fd5cb842f7ba427d48660951de0b9dca91d9bb414a578d4b307d67cf9a146ca5e903231bca712673f4720a534cad157a9d8e5ecdd7a  deviceinfo
-89ecf5b132a49e0b2e201e219779f060d15b7d82185276545217a2bf8ff7dff75b4676970904da2b03b0c2d3982324bea9f285d5b52f8f5639cfd10af5530a42  kernel-cmdline.conf
+c8f918c29903cfc929fc2025cbd9147124bc8bdcf0b3c446213d279d0774621f98310fafd32f2afcb43ca065c49227122986a67c74828f563e2668d800c6877b  kernel-cmdline.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.sh
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
