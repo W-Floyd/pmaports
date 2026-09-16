@@ -67,20 +67,17 @@ deviceinfo_generate_bootimg="true"
 # so U-Boot must keep passing it (bootargs_disk in qcom-phone.env) or findfs
 # looks for a partition called plain `boot` and the apk transaction fails.
 #
-# bootimg_override_payload is LOAD-BEARING twice over and must never be
-# dropped. It puts U-Boot in the boot image, and it is also what stops
-# boot-deploy building a vendor_boot at all. At header_version 4 boot-deploy
-# otherwise flashes vendor_boot alongside boot, which BRICKS fogona: ABL runs
-# before U-Boot and builds its devicetree by selecting a stock qcom,khaje base
-# DTB from vendor_boot and applying the dtbo overlays to it; a mainline-derived
-# vendor_boot gives it a base its overlays cannot apply to, so ABL never hands
-# off and the A/B counter drains. Proven from ABL's own logfs -- see
-# /repo/investigations/boot-chain.md. Needs a boot-deploy that skips vendor_boot
-# for an overridden payload (boot-deploy!117); an older one ignores this and is
-# unsafe with flash_kernel_on_update here.
+# bootimg_override_payload is LOAD-BEARING: it is what puts U-Boot in the boot
+# image instead of a kernel. What keeps boot-deploy away from vendor_boot is a
+# separate thing -- header_version being left undeclared, further down.
 deviceinfo_uboot_boardname="fogona"
 deviceinfo_bootimg_override_payload="u-boot-fogona.bin"
 deviceinfo_flash_kernel_on_update="true"
+# Staging for the standard U-Boot boot path. Writes /boot/extlinux/extlinux.conf
+# with the generated cmdline, kernel and dtb. Nothing reads it yet -- bootcmd in
+# qcom-phone.env still runs the hand-rolled bootdisk chain -- so this is inert
+# until that is switched to bootstd, and exists so the two can be compared.
+deviceinfo_generate_extlinux_config="true"
 deviceinfo_rootfs_image_sector_size="4096"
 deviceinfo_flash_pagesize="4096"
 # Downstream builds BOARD_BOOT_HEADER_VERSION := 4 and this bootloader appears
