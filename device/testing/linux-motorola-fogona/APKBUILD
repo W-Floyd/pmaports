@@ -7,14 +7,19 @@
 #
 # WHAT THIS PACKAGE DOES AND DOES NOT OWN
 #
-# It owns the modules, the DTB and the staged Image. It does NOT itself produce
-# the thing you boot. This bootloader's `fastboot boot` takes the DTB, cmdline
-# and ramdisk from FLASH and ignores anything staged, so the only way to supply
-# our own is to chainload U-Boot with a FIT.
+# It owns the modules, the DTB and the kernel image installed under /boot. It
+# does NOT itself produce the thing you boot. This bootloader's `fastboot boot`
+# takes the DTB, cmdline and ramdisk from FLASH and ignores anything staged, so
+# the only way to supply our own is to chainload U-Boot.
 #
-# Since device-motorola-fogona r30 the handset welds that FIT itself: installing
-# this package trips an apk trigger on /boot that runs fogona-mkboot and
-# fogona-flash-boot, so the whole flow is
+# The boot partition holds U-Boot and nothing else. U-Boot brings up UFS and
+# loads the kernel, DTB and initramfs from /boot itself, so nothing about a
+# kernel update has to reach flash -- installing this package just puts new
+# files under /boot. mkinitfs still runs and hands off to boot-deploy, which
+# rebuilds the U-Boot boot image and rewrites it to the active slot; those are
+# identical bytes unless u-boot-fogona itself changed. See
+# device-motorola-fogona's deviceinfo for why that path must not also rewrite
+# vendor_boot. The whole flow is
 #
 #     pmbootstrap build --envkernel linux-motorola-fogona
 #     ... install the apk on the device
