@@ -19,7 +19,7 @@
 # silently stops the bootloader from reaching the hardware.
 pkgname=u-boot-fogona
 pkgver=2026.10_rc4
-pkgrel=2
+pkgrel=3
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
 url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"

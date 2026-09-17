@@ -2,9 +2,9 @@
 # Get the U-Boot that was just installed onto the boot partition.
 #
 # Same idea as u-boot-tolino-shine3 and u-boot-librem5, which dd themselves
-# into place on upgrade. fogona cannot dd: the payload has to be wrapped in an
-# Android boot image first. mkinitfs stages it and boot-deploy does the rest --
-# see device-motorola-fogona's deviceinfo.
+# into place on upgrade. fogona cannot dd the payload directly: it has to be
+# wrapped in an Android boot image first. mkinitfs stages it and boot-deploy
+# builds the image -- see device-motorola-fogona's deviceinfo.
 
 [ -f /usr/share/deviceinfo/deviceinfo ] || exit 0
 
@@ -15,3 +15,39 @@ command -v mkinitfs > /dev/null 2>&1 || exit 0
 
 echo "==> u-boot-fogona: regenerating and flashing the boot image"
 mkinitfs
+
+# boot-deploy refuses to flash whenever the RUNNING system booted with EFI:
+# flash_updated_boot_parts() returns early with "Not flashing boot when booting
+# with EFI" if /sys/firmware/efi/efivars exists.
+#
+# That check is right for every other device that has it. It was added to stop a
+# *kernel* boot image being written over a chainloaded U-Boot (boot-deploy
+# 515ba06, "Always skip flashing boot when using EFI"). There the bootimg holds
+# a kernel and the boot partition holds the bootloader, so flashing would
+# destroy the thing that boots.
+#
+# fogona inverts that. deviceinfo_bootimg_override_payload makes the bootimg
+# *be* U-Boot, so the image boot-deploy declines to flash is the bootloader
+# itself. Left alone, U-Boot silently stops being updated the moment this
+# handset starts booting through EFI: the upgrade reports success, the new
+# u-boot-fogona.bin lands in /usr/share and gets wrapped into /boot/boot.img,
+# and the boot partition goes on running the old one. Nothing reports it, which
+# makes it a genuinely nasty thing to debug -- observed on 2026-09-17.
+#
+# So own the flash here, which is where a U-Boot package should do it anyway.
+if [ -e /sys/firmware/efi/efivars ] && [ -f /boot/boot.img ]; then
+	# Same derivation boot-deploy's ab_get_slot() uses.
+	_slot="$(grep -o 'androidboot\.slot_suffix=..' /proc/cmdline | cut -d '=' -f2)" || :
+	_part="/dev/disk/by-partlabel/boot${_slot}"
+
+	if [ -b "$_part" ]; then
+		echo "==> u-boot-fogona: boot-deploy skipped the flash under EFI, flashing $_part"
+		dd if=/boot/boot.img of="$_part" bs=1M
+		sync
+	else
+		echo "==> u-boot-fogona: ERROR: $_part not found."
+		echo "==> u-boot-fogona: U-Boot was NOT updated -- the boot partition still"
+		echo "==> u-boot-fogona: runs the previous build. Flash /boot/boot.img by hand."
+		exit 1
+	fi
+fi
