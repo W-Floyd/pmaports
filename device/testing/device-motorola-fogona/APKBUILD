@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=41
+pkgrel=42
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -23,6 +23,14 @@ options="!check !archcheck"
 #                        slot _b is not bootable, exhausting _a means the
 #                        handset stops booting at all.
 # qca-swiss-army-knife   ath10k-fwencoder here, ath10k-bdencoder at runtime
+# systemd-boot           supplies the EFI app boot-deploy's add_systemd_boot()
+#                        installs as /boot/EFI/BOOT/BOOTAA64.EFI, plus the
+#                        bootloader-spec entries beside it. Without the package
+#                        boot-deploy logs "systemd-boot EFI app or powervm-boot
+#                        not found, skipping" and writes neither. U-Boot loads
+#                        that app by path, so no EFI variable store is needed --
+#                        EFI/BOOT/BOOTAA64.EFI is the removable-media fallback,
+#                        found by convention rather than via BootOrder.
 # rmtfs, tqftpserv       the modem's EFS and firmware servers; without rmtfs the
 #                        modem watchdogs ~40 s in. Their -openrc/-systemd
 #                        subpackages carry install_if, so do not list them.
@@ -38,6 +46,7 @@ depends="
 	qbootctl
 	qca-swiss-army-knife
 	rmtfs
+	systemd-boot
 	tqftpserv
 	u-boot-fogona
 "
