@@ -1,0 +1,15 @@
+[Unit]
+Description=Copy the modem EFS to writable files for rmtfs
+Documentation=file:/usr/sbin/fogona-modem-efs
+# rmtfs opens the EFS at startup, so the copies have to exist before it runs.
+Before=rmtfs.service
+RequiresMountsFor=/var/lib
+ConditionPathExists=/dev/disk/by-partlabel/modemst1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-modem-efs
+
+[Install]
+WantedBy=multi-user.target
