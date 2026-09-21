@@ -47,6 +47,19 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 #                        `qmi-utils`, NOT in `libqmi`, which ships only the
 #                        library and qmi-proxy. Give PDC calls a bounded
 #                        `timeout` -- see TRAPS.md.
+# hexagonrpcd,           FastRPC to the ADSP, which is how the sensors are
+# hexagonrpcd-systemd,   reached. Like qcom-diag, its -systemd and -udev
+# hexagonrpcd-udev       subpackages carry no install_if, so list them or the
+#                        units and rules never land. The **rootpd** service
+#                        works as-is. The **sensorspd** one does not yet: it
+#                        spins on "Could not read from directory: Function not
+#                        implemented" because it has no filesystem to serve.
+#                        That content is what FP4 ships as
+#                        firmware-fairphone-fp4-hexagonfs, and fogona has no
+#                        equivalent -- so sensors need a hexagonfs set built
+#                        for this device before sensorspd is worth enabling.
+#                        None of this touches the modem; it was added for
+#                        sensors and measured not to change RF.
 # qcom-diag,             diag-router: the modem's DIAG channel, and the only
 # qcom-diag-systemd      instrument that gets anything out of the modem itself
 #                        (EFS, NV, F3). Unlike rmtfs and tqftpserv, qcom-diag's
@@ -73,6 +86,9 @@ depends="
 	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
+	hexagonrpcd
+	hexagonrpcd-systemd
+	hexagonrpcd-udev
 	qbootctl
 	qca-swiss-army-knife
 	qcom-diag
