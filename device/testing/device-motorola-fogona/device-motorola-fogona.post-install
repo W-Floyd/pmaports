@@ -19,4 +19,10 @@
 # Before=rmtfs.service; neither ordering works if the unit never runs.
 systemctl enable fogona-wlan-bdf.service >/dev/null 2>&1 || true
 systemctl enable fogona-modem-efs.service >/dev/null 2>&1 || true
+
+# Not ours, and enabled here for the same reason: qcom-diag ships
+# diag-router.service with WantedBy=multi-user.target and nothing that turns it
+# on. Without it there is no DIAG channel to the modem at all -- no EFS, no NV,
+# no F3 -- which is the whole diagnostic surface on this device.
+systemctl enable diag-router.service >/dev/null 2>&1 || true
 exit 0

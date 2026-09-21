@@ -30,6 +30,20 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 #                        slot _b is not bootable, exhausting _a means the
 #                        handset stops booting at all.
 # qca-swiss-army-knife   ath10k-fwencoder here, ath10k-bdencoder at runtime
+# qrtr                   qrtr-lookup, which is how you tell whether the modem
+#                        finished RF bring-up -- `qrtr-lookup | awk '$1==41'`
+#                        is the whole test, and service 41 is absent on every
+#                        failing boot. `qrtr-libs` arrives on its own as a
+#                        libqmi dependency and ships no binaries, so the tools
+#                        were hand-installed and a reinstall lost them. No
+#                        -openrc/-systemd subpackage exists, so this does not
+#                        collide with the in-kernel qrtr-ns.
+# qcom-diag,             diag-router: the modem's DIAG channel, and the only
+# qcom-diag-systemd      instrument that gets anything out of the modem itself
+#                        (EFS, NV, F3). Unlike rmtfs and tqftpserv, qcom-diag's
+#                        subpackages carry NO install_if, so -systemd has to be
+#                        listed explicitly or the unit never lands -- and
+#                        nothing enables it either, so the post-install does.
 # systemd-boot           supplies the EFI app boot-deploy's add_systemd_boot()
 #                        installs as /boot/EFI/BOOT/BOOTAA64.EFI, plus the
 #                        bootloader-spec entries beside it. Without the package
@@ -52,6 +66,9 @@ depends="
 	postmarketos-base
 	qbootctl
 	qca-swiss-army-knife
+	qcom-diag
+	qcom-diag-systemd
+	qrtr
 	rmtfs
 	systemd-boot
 	tqftpserv
