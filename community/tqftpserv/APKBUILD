@@ -1,0 +1,66 @@
+# Maintainer: Luca Weiss <luca@lucaweiss.eu>
+#
+# fogona overlay: adds 0001-translate-serve-the-fsg-partition.patch. Otherwise
+# identical to Alpine community/tqftpserv. Drop this override once the patch
+# (or an equivalent) is upstream in linux-msm/tqftpserv -- see
+# https://github.com/linux-msm/tqftpserv/issues/25.
+pkgname=tqftpserv
+pkgver=1.2
+# Keep this AHEAD of whatever Alpine ships. r3 collided with the mirror's own
+# 1.2-r3: same version, different contents, so apk saw no upgrade and a
+# reinstall silently landed the unpatched build. That costs the SIM -- the
+# modem is refused /readwrite/datablock/id_00, mot_rfs/imei_sv and friends,
+# its USIM application never leaves 'detected', and ModemManager reports
+# sim-missing.
+pkgrel=4
+pkgdesc="Trivial File Transfer Protocol server over AF_QIPCRTR"
+url="https://github.com/linux-msm/tqftpserv"
+arch="all"
+license="BSD-3-Clause"
+makedepends="meson qrtr-dev zstd-dev"
+source="https://github.com/linux-msm/tqftpserv/archive/v$pkgver/tqftpserv-v$pkgver.tar.gz
+	tqftpserv.initd
+	0001-translate-serve-the-fsg-partition.patch
+	populate-readwrite.sh
+	tqftpserv-populate-readwrite.service
+	"
+subpackages="$pkgname-doc $pkgname-openrc $pkgname-systemd:systemd"
+options="!check" # No test suite
+
+build() {
+	abuild-meson \
+		-Dsystemd-unit-prefix=/usr/lib/systemd/system/ \
+		. output
+	meson compile -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+
+	install -Dm644 LICENSE "$pkgdir"/usr/share/licenses/$pkgname/COPYING
+	install -Dm755 "$srcdir"/tqftpserv.initd "$pkgdir"/etc/init.d/tqftpserv
+
+	# Backported from upstream PR #53, which is merged but in no release yet.
+	# Motorola modems read per-device state (datablock/, mot_rfs/imei_sv, the
+	# hob/dhob reports) out of the readwrite tree, and without it the SIM's
+	# application never leaves "detected".
+	install -Dm755 "$srcdir"/populate-readwrite.sh \
+		"$pkgdir"/usr/bin/populate-readwrite.sh
+	install -Dm644 "$srcdir"/tqftpserv-populate-readwrite.service \
+		"$pkgdir"/usr/lib/systemd/system/tqftpserv-populate-readwrite.service
+}
+
+systemd() {
+	# post-upgrade too: apk only runs post-install on a fresh install, so
+	# without it an upgrade leaves the unit disabled and the modem unfixed.
+	install="$subpkgname.post-install $subpkgname.post-upgrade"
+	default_systemd
+}
+
+sha512sums="
+d940aa8c48d20df893b633a870829a42506374c01591ff01c38e7aeb763ed80eb94b647ce72a6e252b41fdf3197b72840c9a23b3552a65ff4a2b140e1d79da19  tqftpserv-v1.2.tar.gz
+9fde613a1ed53e633ab676e37245d40598deb4b6896c379054389adad5af9f110fcf95871fe31bad3f0ed9321ba3cee8a2160b95e56873719382f81063a85721  tqftpserv.initd
+88a40951e43f0af51b67862be81d82fdb1d993ed745edd5fcfb4c1063cc9763cbe895a0f170dc61c2cb3d3039213d4b52a28393947a5d429508b86cfe8fb33b8  0001-translate-serve-the-fsg-partition.patch
+4615bc5db948c38c250ed0009dbd38ce674f5e2f7e9ec2c752850b983f0b92bfb34b50ae2d1c0b0a572e1bf6baa67aa25973addaee32987390fbcea1d2e2d294  populate-readwrite.sh
+68683fe4ef9e25659d5ab6423bd0052527e89b4e25e76d2858f89790c04ea541779f5a87b94721059c3d87d0d336ce5b4514d67ae8007001bbb5fb9a65d2f397  tqftpserv-populate-readwrite.service
+"
