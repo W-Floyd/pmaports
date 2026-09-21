@@ -5,11 +5,18 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=44
+pkgrel=45
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
+
+# The two oneshot units this package ships have to be *enabled*, and Alpine's
+# preset policy does not do it -- installing the unit file is not enough. See
+# the post-install script: a fresh install left both disabled, which cost WiFi
+# entirely. post-upgrade as well, because apk runs post-install only on a fresh
+# install.
+install="$pkgname.post-install $pkgname.post-upgrade"
 
 # android-tools       mkbootimg/avbtool for boot-deploy's header_version 4 path
 # make-dynpart-mappings  maps vendor and modem out of the dynamic `super`
@@ -162,7 +169,7 @@ c8f918c29903cfc929fc2025cbd9147124bc8bdcf0b3c446213d279d0774621f98310fafd32f2afc
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
 e8c3fce01d80b15a37e0799484d4b9c56081ddb0ff0f4a2ff8517d0b88cf592bcd3d43bdce2420c02f518c5b9dfbbd2f3e9b7bb613f3ac93d402c9a83bb2fa97  fogona-wlan-bdf.sh
 039c27e59f2cc3aa60b82c45f28472c142012871020c54745ce94ca24a7eecede6d0c62e2d7b7d28130358d11435fd5cb73335c11ee97fcad77d8267a04ab6b1  fogona-wlan-bdf.service
-f2766d66f7cfbe9589d6bbfc400e8280982c83bf163cb4841697afd0232ce82d17a70b9a9a952166f377a67032569a1d4447dd9bf4130d9e9aa69f747c6df8ac  fogona-modem-efs.sh
+84233a0a8faf0975656bf2046d4e025ace0ae418b9080aa29502b041050b930ecbac670bdffc86d482ec4fbd1e19646593fdf0e81a3078962af151255f628262  fogona-modem-efs.sh
 5bdb6339d2896d5ebb50ba5303b007b1755d27420eff46276f8adab9a0f495d00d90cc8a1cd61ddc3996ce91220d1b4194f5324c75d09e42002247d811ab6f1f  fogona-modem-efs.service
 ee772148b2275858cde74b61d490f2c77f6ab235d7a5c34ab7cc71c8e120001ab2a00ab42dc9f0a559aabd32a6df96dd4b899ad89ff0ec9a5729a84aa7d6f0fe  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service

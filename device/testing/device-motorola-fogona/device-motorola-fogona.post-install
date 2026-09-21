@@ -1,0 +1,22 @@
+#!/bin/sh
+# Enable the two oneshot units this package ships. They are useless unless
+# enabled, and Alpine's preset policy does not do it -- both come out
+# "preset: disabled".
+#
+# This is not precautionary. A fresh install on 2026-09-21 shipped both units
+# and left both disabled, with two consequences that took a while to connect
+# back to their cause:
+#
+#   fogona-wlan-bdf    board-2.bin was never generated, so ath10k fell back to
+#                      the generic "bus=snoc,qmi-board-id=ff" entry -- somebody
+#                      else's radio calibration -- and wlan0 never appeared at
+#                      all. With no WiFi the handset also has no route out, so
+#                      apk could not even fetch the fix.
+#   fogona-modem-efs   the writable EFS copies rmtfs opens at startup were
+#                      missing.
+#
+# Both have to finish before rmtfs boots the modem, which is why they carry
+# Before=rmtfs.service; neither ordering works if the unit never runs.
+systemctl enable fogona-wlan-bdf.service >/dev/null 2>&1 || true
+systemctl enable fogona-modem-efs.service >/dev/null 2>&1 || true
+exit 0
