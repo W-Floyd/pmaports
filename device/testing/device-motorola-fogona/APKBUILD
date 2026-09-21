@@ -38,6 +38,15 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 #                        were hand-installed and a reinstall lost them. No
 #                        -openrc/-systemd subpackage exists, so this does not
 #                        collide with the in-kernel qrtr-ns.
+# qmi-utils              qmicli. The QMI-side counterpart to qrtr-lookup, and
+#                        the only way to see why a SIM is not coming up:
+#                        `--uim-get-card-status` shows the USIM application
+#                        stuck at 'detected' instead of 'ready', and
+#                        `--pdc-list-configs=software` shows whether the modem
+#                        has any carrier config at all. Note the binary is in
+#                        `qmi-utils`, NOT in `libqmi`, which ships only the
+#                        library and qmi-proxy. Give PDC calls a bounded
+#                        `timeout` -- see TRAPS.md.
 # qcom-diag,             diag-router: the modem's DIAG channel, and the only
 # qcom-diag-systemd      instrument that gets anything out of the modem itself
 #                        (EFS, NV, F3). Unlike rmtfs and tqftpserv, qcom-diag's
@@ -68,6 +77,7 @@ depends="
 	qca-swiss-army-knife
 	qcom-diag
 	qcom-diag-systemd
+	qmi-utils
 	qrtr
 	rmtfs
 	systemd-boot
