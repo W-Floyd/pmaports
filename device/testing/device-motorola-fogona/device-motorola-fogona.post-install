@@ -19,6 +19,7 @@
 # Before=rmtfs.service; neither ordering works if the unit never runs.
 systemctl enable fogona-wlan-bdf.service >/dev/null 2>&1 || true
 systemctl enable fogona-modem-efs.service >/dev/null 2>&1 || true
+systemctl enable fogona-ssreq-stub.service >/dev/null 2>&1 || true
 
 # Not ours, and enabled here for the same reason: qcom-diag ships
 # diag-router.service with WantedBy=multi-user.target and nothing that turns it

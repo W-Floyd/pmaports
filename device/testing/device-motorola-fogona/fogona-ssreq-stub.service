@@ -1,0 +1,28 @@
+[Unit]
+# Publish a stub SSREQ QMI server before the modem looks for one.
+#
+# The modem polls for SSREQ (service 53, instance 16 = APSS) during its own
+# init and logs "MPSS:Failed to connect to SSREQ server instance:16" when it
+# is not there. Stock Android hosts it from vendor.per_mgr; we host nothing.
+# So this has to be up BEFORE the modem starts, which on this handset is
+# about 33 s into boot -- see investigations/wifi-modem.md §3.1.
+#
+# The ordering is deliberate, and is the same trick f3-early-capture uses:
+# DefaultDependencies=no plus Before=rmtfs.service puts this ahead of
+# everything the modem bring-up touches. A unit pulled in normally at
+# multi-user.target starts well after the modem and tests nothing.
+#
+# qrtr is in-kernel here, so there is no service to order against -- the
+# script retries the bind for 30 s in case the socket is not ready yet.
+Description=Stub SSREQ (QMI service 53) server for the modem
+Before=rmtfs.service
+DefaultDependencies=no
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/fogona-ssreq-stub
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
