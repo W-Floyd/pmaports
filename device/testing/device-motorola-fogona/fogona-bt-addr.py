@@ -11,8 +11,8 @@ address against the one it parsed out of that NVM file, and when they match it
 sets HCI_QUIRK_USE_BDADDR_PROPERTY, meaning "this address is a default, get the
 real one from the device tree".
 
-We have no such property (committing this unit's address to a DTS is not on --
-it is a unique hardware identifier), so hci_dev_setup_sync() marks the
+We have no such property -- a DTS literal would pin one handset's address into
+a tree meant to boot any fogona -- so hci_dev_setup_sync() marks the
 controller HCI_UNCONFIGURED. BlueZ hides unconfigured controllers, which is why
 `bluetoothctl` reports "No default controller available" even though the
 firmware loaded and HCI is answering.
@@ -24,8 +24,8 @@ Motorola's `utags` partition -- the same factory store ABL reads to produce
 payload is the address as ASCII, with `wifi_mac:str` (the WLAN and P2P pair)
 next to it. `utagsBackup` is an identical second copy.
 
-Reading it here, on the handset, is also what keeps the address out of the
-repository: nothing is committed, and a different unit gets its own.
+Reading it here, on the handset, is what makes this portable: nothing is baked
+in, a different unit gets its own, and a reflash cannot lose it.
 
 Record layout, derived from the partition (all fields packed):
 
