@@ -1,0 +1,28 @@
+[Unit]
+# Give the controller this handset's own Bluetooth address before bluetoothd
+# ever looks at it. WCN3988 reports the shared default baked into its NVM file,
+# so hci_qca flags it HCI_QUIRK_USE_BDADDR_PROPERTY and, with no DT property to
+# read, the kernel brings the controller up HCI_UNCONFIGURED -- which BlueZ
+# hides. The script's header has the full chain.
+Description=Set %i's Bluetooth address from this handset's utags partition
+Documentation=file:/usr/sbin/fogona-bt-addr
+
+# udev-activated (90-fogona-bt-addr.rules), NOT enabled, and deliberately so.
+# bluetooth.target is pulled in repeatedly during boot, long before the
+# controller exists -- the journal fills with bluetooth.service "skipped, unmet
+# condition check ConditionPathIsDirectory=/sys/class/bluetooth" -- so a
+# WantedBy=bluetooth.target oneshot would run early, find no controller, fail,
+# and not be retried when hci0 actually appears ~25 s in. Binding to the
+# device's own add event is what makes the timing right.
+BindsTo=sys-subsystem-bluetooth-devices-%i.device
+After=sys-subsystem-bluetooth-devices-%i.device
+
+# Ordering only: bluetoothd adopts a controller that becomes configured while
+# it is already running (measured), so this is belt and braces rather than
+# load-bearing -- it just keeps the unconfigured state from ever being visible.
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-bt-addr %i

@@ -1,0 +1,11 @@
+# Configure the Bluetooth controller's address when it appears.
+#
+# Same trigger postmarketOS's bootmac uses for SDM845 devices, in the systemd
+# form rather than bootmac's RUN+= -- RUN+= runs udev's own short-lived child
+# and has been reported not to fire for this case, and a unit is what lets the
+# work be ordered Before=bluetooth.service.
+#
+# KERNEL=="hci[0-9]" matches controllers only: connection objects in this
+# subsystem are named hci0:256 and would otherwise match a trailing glob.
+
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci[0-9]", TAG+="systemd", ENV{SYSTEMD_WANTS}+="fogona-bt-addr@%k.service"
