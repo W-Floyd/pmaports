@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=49
+pkgrel=50
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -121,6 +121,8 @@ source="deviceinfo
 	fogona-modem-efs.service
 	fogona-ssreq-stub.py
 	fogona-ssreq-stub.service
+	fogona-mmi-radio.py
+	fogona-mmi-radio.service
 	fogona-bt-addr.py
 	fogona-bt-addr@.service
 	fogona-bt-addr.rules
@@ -212,6 +214,16 @@ package() {
 	install -Dm644 "$srcdir"/rmtfs-writable-efs.conf \
 		"$pkgdir"/usr/lib/systemd/system/rmtfs.service.d/10-writable-efs.conf
 
+	# The modem's RF hardware id depends on the radio SKU (ATT or RET),
+	# which ABL detects per unit and never passes to us. This reads ABL's
+	# result from the hw partition into the kernel's mmi-unit-info block
+	# before rmtfs starts the modem; the rmtfs drop-in above pulls it in.
+	# Without it RF init fails on HWID 0 and the modem stays offline.
+	install -Dm755 "$srcdir"/fogona-mmi-radio.py \
+		"$pkgdir"/usr/sbin/fogona-mmi-radio
+	install -Dm644 "$srcdir"/fogona-mmi-radio.service \
+		"$pkgdir"/usr/lib/systemd/system/fogona-mmi-radio.service
+
 	# Bluetooth comes up HCI_UNCONFIGURED because WCN3988 has no per-device
 	# address -- it reports the shared default out of its NVM file, and the
 	# real one is in Motorola's utags partition. Unlike the units above this
@@ -274,6 +286,8 @@ e8c3fce01d80b15a37e0799484d4b9c56081ddb0ff0f4a2ff8517d0b88cf592bcd3d43bdce2420c0
 5bdb6339d2896d5ebb50ba5303b007b1755d27420eff46276f8adab9a0f495d00d90cc8a1cd61ddc3996ce91220d1b4194f5324c75d09e42002247d811ab6f1f  fogona-modem-efs.service
 6fbf05a5ccc5b0cfb8ae5e82415aacbb09e103ac005f21b74602407468ecfaa4d8b6b86cba76fd27c09dd62d68bc8e251fb26a4a010679ac4c41930df59dfded  fogona-ssreq-stub.py
 4d993811cbb86ab1d59e7dddf0198fd60307d8785c5a52ab93942517e990b4912911c7945d270d9e8c2fd73053d52291b5da2ec8c4864184bd53d20ed5f2a866  fogona-ssreq-stub.service
+ac7036e32dc24636368ea3653a6abd5d8efb9baad7b0bf50e86b0c44f34671fa2775e04983a7ae35b8c1f1a84847ef04670c05a944166f4aba2a2031ae1f0a34  fogona-mmi-radio.py
+289dc0e26461d4e06ee5c4e8cecea194e66a5fc76fcdb929462c6857b9cc23220b13d148a83998e099ed6bef0cab44a31d33d2578ed3e4b709eb0132d4c66442  fogona-mmi-radio.service
 c1ef33a0a42656cb366b6556c4a46f30168c128281b4fd59d73a43418d33f55b56304266ff3dc035a614e6a12f21060887bd18bedc13eacddb10b930d354bd9e  fogona-bt-addr.py
 39b4cbf7d36eb17cb7d6880076b25d4ef108f732f926e2c32e0dc576ad47b83553ac7c811c8f976bed018fb9eadf922603246148774e46119501c5b036a467b3  fogona-bt-addr@.service
 90b0764b3038fbfb14f4cb278c14f059539e803e3f9cd62282f05b756c442a3a626bd8bec8d8396d649e9bd1fcc4a5d2092786660f1e3fea5228984602f4b26f  fogona-bt-addr.rules
@@ -281,7 +295,7 @@ c1ef33a0a42656cb366b6556c4a46f30168c128281b4fd59d73a43418d33f55b56304266ff3dc035
 6adc0362d945a67be5466836c33f5bd7b079f2aa7e8fd8041706ddb42f1832ad6fdca48a92a6836e1f9c5597c26ec7c5eaa82dbec65304f1bd5bf6ff170529ba  fogona-hexagonfs.service
 84c4b3976611cb7b2b1a3b171e5eafee4ffd69c7b777ab6c47117f80ea8664dce78b946dcca792a15582729ad4c3b4dfa72783ce51ba20f77586a08358586b62  hexagonrpcd-sensorspd-hexagonfs.conf
 0ddecd129284b489552dc9be4240500792ce483e2efa41be6dd24d1dfb1a2e00c3ef7b0543fc456fe4a0792cf63cee3118a38d74a239299a57a0538f1f669977  81-libssc-motorola-fogona.rules
-ee772148b2275858cde74b61d490f2c77f6ab235d7a5c34ab7cc71c8e120001ab2a00ab42dc9f0a559aabd32a6df96dd4b899ad89ff0ec9a5729a84aa7d6f0fe  rmtfs-writable-efs.conf
+a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service
 c35c89ddd83423a2bfee992c460d967986bddce9f315c8fb493be8c82e1c25316b30d3ef3ac6c52e1e0b01d0279cafb63c21f64d6f073a58bd842479f5232421  50-fogona-vmlinuz-efi.sh
 "

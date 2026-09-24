@@ -1,0 +1,13 @@
+[Unit]
+Description=Tell the modem this handset's radio SKU
+Documentation=file:/usr/sbin/fogona-mmi-radio
+# rmtfs starts the modem (-s), and the modem reads the unit info block during
+# RF init, so the SKU has to be published first. Pulled in by rmtfs's
+# drop-in (Wants=), so it needs no [Install] section.
+Before=rmtfs.service
+ConditionPathExists=/sys/bus/platform/devices/mmi-unit-info/radio
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-mmi-radio
