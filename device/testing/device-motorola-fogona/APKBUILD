@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=50
+pkgrel=51
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -68,6 +68,13 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 #                        drop-in points sensorspd at it. None of this touches
 #                        the modem; it was added for sensors and measured not
 #                        to change RF.
+# 81voltd,               the QMI IMS data service the modem's IMS stack asks
+# 81voltd-systemd        the AP for. Without it IMS never registers, and on a
+#                        VoLTE-only network (AT&T) every incoming call goes
+#                        straight to voicemail; with it calls ring. What
+#                        soc-qcom devices pull in. Its -systemd subpackage
+#                        carries no install_if and nothing enables the unit,
+#                        so both are listed and the post-install enables it.
 # qcom-diag,             diag-router: the modem's DIAG channel, and the only
 # qcom-diag-systemd      instrument that gets anything out of the modem itself
 #                        (EFS, NV, F3). Unlike rmtfs and tqftpserv, qcom-diag's
@@ -88,6 +95,8 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # u-boot-fogona          the payload boot-deploy wraps into the boot image
 depends="
 	linux-motorola-fogona
+	81voltd
+	81voltd-systemd
 	android-tools
 	bluez-btmgmt
 	linux-firmware-ath10k

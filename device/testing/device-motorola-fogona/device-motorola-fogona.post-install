@@ -26,4 +26,8 @@ systemctl enable fogona-ssreq-stub.service >/dev/null 2>&1 || true
 # on. Without it there is no DIAG channel to the modem at all -- no EFS, no NV,
 # no F3 -- which is the whole diagnostic surface on this device.
 systemctl enable diag-router.service >/dev/null 2>&1 || true
+
+# Same for 81voltd: without its IMS data service the modem never registers
+# IMS, and on a VoLTE-only network incoming calls go straight to voicemail.
+systemctl enable 81voltd.service >/dev/null 2>&1 || true
 exit 0
