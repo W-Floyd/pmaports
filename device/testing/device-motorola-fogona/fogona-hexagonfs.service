@@ -1,0 +1,10 @@
+[Unit]
+Description=Build the hexagonfs tree for the ADSP sensors process
+After=msm-firmware-loader.service
+Requires=msm-firmware-loader.service
+Before=hexagonrpcd-adsp-sensorspd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-hexagonfs

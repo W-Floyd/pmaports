@@ -1,0 +1,6 @@
+# iio-sensor-proxy with libssc: accelerometer mount matrix. The SSC sensors
+# report in a frame rotated 180 degrees from the screen (libssc falls back to
+# identity because the registry's own matrix is all zeros), the same
+# correction most libssc devices carry.
+
+SUBSYSTEM=="misc", KERNEL=="fastrpc-*", ENV{ACCEL_MOUNT_MATRIX}+="-1, 0, 0; 0, -1, 0; 0, 0, -1"
