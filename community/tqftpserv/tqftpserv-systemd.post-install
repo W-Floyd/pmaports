@@ -1,0 +1,6 @@
+#!/bin/sh
+# The readwrite population has to happen before rmtfs boots the modem, so the
+# unit is useless unless it is actually enabled. Alpine's preset policy does not
+# enable it for us.
+systemctl enable tqftpserv-populate-readwrite.service >/dev/null 2>&1 || true
+exit 0

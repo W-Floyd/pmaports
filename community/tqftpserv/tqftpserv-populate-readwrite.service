@@ -1,0 +1,17 @@
+[Unit]
+Description=Populate tqftp readwrite data from persist partition
+Requires=dev-disk-by\x2dpartlabel-persist.device
+After=dev-disk-by\x2dpartlabel-persist.device
+# Ordering that upstream's unit leaves open, and that fogona needs: the modem
+# asks for these files while it boots, and rmtfs is what boots it (it publishes
+# its QMI service before calling rproc_start). Populate before either runs, or
+# the modem asks once, is refused, and does not ask again.
+Before=rmtfs.service tqftpserv.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/populate-readwrite.sh
+
+[Install]
+WantedBy=multi-user.target

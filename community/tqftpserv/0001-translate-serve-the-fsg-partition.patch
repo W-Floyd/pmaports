@@ -1,0 +1,39 @@
+diff --git a/translate.c b/translate.c
+index 409ff95..0babb64 100644
+--- a/translate.c
++++ b/translate.c
+@@ -25,6 +25,10 @@
+ #define READONLY_MODEM_PATH	READONLY_FW_BASE "modem_pr"
+ #define READONLY_VENDOR_PATH		"/readonly/vendor/firmware/"
+ #define READONLY_VENDOR_MNT_PATH	"/readonly/vendor/firmware_mnt/image/"
++#define READONLY_BASE			"/readonly/"
++#define READONLY_VENDOR_BASE		"/readonly/vendor/"
++#define READONLY_FSG_PATH		READONLY_BASE "fsg/"
++#define READONLY_VENDOR_FSG_PATH	READONLY_VENDOR_BASE "fsg/"
+ 
+ #ifndef ANDROID
+ #define FIRMWARE_BASE	"/lib/firmware/"
+@@ -214,6 +218,12 @@ static int translate_readwrite(const char *file, int flags)
+  * using the modem_pr relative path (e.g., maps to READONLY_FW_BASE/<fw_dir>/modem_pr/...).
+  * Strips /readonly/vendor/firmware/ and /readonly/vendor/firmware_mnt/image/
+  * and searches among remoteproc firmware.
++ * Strips /readonly/vendor/ from /readonly/vendor/fsg/ and /readonly/ from
++ * /readonly/fsg/, keeping the fsg/ component, so both resolve to fsg/... next
++ * to the remoteproc firmware. Android mounts the fsg partition at /vendor/fsg
++ * or at /fsg depending on the release, and the modem's RFS tree symlinks
++ * readonly/vendor/fsg and readonly/fsg at it respectively; serving both under
++ * one fsg/ directory means the host only has to expose it once.
+  * Replaces /readwrite/ with a persistent directory.
+  */
+ int translate_open(const char *path, int flags)
+@@ -228,6 +238,10 @@ int translate_open(const char *path, int flags)
+ 		return translate_readonly(path + strlen(READONLY_VENDOR_MNT_PATH));
+ 	else if (!strncmp(path, READONLY_VENDOR_PATH, strlen(READONLY_VENDOR_PATH)))
+ 		return translate_readonly(path + strlen(READONLY_VENDOR_PATH));
++	else if (!strncmp(path, READONLY_VENDOR_FSG_PATH, strlen(READONLY_VENDOR_FSG_PATH)))
++		return translate_readonly(path + strlen(READONLY_VENDOR_BASE));
++	else if (!strncmp(path, READONLY_FSG_PATH, strlen(READONLY_FSG_PATH)))
++		return translate_readonly(path + strlen(READONLY_BASE));
+ 
+ 	fprintf(stderr, "invalid path %s, rejecting\n", path);
+ 	errno = ENOENT;
