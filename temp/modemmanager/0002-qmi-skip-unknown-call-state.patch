@@ -1,0 +1,71 @@
+From a8e683c3fe1b6227de85392eb320bfe490e8cda4 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 25 Sep 2026 16:30:19 +0000
+Subject: [PATCH 1/2] qmi: skip calls reported in a call state we don't know
+
+When a QMI Voice call state has no MMCallState mapping, the call info is
+left as MM_CALL_STATE_UNKNOWN and passed to report_all_calls(), which
+requires a known state and asserts, aborting the daemon.
+
+Warn and skip such calls instead, as the +CLCC parser does for an
+unparseable call state.
+---
+ src/mm-broadband-modem-qmi.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/src/mm-broadband-modem-qmi.c b/src/mm-broadband-modem-qmi.c
+index 8a740e83..953ab0fd 100644
+--- a/src/mm-broadband-modem-qmi.c
++++ b/src/mm-broadband-modem-qmi.c
+@@ -11667,6 +11667,15 @@ all_call_status_indication_cb (QmiClientVoice                        *client,
+                     break;
+                 }
+ 
++                /* The full call list requires a known state for every call */
++                if (call_info->state == MM_CALL_STATE_UNKNOWN) {
++                    mm_obj_warn (self, "ignoring call %u reported in unknown state 0x%02x",
++                                 qmi_call_information.id, qmi_call_information.state);
++                    g_free (call_info->number);
++                    g_slice_free (MMCallInfo, call_info);
++                    continue;
++                }
++
+                 switch (qmi_call_information.direction) {
+                 case QMI_VOICE_CALL_DIRECTION_UNKNOWN:
+                     call_info->direction = MM_CALL_DIRECTION_UNKNOWN;
+@@ -12035,6 +12044,7 @@ modem_voice_load_call_list_finish (MMIfaceModemVoice  *self,
+ static gboolean
+ process_get_all_call_info (QmiClientVoice                       *client,
+                            QmiMessageVoiceGetAllCallInfoOutput  *output,
++                           gpointer                              log_object,
+                            GList                               **out_call_info_list,
+                            GError                              **error)
+ {
+@@ -12110,6 +12120,15 @@ process_get_all_call_info (QmiClientVoice                       *client,
+                     break;
+                 }
+ 
++                /* The full call list requires a known state for every call */
++                if (call_info->state == MM_CALL_STATE_UNKNOWN) {
++                    mm_obj_warn (log_object, "ignoring call %u reported in unknown state 0x%02x",
++                                 qmi_call_information.id, qmi_call_information.state);
++                    g_free (call_info->number);
++                    g_slice_free (MMCallInfo, call_info);
++                    continue;
++                }
++
+                 switch (qmi_call_information.direction) {
+                 case QMI_VOICE_CALL_DIRECTION_UNKNOWN:
+                     call_info->direction = MM_CALL_DIRECTION_UNKNOWN;
+@@ -12152,7 +12171,7 @@ modem_voice_load_call_list_ready (QmiClientVoice *client,
+     } else if (!qmi_message_voice_get_all_call_info_output_get_result (output, &error)) {
+         g_prefix_error (&error, "Couldn't run Get All Call Info action: ");
+         g_task_return_error (task, error);
+-    } else if (!process_get_all_call_info (client, output, &call_info_list, &error)) {
++    } else if (!process_get_all_call_info (client, output, g_task_get_source_object (task), &call_info_list, &error)) {
+         g_prefix_error (&error, "Couldn't process Get All Call Info action: ");
+         g_task_return_error (task, error);
+     } else
+-- 
+2.55.0
+
