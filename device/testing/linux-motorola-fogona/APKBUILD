@@ -94,7 +94,7 @@ makedepends="
 # so a '#' line is parsed as a package name: "dependency not found: #".)
 
 # Tip of `fogona-mainline`. Bump with every rebase; see the note above.
-_commit="f96caf662de99773be25683481f454fe44560ad2"
+_commit="b8d01b144e88ac8d3417defe94f2a1cbbdda7426"
 _config="config-$_flavor.$arch"
 
 source="
@@ -171,5 +171,5 @@ package() {
 # `--src` builds, which bypass source fetching and checksums.
 sha512sums="
 2f38d894f87eb7fb063dc81a7169080f03d31a28b9b01c726573110e3698039a322347748045c11a3c48ffe927673d2a389f365d4f74462cd414edba5859e290  linux-motorola-fogona-f96caf662de99773be25683481f454fe44560ad2.tar.gz
-be85c3d6bfa0328b72e369d1281b5bbc141d0c9c40ac7583c1b5d53d6c98cf7f5c1f0418c3b3cf9b217fdb9dee8fe1e49dd741cc3ee640fc9d028e50eaf33912  config-motorola-fogona.aarch64
+25c8d327a1d1d84e13cc589e4b4afe456b95967ba47ee9ab5cf733c018d8218ee9c3ab187d3c21ef9e04df892aeb05cd23afa1310556f2c1e0aa9675b796cc04  config-motorola-fogona.aarch64
 "
