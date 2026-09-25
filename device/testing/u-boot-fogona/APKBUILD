@@ -45,7 +45,7 @@ install="$pkgname.post-upgrade"
 #
 # Pin a commit, never a branch: abuild checksums the tarball and a moving
 # branch breaks its own checksum. See /repo/aports/README.md.
-_commit="04bfbb894cd7154286763b10feddfc9ecbad23d6"
+_commit="5b48c35e8878d47526ce6fb04c4c0ef028283850"
 
 source="$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
 builddir="$srcdir/u-boot-$_commit"
