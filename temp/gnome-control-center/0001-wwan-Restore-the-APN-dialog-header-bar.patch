@@ -1,0 +1,464 @@
+From 705d1711cc054f12d66c822d06aa4d961c071d45 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 25 Sep 2026 17:07:23 +0000
+Subject: [PATCH] wwan: Restore the APN dialog header bar
+
+Since the port to AdwDialog the header bar sits in the [titlebar] slot,
+which AdwDialog doesn't have, so Back, Add and Save are not shown: APNs
+can't be added, and edits can't be saved.
+
+Put the content in an AdwToolbarView with the header bar on top, as the
+details dialog does. While at it, finish the port for closing: set
+can-close to false so that the device page's close-attempt handler,
+which force-closes the dialog, runs on every close as the unmap handler
+did before, and close the dialog from Back instead of hiding it.
+---
+ panels/wwan/cc-wwan-apn-dialog.blp | 365 +++++++++++++++--------------
+ panels/wwan/cc-wwan-apn-dialog.c   |   2 +-
+ 2 files changed, 185 insertions(+), 182 deletions(-)
+
+diff --git a/panels/wwan/cc-wwan-apn-dialog.blp b/panels/wwan/cc-wwan-apn-dialog.blp
+index 5ee9740fd..91e91fd00 100644
+--- a/panels/wwan/cc-wwan-apn-dialog.blp
++++ b/panels/wwan/cc-wwan-apn-dialog.blp
+@@ -5,240 +5,243 @@ template $CcWwanApnDialog: Adw.Dialog {
+   content-height: 510;
+   content-width: 400;
+   title: _("Access Points");
+-
+-  [titlebar]
+-  HeaderBar {
+-    [start]
+-    Button back_button {
+-      use-underline: true;
+-      icon-name: "go-previous-symbolic";
+-      clicked => $cc_wwan_apn_back_clicked_cb(template);
+-
+-      accessibility {
+-        label: _("Back");
++  can-close: false;
++
++  child: Adw.ToolbarView {
++    [top]
++    Adw.HeaderBar {
++      [start]
++      Button back_button {
++        use-underline: true;
++        icon-name: "go-previous-symbolic";
++        clicked => $cc_wwan_apn_back_clicked_cb(template);
++
++        accessibility {
++          label: _("Back");
++        }
+       }
+-    }
+ 
+-    [end]
+-    Button add_button {
+-      use-underline: true;
+-      icon-name: "list-add-symbolic";
+-      clicked => $cc_wwan_apn_add_clicked_cb(template);
++      [end]
++      Button add_button {
++        use-underline: true;
++        icon-name: "list-add-symbolic";
++        clicked => $cc_wwan_apn_add_clicked_cb(template);
+ 
+-      accessibility {
+-        label: _("Add");
++        accessibility {
++          label: _("Add");
++        }
+       }
+-    }
+ 
+-    [end]
+-    Button save_button {
+-      visible: false;
+-      use-underline: true;
+-      label: _("_Save");
+-      clicked => $cc_wwan_apn_save_clicked_cb(template);
++      [end]
++      Button save_button {
++        visible: false;
++        use-underline: true;
++        label: _("_Save");
++        clicked => $cc_wwan_apn_save_clicked_cb(template);
+ 
+-      styles [
+-        "default",
+-      ]
++        styles [
++          "default",
++        ]
++      }
+     }
+-  }
+ 
+-  Stack apn_settings_stack {
+-    transition-type: slide_left_right;
++    content: Stack apn_settings_stack {
++      transition-type: slide_left_right;
+ 
+-    Adw.PreferencesPage apn_list_view {
+-      Adw.PreferencesGroup {
+-        ListBox apn_list {
+-          valign: start;
+-          selection-mode: none;
+-          row-activated => $cc_wwan_apn_activated_cb(template);
++      Adw.PreferencesPage apn_list_view {
++        Adw.PreferencesGroup {
++          ListBox apn_list {
++            valign: start;
++            selection-mode: none;
++            row-activated => $cc_wwan_apn_activated_cb(template);
+ 
+-          styles [
+-            "boxed-list",
+-          ]
++            styles [
++              "boxed-list",
++            ]
++          }
+         }
+       }
+-    }
+-
+-    Adw.PreferencesPage apn_edit_view {
+-      Adw.PreferencesGroup {
+-        Grid {
+-          orientation: vertical;
+-          hexpand: true;
+-          vexpand: true;
+-          row-spacing: 6;
+-          column-spacing: 12;
+-
+-          Label {
+-            halign: end;
+-            valign: center;
+-            label: _("Name");
+-            mnemonic-widget: name_entry;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++      Adw.PreferencesPage apn_edit_view {
++        Adw.PreferencesGroup {
++          Grid {
++            orientation: vertical;
++            hexpand: true;
++            vexpand: true;
++            row-spacing: 6;
++            column-spacing: 12;
++
++            Label {
++              halign: end;
++              valign: center;
++              label: _("Name");
++              mnemonic-widget: name_entry;
++
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 0;
++              layout {
++                column: 0;
++                row: 0;
++              }
+             }
+-          }
+ 
+-          Entry name_entry {
+-            hexpand: true;
+-            changed => $cc_wwan_apn_entry_changed_cb(template);
++            Entry name_entry {
++              hexpand: true;
++              changed => $cc_wwan_apn_entry_changed_cb(template);
+ 
+-            layout {
+-              column: 1;
+-              row: 0;
++              layout {
++                column: 1;
++                row: 0;
++              }
+             }
+-          }
+ 
+-          Label {
+-            halign: end;
+-            valign: center;
+-            label: _("APN");
+-            mnemonic-widget: apn_entry;
++            Label {
++              halign: end;
++              valign: center;
++              label: _("APN");
++              mnemonic-widget: apn_entry;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 1;
++              layout {
++                column: 0;
++                row: 1;
++              }
+             }
+-          }
+ 
+-          Entry apn_entry {
+-            margin-bottom: 12;
+-            changed => $cc_wwan_apn_entry_changed_cb(template);
++            Entry apn_entry {
++              margin-bottom: 12;
++              changed => $cc_wwan_apn_entry_changed_cb(template);
+ 
+-            layout {
+-              column: 1;
+-              row: 1;
++              layout {
++                column: 1;
++                row: 1;
++              }
+             }
+-          }
+ 
+-          Label {
+-            halign: end;
+-            valign: center;
+-            label: _("Username");
+-            mnemonic-widget: username_entry;
++            Label {
++              halign: end;
++              valign: center;
++              label: _("Username");
++              mnemonic-widget: username_entry;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 2;
++              layout {
++                column: 0;
++                row: 2;
++              }
+             }
+-          }
+ 
+-          Entry username_entry {
+-            layout {
+-              column: 1;
+-              row: 2;
++            Entry username_entry {
++              layout {
++                column: 1;
++                row: 2;
++              }
+             }
+-          }
+ 
+-          Label {
+-            halign: end;
+-            valign: center;
+-            label: _("Password");
+-            mnemonic-widget: password_entry;
++            Label {
++              halign: end;
++              valign: center;
++              label: _("Password");
++              mnemonic-widget: password_entry;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 3;
++              layout {
++                column: 0;
++                row: 3;
++              }
+             }
+-          }
+ 
+-          Entry password_entry {
+-            margin-bottom: 12;
++            Entry password_entry {
++              margin-bottom: 12;
+ 
+-            layout {
+-              column: 1;
+-              row: 3;
++              layout {
++                column: 1;
++                row: 3;
++              }
+             }
+-          }
+ 
+-          Label {
+-            halign: end;
+-            valign: center;
+-            label: _("APN Type");
+-            mnemonic-widget: lte_attach_combo;
++            Label {
++              halign: end;
++              valign: center;
++              label: _("APN Type");
++              mnemonic-widget: lte_attach_combo;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 4;
++              layout {
++                column: 0;
++                row: 4;
++              }
+             }
+-          }
+-
+-          DropDown lte_attach_combo {
+-            model: StringList {
+-              strings [
+-                _("Internet"),
+-                _("Attach"),
+-              ]
+-            };
+ 
+-            layout {
+-              column: 1;
+-              row: 4;
++            DropDown lte_attach_combo {
++              model: StringList {
++                strings [
++                  _("Internet"),
++                  _("Attach"),
++                ]
++              };
++
++              layout {
++                column: 1;
++                row: 4;
++              }
+             }
+-          }
+ 
+-          Label {
+-            visible: bind lte_attach_combo.selected bidirectional;
+-            halign: end;
+-            valign: center;
+-            label: _("Auth Type");
+-            mnemonic-widget: lte_auth_combo;
++            Label {
++              visible: bind lte_attach_combo.selected bidirectional;
++              halign: end;
++              valign: center;
++              label: _("Auth Type");
++              mnemonic-widget: lte_auth_combo;
+ 
+-            styles [
+-              "dim-label",
+-            ]
++              styles [
++                "dim-label",
++              ]
+ 
+-            layout {
+-              column: 0;
+-              row: 5;
++              layout {
++                column: 0;
++                row: 5;
++              }
+             }
+-          }
+ 
+-          DropDown lte_auth_combo {
+-            visible: bind lte_attach_combo.selected bidirectional;
+-
+-            model: StringList {
+-              strings [
+-                _("None"),
+-                "PAP",
+-                "CHAP",
+-                "EAP",
+-                "MSCHAP",
+-                "MSCHAPV2",
+-              ]
+-            };
+-
+-            layout {
+-              column: 1;
+-              row: 5;
++            DropDown lte_auth_combo {
++              visible: bind lte_attach_combo.selected bidirectional;
++
++              model: StringList {
++                strings [
++                  _("None"),
++                  "PAP",
++                  "CHAP",
++                  "EAP",
++                  "MSCHAP",
++                  "MSCHAPV2",
++                ]
++              };
++
++              layout {
++                column: 1;
++                row: 5;
++              }
+             }
+           }
+         }
+       }
+-    }
+-  }
++    };
++  };
+ }
+ 
+ /* A simple hack to create a radio button group */
+diff --git a/panels/wwan/cc-wwan-apn-dialog.c b/panels/wwan/cc-wwan-apn-dialog.c
+index ed38ff9d5..db186fc91 100644
+--- a/panels/wwan/cc-wwan-apn-dialog.c
++++ b/panels/wwan/cc-wwan-apn-dialog.c
+@@ -120,7 +120,7 @@ cc_wwan_apn_back_clicked_cb (CcWwanApnDialog *self)
+         gtk_widget_set_visible (GTK_WIDGET (self->add_button), TRUE);
+         gtk_stack_set_visible_child (self->apn_settings_stack, GTK_WIDGET (self->apn_list_view));
+     } else {
+-        gtk_widget_set_visible (GTK_WIDGET (self), FALSE);
++        adw_dialog_close (ADW_DIALOG (self));
+     }
+ }
+ 
+-- 
+2.55.0
+

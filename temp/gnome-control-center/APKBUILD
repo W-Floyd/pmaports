@@ -1,0 +1,99 @@
+# Forked from Alpine: restore the Mobile Network APN dialog's header bar
+# (51.0 shows no Add/Save buttons). Patch from ~/gnome-control-center
+# branch wwan-apn-dialog-headerbar.
+maintainer="William Floyd <git@notmy.space>"
+pkgname=gnome-control-center
+pkgver=51.0
+pkgrel=1
+pkgdesc="GNOME control center"
+url="https://gitlab.gnome.org/GNOME/gnome-control-center"
+arch="all"
+license="GPL-2.0-or-later"
+depends="
+	accountsservice
+	colord
+	cups-pk-helper
+	dbus:org.freedesktop.Secrets
+	malcontent
+	openrc-settingsd
+	setxkbmap
+	"
+makedepends="
+	accountsservice-dev
+	blueprint-compiler
+	cairo-dev
+	colord-dev
+	colord-gtk-dev
+	cups-dev
+	docbook-xml
+	docbook-xsl
+	gcr4-dev
+	glib-dev
+	gmobile-dev
+	gnome-bluetooth-dev
+	gnome-desktop-dev
+	gnome-online-accounts-dev
+	gnome-settings-daemon-dev
+	gsettings-desktop-schemas-dev
+	gsound-dev
+	ibus-dev
+	itstool
+	krb5-dev
+	libadwaita-dev
+	libgtop-dev
+	libgudev-dev
+	libnma-dev
+	libpwquality-dev
+	libsecret-dev
+	libwacom-dev
+	libxml2-utils
+	libxslt
+	malcontent-dev
+	meson
+	modemmanager-dev
+	networkmanager-dev
+	polkit-dev
+	pulseaudio-dev
+	samba-dev
+	tecla-dev
+	udisks2-dev
+	upower-dev
+	"
+options="!check" # needs unpackaged py-dbusmock
+install="$pkgname.pre-install $pkgname.pre-upgrade"
+subpackages="$pkgname-dbg $pkgname-dev $pkgname-lang $pkgname-doc $pkgname-bash-completion"
+source="https://download.gnome.org/sources/gnome-control-center/${pkgver%%.*}/gnome-control-center-$pkgver.tar.xz
+	README.alpine
+	0001-wwan-Restore-the-APN-dialog-header-bar.patch
+	"
+
+build() {
+	abuild-meson \
+		-Db_lto=true \
+		-Dibus=true \
+		-Dlocation-services=enabled \
+		-Dmalcontent=true \
+		. output
+
+	meson compile -C output
+}
+
+check() {
+	meson test --print-errorlogs -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+
+	mkdir -p "$pkgdir"/usr/lib/pkgconfig
+	mv "$pkgdir"/usr/share/pkgconfig/* "$pkgdir"/usr/lib/pkgconfig
+	rmdir "$pkgdir"/usr/share/pkgconfig
+
+	install -Dm0644 "$srcdir"/README.alpine -t "$pkgdir"/usr/share/doc/"$pkgname"
+}
+
+sha512sums="
+d12f832dd09c5df3757c2bef606eb6a98ca1d58fe3e7b26d9c21bf5b9de7161bf9b60deb474081de1a79988ffe78e79a012fd6d447d259ac59bb561ba46b0ffd  gnome-control-center-51.0.tar.xz
+350aa443149c71851ad4de0976c7fc5cb626ba0c57a8d41e6ef80da1c65ed84a4dfa2483ae92630a3b611c4bfa9360ded82b55e8cd0e3907294c025e4f6b1671  README.alpine
+970ac497e9a4f544dfa77c837ea524a85da3703bc1ad6cf99275bdcb30a7494b824cedee4caa888c64c2b8f2e851a7af0ee7fc7170ca60bfe4a71f2d71443fa9  0001-wwan-Restore-the-APN-dialog-header-bar.patch
+"
