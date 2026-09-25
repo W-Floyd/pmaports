@@ -1,0 +1,15 @@
+[Unit]
+Description=Voice call audio (EXPERIMENT: attach stock's voice graphs on a call)
+# Polls ModemManager for an active call; the voice TX graph needs the ADSP
+# audio PD, which hexagonrpcd-adsp-audiopd serves.
+After=ModemManager.service hexagonrpcd-adsp-audiopd.service sound.target
+Wants=hexagonrpcd-adsp-audiopd.service
+ConditionPathExists=/sys/kernel/debug
+
+[Service]
+ExecStart=/usr/sbin/fogona-voice-call-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

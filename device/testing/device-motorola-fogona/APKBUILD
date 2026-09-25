@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=56
+pkgrel=57
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -68,7 +68,11 @@ subpackages="$pkgname-audio:audio"
 #                        redistributable, so not a firmware package), and a
 #                        drop-in points sensorspd at it. None of this touches
 #                        the modem; it was added for sensors and measured not
-#                        to change RF.
+#                        to change RF. Call audio also needs the **audio PD**
+#                        (voice TX loads Fluence ECNS through it), which
+#                        takes hexagonrpcd's `-a` from temp/hexagonrpcd, hence
+#                        the version floor.
+# alsa-utils             amixer/aplay/arecord for fogona-voice-call-watch
 # 81voltd,               the QMI IMS data service the modem's IMS stack asks
 # 81voltd-systemd        the AP for. Without it IMS never registers, and on a
 #                        VoLTE-only network (AT&T) every incoming call goes
@@ -98,6 +102,7 @@ depends="
 	linux-motorola-fogona
 	81voltd
 	81voltd-systemd
+	alsa-utils
 	android-tools
 	bluez-btmgmt
 	linux-firmware-ath10k
@@ -105,7 +110,7 @@ depends="
 	mesa-vulkan-freedreno
 	msm-firmware-loader
 	postmarketos-base
-	hexagonrpcd
+	hexagonrpcd>=0.4.0-r4
 	hexagonrpcd-systemd
 	hexagonrpcd-udev
 	qbootctl
@@ -139,6 +144,10 @@ source="deviceinfo
 	fogona-hexagonfs.sh
 	fogona-hexagonfs.service
 	hexagonrpcd-sensorspd-hexagonfs.conf
+	hexagonrpcd-rootpd-dsp-libs.conf
+	hexagonrpcd-adsp-audiopd.service
+	fogona-voice-call-watch.sh
+	fogona-voice-call-watch.service
 	81-libssc-motorola-fogona.rules
 	rmtfs-writable-efs.conf
 	sshd-early.service
@@ -169,9 +178,10 @@ build() {
 		--set-wmi-op-version=tlv --set-htt-op-version=tlv \
 		--set-fw-api=5
 
-	# The AudioReach topology for the speakers. Built from source: it is
-	# ours, not a vendor blob. The file's comments say why each value is
-	# what it is.
+	# The AudioReach topology: speakers and earpiece, plus the handset mic
+	# capture and the echo-reference splitter the call-audio PoC uses.
+	# Built from source: it is ours, not a vendor blob. The file's comments
+	# say why each value is what it is.
 	alsatplg -c "$srcdir"/Moto-G-Play-2024-tplg.conf \
 		-o Moto-G-Play-2024-tplg.bin
 }
@@ -272,6 +282,22 @@ package() {
 	install -Dm644 "$srcdir"/81-libssc-motorola-fogona.rules \
 		-t "$pkgdir"/usr/lib/udev/rules.d/
 
+	# Call audio (EXPERIMENT, see /repo/investigations/call-audio.md). The
+	# ADSP's audio PD has to be created and served for voice TX to load its
+	# Fluence ECNS modules from the dsp partition; rootpd serves the same
+	# directory. The watcher attaches the voice graphs on an active call
+	# through the kernel's q6apm-voice-poc module; the graph files it opens
+	# are derived from the handset's own ACDB and are not shipped. Both
+	# units are enabled by the post-install.
+	install -Dm644 "$srcdir"/hexagonrpcd-rootpd-dsp-libs.conf \
+		"$pkgdir"/usr/lib/systemd/system/hexagonrpcd-adsp-rootpd.service.d/10-fogona-dsp-libs.conf
+	install -Dm644 "$srcdir"/hexagonrpcd-adsp-audiopd.service \
+		-t "$pkgdir"/usr/lib/systemd/system/
+	install -Dm755 "$srcdir"/fogona-voice-call-watch.sh \
+		"$pkgdir"/usr/sbin/fogona-voice-call-watch
+	install -Dm644 "$srcdir"/fogona-voice-call-watch.service \
+		-t "$pkgdir"/usr/lib/systemd/system/
+
 	# TEMPORARY, paired with the unfixed panel bring-up stall. sshd is
 	# normally ordered After=network.target, which puts it behind
 	# NetworkManager -- and the stall wedges NetworkManager, so a stalled
@@ -342,11 +368,15 @@ c1ef33a0a42656cb366b6556c4a46f30168c128281b4fd59d73a43418d33f55b56304266ff3dc035
 97f0f63b1a0d233817017ed71e3a2c89aa2640fc1d7ed393cb1bdb34e7f28a7505473628a5800903cde5ae75ffe933715cfca6e2738fc98658bfaab5d05a62fc  fogona-hexagonfs.sh
 6adc0362d945a67be5466836c33f5bd7b079f2aa7e8fd8041706ddb42f1832ad6fdca48a92a6836e1f9c5597c26ec7c5eaa82dbec65304f1bd5bf6ff170529ba  fogona-hexagonfs.service
 84c4b3976611cb7b2b1a3b171e5eafee4ffd69c7b777ab6c47117f80ea8664dce78b946dcca792a15582729ad4c3b4dfa72783ce51ba20f77586a08358586b62  hexagonrpcd-sensorspd-hexagonfs.conf
+2a6479f6d41ff3ec4c50ce0bd60d100118cddaeedcafe28725a54e28810b6d68ba761c10ee159209e6fac6c98d01b9e3c2b6dc1fe3396c30bd7c689ec522a13c  hexagonrpcd-rootpd-dsp-libs.conf
+5aee1b66196832c86fc55a79482dd65df3849a2131e2e91dd232015846a2b4505be3fc2a232a10b1ac27f21baf1b550a441f581758accac89a01112f52a3e204  hexagonrpcd-adsp-audiopd.service
+f5e3b5bb56c8d1e7237a6d1431d4efb91515345d66758a0d3ba56fc263bf401ced29eb8005925c4e2c85fc3aed92fde098e41a1a1edbbe54d10932a028a6650e  fogona-voice-call-watch.sh
+36fad5c7bdc62299b520b2804a35c37f8075bae53be3b7c1dc739e6debedc98820cd325e5d7603b371bbc4578985188387f33e8d354ee204e6879973cc0d3020  fogona-voice-call-watch.service
 0ddecd129284b489552dc9be4240500792ce483e2efa41be6dd24d1dfb1a2e00c3ef7b0543fc456fe4a0792cf63cee3118a38d74a239299a57a0538f1f669977  81-libssc-motorola-fogona.rules
 a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service
 c35c89ddd83423a2bfee992c460d967986bddce9f315c8fb493be8c82e1c25316b30d3ef3ac6c52e1e0b01d0279cafb63c21f64d6f073a58bd842479f5232421  50-fogona-vmlinuz-efi.sh
-e3206d23714700d71cfe10fa8611fcde1726c1ab957f697161081d828c2bf03e854e3ae15f443a646893848064df492b550fb202573894d5205048882811b533  Moto-G-Play-2024-tplg.conf
+45e62b72a9c142a4825a9b965b35e7e19b548d277bea7a7a8169409c90465119d169131f23806dee7b5bbaed52299bd184d626c59520ddc401ffad33959dd5cb  Moto-G-Play-2024-tplg.conf
 1462230c12e2127b86594e9615fb7cb2b555d4ae72a94ac2208d84f0a1ec6eb6d55942fab06fc674fd370d7065297fe941192bdc1ba7a7c3ec1712e627bec390  ucm-Moto-G-Play-2024.conf
 e130f1f81e5febb6d4d7986e589511b96e135c2a2fc2ea68f0dce4c2c4d03266fad72842d6029e2394fa996e18d3cdced04373e741939c20237cf3dc45208904  ucm-HiFi.conf
 291bc089deb1434cc5a6ea27e396d45bcd4c1179bfea6193619a130b2f38ba609f24d993be9e19d801dda91c19f078c7c36b2e2fed4d55d41bfc8bf89a74d039  ucm-VoiceCall.conf

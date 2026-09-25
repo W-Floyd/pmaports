@@ -1,0 +1,23 @@
+[Unit]
+Description=Server for FastRPC remote procedure calls from Qualcomm ADSP - AudioPD
+# The audio PD loads the voice graphs' dynamic modules (Fluence ECNS) from
+# the dsp partition over FastRPC. Needs the kernel's ADSP remote heap
+# (fastrpc memory-region + qcom,vmids): without it the heap handed to the
+# DSP is not assigned to it.
+Conflicts=suspend.target
+Before=suspend.target
+After=msm-firmware-loader.service hexagonrpcd-adsp-rootpd.service
+Wants=msm-firmware-loader.service
+ConditionPathExists=/dev/fastrpc-adsp
+
+[Service]
+RuntimeDirectory=hexagonfs-audiopd
+ExecStartPre=/bin/ln -sfn /run/msm-firmware-loader/mnt/dsp_a /run/hexagonfs-audiopd/dsp
+ExecStart=/usr/bin/hexagonrpcd -f /dev/fastrpc-adsp -d adsp -a -R /run/hexagonfs-audiopd
+Restart=on-failure
+RestartSec=5
+User=fastrpc
+Group=fastrpc
+
+[Install]
+WantedBy=multi-user.target
