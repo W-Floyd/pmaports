@@ -1,0 +1,99 @@
+From 2f068b74747e3f8838434af118f61b294f921cff Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 25 Sep 2026 08:04:51 +0000
+Subject: [PATCH] hexagonrpcd: add an option to create and serve the audio PD
+
+The ADSP's audio PD is a static PD that has to be created, with a remote
+heap for dynamic module loading, rather than attached to like the root
+and sensors PDs. Add -a, which creates it through
+FASTRPC_IOCTL_INIT_CREATE_STATIC with the 3 MiB heap the reference
+implementation (qualcomm/fastrpc) asks for, and serves it as usual.
+---
+ hexagonrpcd/rpcd.c | 35 ++++++++++++++++++++++++++++++++---
+ 1 file changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/hexagonrpcd/rpcd.c b/hexagonrpcd/rpcd.c
+index cc1f5cf..ab7c1ed 100644
+--- a/hexagonrpcd/rpcd.c
++++ b/hexagonrpcd/rpcd.c
+@@ -135,6 +135,7 @@ static void print_usage(const char *argv0)
+ 	printf("Usage: %s [options] -f DEVICE\n\n", argv0);
+ 	printf("Server for FastRPC remote procedure calls from Qualcomm DSPs\n\n"
+ 	       "Options:\n"
++	       "\t-a\t\tCreate and serve the static audio PD (audiopd)\n"
+ 	       "\t-c SHELL\t\tCreate a new pd running the specified ELF\n"
+ 	       "\t-d DSP\t\tDSP name (default: "")\n"
+ 	       "\t-f DEVICE\tFastRPC device node to attach to\n"
+@@ -143,6 +144,26 @@ static void print_usage(const char *argv0)
+ 	       "\t-s\t\tAttach to sensorspd\n");
+ }
+ 
++/*
++ * The audio PD is a static PD the DSP firmware carries, created rather than
++ * attached to. The kernel hands it a remote heap for dynamic loading (from
++ * the fastrpc node's memory-region); the reference implementation asks for
++ * 3 MiB, which is available only to the audio PD.
++ */
++#define AUDIOPD_HEAP_SIZE (3 * 1024 * 1024)
++
++static int create_audio_pd(int fd)
++{
++	static const char name[] = "audiopd";
++	struct fastrpc_init_create_static init = {
++		.namelen = sizeof(name),
++		.memlen = AUDIOPD_HEAP_SIZE,
++		.name = (__u64) (uintptr_t) name,
++	};
++
++	return ioctl(fd, FASTRPC_IOCTL_INIT_CREATE_STATIC, &init);
++}
++
+ static int create_shell_pd(int fd, const char *create_shell)
+ {
+ 	char *buf;
+@@ -418,6 +439,7 @@ int main(int argc, char* argv[])
+ 	size_t n_progs = 0;
+ 	int fd, ret, opt;
+ 	bool attach_sns = false;
++	bool audio_pd = false;
+ 
+ 	progs = malloc(sizeof(const char *) * argc);
+ 	if (progs == NULL) {
+@@ -435,8 +457,11 @@ int main(int argc, char* argv[])
+ 	if (guessed_device_dir != NULL)
+ 		device_dir = guessed_device_dir;
+ 
+-	while ((opt = getopt(argc, argv, "c:d:f:p:R:s")) != -1) {
++	while ((opt = getopt(argc, argv, "ac:d:f:p:R:s")) != -1) {
+ 		switch (opt) {
++			case 'a':
++				audio_pd = true;
++				break;
+ 			case 'c':
+ 				create_shell = optarg;
+ 				break;
+@@ -467,7 +492,9 @@ int main(int argc, char* argv[])
+ 		goto err_free_pids;
+ 	}
+ 
+-	printf("Starting %s (%s) on %s\n", argv[0], attach_sns? "INIT_ATTACH_SNS": "INIT_ATTACH", fastrpc_node);
++	printf("Starting %s (%s) on %s\n", argv[0],
++	       audio_pd ? "INIT_CREATE_STATIC audiopd" :
++	       attach_sns ? "INIT_ATTACH_SNS" : "INIT_ATTACH", fastrpc_node);
+ 
+ 	fd = open(fastrpc_node, O_RDWR);
+ 	if (fd < 0) {
+@@ -475,7 +502,9 @@ int main(int argc, char* argv[])
+ 		goto err_free_pids;
+ 	}
+ 
+-	if (attach_sns)
++	if (audio_pd)
++		ret = create_audio_pd(fd);
++	else if (attach_sns)
+ 		ret = ioctl(fd, FASTRPC_IOCTL_INIT_ATTACH_SNS, NULL);
+ 	else if (create_shell != NULL)
+ 		ret = create_shell_pd(fd, create_shell);
+-- 
+2.55.0
+
