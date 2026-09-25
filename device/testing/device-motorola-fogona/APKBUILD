@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=51
+pkgrel=52
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -17,6 +17,7 @@ options="!check !archcheck"
 # entirely. post-upgrade as well, because apk runs post-install only on a fresh
 # install.
 install="$pkgname.post-install $pkgname.post-upgrade"
+subpackages="$pkgname-audio:audio"
 
 # android-tools       mkbootimg/avbtool for boot-deploy's header_version 4 path
 # bluez-btmgmt        `btmgmt public-addr`, which is how fogona-bt-addr hands
@@ -118,7 +119,7 @@ depends="
 	tqftpserv
 	u-boot-fogona
 "
-makedepends="devicepkg-dev qca-swiss-army-knife"
+makedepends="alsa-utils devicepkg-dev qca-swiss-army-knife"
 source="deviceinfo
 	kernel-cmdline.conf
 	50-fogona-mesa.conf
@@ -142,6 +143,9 @@ source="deviceinfo
 	rmtfs-writable-efs.conf
 	sshd-early.service
 	50-fogona-vmlinuz-efi.sh
+	Moto-G-Play-2024-tplg.conf
+	ucm-Moto-G-Play-2024.conf
+	ucm-HiFi.conf
 	"
 
 build() {
@@ -163,6 +167,12 @@ build() {
 		--features=wowlan,no-nwifi-decap-4addr-padding,mfp-support,allows-mesh-bcast,mgmt-tx-by-ref,non-bmi,single-chan-info-per-channel \
 		--set-wmi-op-version=tlv --set-htt-op-version=tlv \
 		--set-fw-api=5
+
+	# The AudioReach topology for the speakers. Built from source: it is
+	# ours, not a vendor blob. The file's comments say why each value is
+	# what it is.
+	alsatplg -c "$srcdir"/Moto-G-Play-2024-tplg.conf \
+		-o Moto-G-Play-2024-tplg.bin
 }
 
 package() {
@@ -281,6 +291,32 @@ package() {
 	# shipping its own vmlinuz.efi has been built.
 	install -Dm755 "$srcdir"/50-fogona-vmlinuz-efi.sh \
 		"$pkgdir"/usr/share/boot-deploy/hooks/50-fogona-vmlinuz-efi
+
+	# Speakers: the topology the sound card requests by its DT model name,
+	# and the UCM profile the sound server needs to enable the route (moved
+	# to -audio). UCM finds the profile by driver name (sm6225) and card
+	# long name.
+	install -Dm644 Moto-G-Play-2024-tplg.bin \
+		-t "$pkgdir"/usr/lib/firmware/qcom/sm6225/
+	install -Dm644 "$srcdir"/ucm-Moto-G-Play-2024.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/conf.d/sm6225/Moto-G-Play-2024.conf
+	install -Dm644 "$srcdir"/ucm-HiFi.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/Qualcomm/sm6225/Moto-G-Play-2024/HiFi.conf
+}
+
+# PipeWire rather than the default PulseAudio: through PulseAudio the
+# speakers crackle and stutter, while the same audio played direct to the
+# hardware or through PipeWire is clean (not tsched; tsched=0 still
+# crackles). As xiaomi-nabu does.
+audio() {
+	install_if="$pkgname=$pkgver-r$pkgrel postmarketos-base-ui-audio"
+	depends="
+		alsa-ucm-conf
+		postmarketos-base-ui-audio-backend-pipewire
+	"
+
+	amove usr/share/alsa/ucm2/conf.d/sm6225
+	amove usr/share/alsa/ucm2/Qualcomm/sm6225
 }
 
 sha512sums="
@@ -307,4 +343,7 @@ c1ef33a0a42656cb366b6556c4a46f30168c128281b4fd59d73a43418d33f55b56304266ff3dc035
 a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service
 c35c89ddd83423a2bfee992c460d967986bddce9f315c8fb493be8c82e1c25316b30d3ef3ac6c52e1e0b01d0279cafb63c21f64d6f073a58bd842479f5232421  50-fogona-vmlinuz-efi.sh
+e3206d23714700d71cfe10fa8611fcde1726c1ab957f697161081d828c2bf03e854e3ae15f443a646893848064df492b550fb202573894d5205048882811b533  Moto-G-Play-2024-tplg.conf
+00794526a501aaec1bc5704847c078dedc84fdc1196a321244b7056c16fcad4f8106e67e10438b82f1e9d7503b1a88499bae823f07b392ca45827c7225fee996  ucm-Moto-G-Play-2024.conf
+cad2b6c2580d61a58560e5a000a7010b4bf73b5937fdd0039b477022bf14cc6685ece24954ad72db605268dbc87d1859baf017302e34909a722133765302ecd2  ucm-HiFi.conf
 "
