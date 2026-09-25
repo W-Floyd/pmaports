@@ -19,7 +19,7 @@
 # silently stops the bootloader from reaching the hardware.
 pkgname=u-boot-fogona
 pkgver=2026.10_rc4
-pkgrel=3
+pkgrel=4
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
 url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"
@@ -45,7 +45,7 @@ install="$pkgname.post-upgrade"
 #
 # Pin a commit, never a branch: abuild checksums the tarball and a moving
 # branch breaks its own checksum. See /repo/aports/README.md.
-_commit="ce7a1dcb1267526ea93efcb3f013a67e90b68817"
+_commit="04bfbb894cd7154286763b10feddfc9ecbad23d6"
 
 source="$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
 builddir="$srcdir/u-boot-$_commit"
@@ -96,5 +96,5 @@ open('$pkgdir/usr/share/u-boot/fogona/u-boot-txt0.bin', 'wb').write(bytes(d))
 		> "$pkgdir"/usr/share/u-boot/fogona/u-boot-fogona.bin
 }
 sha512sums="
-db1c872cbbffe898cd17d4bb24201827a701a0332fd5d65ef4f1343b9e8ee39f14e5d6c2cffe9cd5dfcaead69329d9782d9771822bd9279f721fb7fe92aa3b22  u-boot-fogona-ce7a1dcb1267526ea93efcb3f013a67e90b68817.tar.gz
+803b47beab6dfdc7813d86b3266267b67516965ea509244372f922ba1f06437e91a411b018da3b85a256667558ea47b55773cc97c271fa4b55f4801e30a06d35  u-boot-fogona-f79d753f725c221b82f78bfb97a7c377de65cb03.tar.gz
 "
