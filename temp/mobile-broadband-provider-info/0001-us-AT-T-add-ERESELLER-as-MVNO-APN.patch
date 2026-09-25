@@ -1,0 +1,34 @@
+From 1e79705227f4209397670977cba3f6669e562288 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 25 Sep 2026 17:39:41 +0000
+Subject: [PATCH] us: AT&T: add ERESELLER as MVNO APN
+
+ERESELLER is the APN Red Pocket publishes for its lines on AT&T (GSMA),
+with AT&T's MMSC and MMS proxy:
+https://www.redpocket.com/configure-handset
+
+Tested with a Red Pocket GSMA SIM: data over IPv4 and IPv6.
+---
+ serviceproviders.xml | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/serviceproviders.xml b/serviceproviders.xml
+index 9b1d28a..5cbecd5 100644
+--- a/serviceproviders.xml
++++ b/serviceproviders.xml
+@@ -13801,6 +13801,12 @@ conceived.
+ 				<mmsc>http://mmsc.mobile.att.net</mmsc>
+ 				<mmsproxy>proxy.mobile.att.net:80</mmsproxy>
+ 			</apn>
++			<apn value="ERESELLER">
++				<usage type="mms-internet-hipri-fota"/>
++				<name>ERESELLER</name>
++				<mmsc>http://mmsc.mobile.att.net</mmsc>
++				<mmsproxy>proxy.mobile.att.net:80</mmsproxy>
++			</apn>
+ 		</gsm>
+ 	</provider>
+ 	<provider primary="true">
+-- 
+2.55.0
+

@@ -1,0 +1,35 @@
+# Forked from Alpine: add ERESELLER to AT&T's APNs (Red Pocket's AT&T APN,
+# lets mmsd-tng auto-configure MMS). Patch from
+# ~/mobile-broadband-provider-info branch us-att-ereseller.
+maintainer="William Floyd <git@notmy.space>"
+pkgname=mobile-broadband-provider-info
+pkgver=20251101
+pkgrel=2
+pkgdesc="Mobile broadband settings for various service providers"
+url="https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info/"
+arch="noarch"
+license="CC-PDDC"
+makedepends="libxml2-utils libxslt meson"
+# not using the CI release process: https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info/-/merge_requests/139
+source="https://gitlab.gnome.org/GNOME/mobile-broadband-provider-info/-/archive/$pkgver/mobile-broadband-provider-info-$pkgver.tar.gz
+	0001-us-AT-T-add-ERESELLER-as-MVNO-APN.patch
+	"
+#source="https://download.gnome.org/sources/mobile-broadband-provider-info/$pkgver/mobile-broadband-provider-info-$pkgver.tar.xz"
+
+build() {
+	abuild-meson . output
+	meson compile -C output
+}
+
+check() {
+	meson test -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+}
+
+sha512sums="
+008376186cc19e3223ab09b049aa2f87c7a1473f91eef2d9f39d52e6b27c9b88c2f0a711b8afdf77e010cc0d36d13f4c4ea84cccc795cd0c334a22c79e6f135f  mobile-broadband-provider-info-20251101.tar.gz
+ab6c841d37148d07ec069994081b08fe1a7c0b72d0eddb4e21a4a251ab6142ec4b7e864028da08724cf010947aff35341b7b0f77f64bd182a31c4955319c482b  0001-us-AT-T-add-ERESELLER-as-MVNO-APN.patch
+"
