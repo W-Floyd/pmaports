@@ -1,7 +1,9 @@
+# fogona overlay: adds 0001-expose-the-fsg-partition-for-tqftpserv.patch.
+# Local-only -- upstream is gitlab.postmarketos.org, which we do not post to.
 maintainer=""
 pkgname=msm-firmware-loader
 pkgver=1.8.0
-pkgrel=2
+pkgrel=3
 pkgdesc="Set of init services to automatically load firmware from device partitions"
 url="https://postmarketos.org/"
 subpackages="$pkgname-openrc $pkgname-systemd $pkgname-wcnss"
@@ -9,6 +11,7 @@ arch="armhf armv7 aarch64"
 license="MIT"
 source="
 	https://gitlab.postmarketos.org/postmarketOS/msm-firmware-loader/-/archive/$pkgver/msm-firmware-loader-$pkgver.tar.gz
+	0001-expose-the-fsg-partition-for-tqftpserv.patch
 "
 options="!check"
 
@@ -46,4 +49,5 @@ wcnss() {
 
 sha512sums="
 c87e9e45fa47b046eb056e1830b32f081a9100bd937e683794aa95913d93e39bdc8911e599b8ab6a368c42b0bf56d9a29c4f0e6ba31b7fb31747c43eb6053bbd  msm-firmware-loader-1.8.0.tar.gz
+9d2f604c469c60ebf6dc2500ad11d56e481ce8061566f4fb1a57ccccfb515f3a466df6b2d6ee873ebb2e0b8d66b690d9c0ce98257f7c69479a17b80f2fb97240  0001-expose-the-fsg-partition-for-tqftpserv.patch
 "

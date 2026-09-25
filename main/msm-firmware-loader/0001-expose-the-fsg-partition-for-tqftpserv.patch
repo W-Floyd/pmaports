@@ -1,0 +1,34 @@
+diff --git a/msm-firmware-loader.sh b/msm-firmware-loader.sh
+index eb51003..b91fe70 100644
+--- a/msm-firmware-loader.sh
++++ b/msm-firmware-loader.sh
+@@ -37,6 +37,7 @@ FW_PARTITIONS="
+ 	apnhlos
+ 	bluetooth$(ab_get_slot)
+ 	dsp$(ab_get_slot)
++	fsg$(ab_get_slot)
+ 	modem$(ab_get_slot)
+ 	persist
+ 	vendor$(ab_get_slot)
+@@ -230,6 +231,21 @@ then
+ 	done
+ fi
+ 
++# The modem fetches its MCFG (modem configuration, i.e. the RF and carrier
++# setup) over tqftpserv from /readonly/vendor/fsg/ or /readonly/fsg/, which are
++# symlinks in the stock RFS tree pointing at the fsg partition mounted at
++# /vendor/fsg or /fsg. tqftpserv resolves both to "fsg/" next to the remoteproc
++# firmware, so expose the partition there. Without it the modem never gets an RF
++# configuration: it reports no bands, activates no carrier config and stays in
++# operating mode "offline", answering DeviceNotReady to anything else.
++#
++# Note this fsg is a filesystem, and a different thing from the raw fsg blob
++# rmtfs serves under the same name.
++if [ -d "$BASEDIR/mnt/fsg$(ab_get_slot)" ] && [ ! -e "$BASEDIR/target/fsg" ]
++then
++	ln -s "$BASEDIR/mnt/fsg$(ab_get_slot)" "$BASEDIR"/target/fsg
++fi
++
+ # Some kernel versions expect .mbn instead of legacy .mdt
+ # Symlink these files together, the kernel can autodetect the type.
+ find "$BASEDIR"/target/ \
