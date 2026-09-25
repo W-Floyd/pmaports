@@ -1,0 +1,71 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# Qualcomm's open-source AudioReach graph services, built for their ACDB
+# library alone: libar-acdb reads an ACDB (the per-device audio calibration
+# database stock Android ships in vendor/etc/acdbdata) through its public
+# acdb_ioctl() API, and libar-osal is what it runs on.
+#
+# Only ar_osal and acdb are built. The rest of the tree (gsl, gpr, ats) talks
+# to the DSP through /dev/aud_pasthru_adsp and friends, which mainline does not
+# have -- the in-tree q6apm driver owns the DSP instead.
+#
+# acdbdump (our own, /repo/tools/acdb/acdbdump.c in the fogona notes) is a
+# small command-line front end to that API: graph key vectors, sub-graph open
+# payloads, connections and calibration. fogona uses it to build its
+# voice-call graphs at boot from the handset's own ACDB
+# (device-motorola-fogona, fogona-voice-graphs), so nothing derived from the
+# vendor's calibration is shipped.
+pkgname=audioreach-graphservices
+pkgver=0_git20260924
+pkgrel=0
+_commit="55250c3e0c2a1dbecff9fdc32b5946132e840617"
+pkgdesc="Qualcomm AudioReach ACDB library (libar-acdb) and its OS abstraction"
+url="https://github.com/Audioreach/audioreach-graphservices"
+arch="all"
+license="BSD-3-Clause"
+makedepends="autoconf automake libtool linux-headers"
+subpackages="$pkgname-dev acdbdump"
+source="$pkgname-$_commit.tar.gz::https://github.com/Audioreach/audioreach-graphservices/archive/$_commit.tar.gz
+	0001-ar_osal-build-with-musl-spell-out-the-unused-attribute.patch
+	acdbdump.c
+	"
+builddir="$srcdir/$pkgname-$_commit"
+options="!check" # no test suite
+
+prepare() {
+	default_prepare
+	autoreconf -fi
+}
+
+build() {
+	./configure \
+		--build="$CBUILD" \
+		--host="$CHOST" \
+		--prefix=/usr \
+		--with-syslog \
+		--without-cutils
+	make -C ar_osal
+	make -C acdb
+
+	# shellcheck disable=SC2086
+	${CC:-cc} $CFLAGS -Iacdb/api -Iar_osal/api "$srcdir"/acdbdump.c \
+		-o acdbdump $LDFLAGS -Lacdb/.libs -Lar_osal/.libs -lar-acdb -lar-osal
+}
+
+package() {
+	make -C ar_osal DESTDIR="$pkgdir" install
+	make -C acdb DESTDIR="$pkgdir" install
+	install -Dm644 LICENSE "$pkgdir"/usr/share/licenses/$pkgname/LICENSE
+	install -Dm755 acdbdump "$pkgdir"/usr/bin/acdbdump
+}
+
+acdbdump() {
+	pkgdesc="Dump graphs and calibration from a Qualcomm AudioReach ACDB"
+	amove usr/bin/acdbdump
+}
+
+sha512sums="
+25fb8fc9e21177d79096236041360ab8dfb0f750a23a353e984a7866295352cf8300c4e6b9dc1d688f4a781b18134f1c680704a18190435ea0c9717d1597c1cc  audioreach-graphservices-55250c3e0c2a1dbecff9fdc32b5946132e840617.tar.gz
+7b7d14acfedc251f3d2e25e9aec4e21e361e1ea7f255f218c2e539c604757e078493614662ba92dfebb62f67be85a71fcba374f941338dc964e0dc858022712b  0001-ar_osal-build-with-musl-spell-out-the-unused-attribute.patch
+8b1c2812058803c4c853c13b2d20d4012c5dfd016d0636246856751b39a1c2d241b22de8d3c61042766da6573f7324246954054df73630c667786ce25453c680  acdbdump.c
+"
