@@ -1,0 +1,15 @@
+[Unit]
+Description=Build the voice-call graphs from fogona's own ACDB
+Documentation=file:/usr/sbin/fogona-voice-graphs
+# The ACDB is on the vendor partition, which msm-firmware-loader mounts.
+After=msm-firmware-loader.service
+Requires=msm-firmware-loader.service
+Before=fogona-voice-call-watch.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/fogona-voice-graphs
+
+[Install]
+WantedBy=multi-user.target

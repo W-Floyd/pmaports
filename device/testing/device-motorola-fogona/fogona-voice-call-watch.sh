@@ -4,9 +4,9 @@
 # handset mics into the capture backend, and attach stock's voice graphs
 # through the kernel's q6apm-voice-poc debugfs file; undo it on hangup.
 #
-# The graphs and their calibration are /lib/firmware/qcom/sm6225/voice-*.bin,
-# derived from the handset's own ACDB and not shipped by any package; without
-# them "start" fails and the call stays silent.
+# The graphs and their calibration (qcom/sm6225/voice-*.bin) are built at
+# boot from the handset's own ACDB by fogona-voice-graphs; without them
+# "start" fails and the call stays silent.
 ctl=/sys/kernel/debug/q6apm-voice/ctl
 # voice_poc_rx_direct: voice RX without b0000045 (the working downlink)
 modprobe q6apm_voice_poc voice_poc_rx_direct=1

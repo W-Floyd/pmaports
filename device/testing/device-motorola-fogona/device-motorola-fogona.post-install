@@ -31,9 +31,10 @@ systemctl enable diag-router.service >/dev/null 2>&1 || true
 # IMS, and on a VoLTE-only network incoming calls go straight to voicemail.
 systemctl enable 81voltd.service >/dev/null 2>&1 || true
 
-# Call audio: the ADSP audio PD (Fluence ECNS for voice TX) and the watcher
-# that attaches the voice graphs on an active call. Without them a call
-# connects silent in both directions.
+# Call audio: the ADSP audio PD (Fluence ECNS for voice TX), the voice graphs
+# built from the handset's own ACDB, and the watcher that attaches them on an
+# active call. Without them a call connects silent in both directions.
 systemctl enable hexagonrpcd-adsp-audiopd.service >/dev/null 2>&1 || true
+systemctl enable fogona-voice-graphs.service >/dev/null 2>&1 || true
 systemctl enable fogona-voice-call-watch.service >/dev/null 2>&1 || true
 exit 0
