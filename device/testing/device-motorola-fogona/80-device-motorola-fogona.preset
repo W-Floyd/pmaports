@@ -1,0 +1,20 @@
+# The units this device needs running. postmarketos-base-systemd applies
+# presets to every newly installed unit, and the default policy disables
+# them -- so without this file a fresh install ends up with all of these
+# off, even when a post-install script enabled them first.
+
+# Board data for WLAN, writable EFS copies and the SSREQ stub: all before
+# rmtfs boots the modem.
+enable fogona-wlan-bdf.service
+enable fogona-modem-efs.service
+enable fogona-ssreq-stub.service
+
+# The modem's DIAG channel, and the IMS data service VoLTE calls need.
+enable diag-router.service
+enable 81voltd.service
+
+# Call audio: the ADSP audio PD (Fluence ECNS), the voice graphs built from
+# the handset's own ACDB, and the watcher that attaches them on a call.
+enable hexagonrpcd-adsp-audiopd.service
+enable fogona-voice-graphs.service
+enable fogona-voice-call-watch.service

@@ -5,17 +5,19 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=58
+pkgrel=59
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
 
-# The two oneshot units this package ships have to be *enabled*, and Alpine's
-# preset policy does not do it -- installing the unit file is not enough. See
-# the post-install script: a fresh install left both disabled, which cost WiFi
-# entirely. post-upgrade as well, because apk runs post-install only on a fresh
-# install.
+# The units this package ships (and a few it depends on) have to be
+# *enabled*, and the default preset policy disables every newly installed
+# unit -- installing the unit file is not enough, and postmarketos-base-systemd
+# applies presets after post-install has run, undoing its enables for new
+# units. 80-device-motorola-fogona.preset is what enables them; the
+# post-install/upgrade scripts stay as a belt for units that predate it (a
+# fresh install once left WiFi's board data and the EFS copies disabled).
 install="$pkgname.post-install $pkgname.post-upgrade"
 subpackages="$pkgname-audio:audio"
 
@@ -155,6 +157,7 @@ source="deviceinfo
 	fogona-voice-graphs.sh
 	fogona-voice-graphs.py
 	fogona-voice-graphs.service
+	80-device-motorola-fogona.preset
 	81-libssc-motorola-fogona.rules
 	rmtfs-writable-efs.conf
 	sshd-early.service
@@ -312,6 +315,11 @@ package() {
 	install -Dm644 "$srcdir"/fogona-voice-graphs.service \
 		-t "$pkgdir"/usr/lib/systemd/system/
 
+	# Enables the units above and the ones they depend on; see the note at
+	# the top of this file.
+	install -Dm644 "$srcdir"/80-device-motorola-fogona.preset \
+		-t "$pkgdir"/usr/lib/systemd/system-preset/
+
 	# TEMPORARY, paired with the unfixed panel bring-up stall. sshd is
 	# normally ordered After=network.target, which puts it behind
 	# NetworkManager -- and the stall wedges NetworkManager, so a stalled
@@ -389,6 +397,7 @@ a35a2db082b816bdc6a05a927c6e9a8996da944cd8444b68fb796f6603f0559ecacd27a5366975a4
 008956a0772f17902df0404d650aee3063805abef7ff357643179c7823a83a137a6affa578ec6614e3de3bae3528ef0be0a31f7540d3ec4eea27e093ea152104  fogona-voice-graphs.sh
 85ec68a345169f95d11939eb49fcdf38cbb155f09c11716c54c997528075fe2569147f95bb278d10f88ca95546108c769c728b2fbc136277e302071d3cbcf2b7  fogona-voice-graphs.py
 00bb9c7b6ee2d00e44b1f65c2e5b67421b4b7796a9e72c4108f6967eded7f794c623e2db141550e71da4ac445ac0b10fd2635f2fe2c3b7dbb78900e6a394d4bf  fogona-voice-graphs.service
+4b1a5d36c0c2fd4621fb3dd7fdc9f139a8877ece71fd0fc30dd8eb20790352ab3e8423d4c727a3635046c6ca43e1d2033cc256958df883b51b6f3122e3763301  80-device-motorola-fogona.preset
 0ddecd129284b489552dc9be4240500792ce483e2efa41be6dd24d1dfb1a2e00c3ef7b0543fc456fe4a0792cf63cee3118a38d74a239299a57a0538f1f669977  81-libssc-motorola-fogona.rules
 a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service
