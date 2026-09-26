@@ -1,0 +1,54 @@
+From 11dffff10b81f7f12324e2629924aa8cb1098107 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 17:43:15 +0000
+Subject: [PATCH 63/76] camss: Measure the phase on every other frame
+
+Autofocus waits a few frames for the lens to settle after each move, so
+a phase per frame buys nothing, while measuring it costs about a fifth
+of a Cortex-A53 core at 15 fps and twice that at 30. Hand the IPA every
+second PD buffer.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index c5d99949a..8a3fe4c96 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -85,6 +85,7 @@ public:
+ 
+ 	/* A PD buffer is with the IPA: newer ones are skipped meanwhile. */
+ 	bool pdafInFlight_ = false;
++	unsigned int pdafFrames_ = 0;
+ 
+ 	/* Requests for which no buffer has been queued to the CSI receiver yet. */
+ 	std::queue<Request *> pendingRequests_;
+@@ -498,6 +499,7 @@ void CamssCameraData::stopPdaf()
+ 	isp_->unmapPdafBuffers(csi_->pdafBuffers());
+ 	csi_->freePdafBuffers();
+ 	pdafInFlight_ = false;
++	pdafFrames_ = 0;
+ }
+ 
+ /*
+@@ -505,11 +507,17 @@ void CamssCameraData::stopPdaf()
+  * it is still busy is skipped. Measuring the phase is costly, and a backlog
+  * would delay the statistics the IPA processes in the same thread, and with
+  * them exposure and white balance, for results that are stale anyway.
++ *
++ * It also gets only every kPdafEvery-th buffer: autofocus waits a few frames
++ * for the lens to settle after each move, so a phase per frame is not needed,
++ * while it costs a good part of a CPU core.
+  */
++static constexpr unsigned int kPdafEvery = 2;
++
+ void CamssCameraData::pdafBufferReady(FrameBuffer *buffer)
+ {
+ 	if (buffer->metadata().status != FrameMetadata::FrameSuccess ||
+-	    pdafInFlight_) {
++	    pdafInFlight_ || pdafFrames_++ % kPdafEvery) {
+ 		csi_->queuePdafBuffer(buffer->cookie());
+ 		return;
+ 	}

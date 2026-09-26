@@ -1,0 +1,222 @@
+From f6893e35df10e0cf44ec1055e0386eb9046cb01a Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Thu, 17 Sep 2026 17:28:19 +0530
+Subject: [PATCH 40/76] include: linux: Update uAPI headers with CRSM
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 1ad2a0a0e8e92f622482b829b935bcb07f0254a4)
+---
+ include/linux/media-bus-format.h | 12 +++++--
+ include/linux/v4l2-controls.h    | 57 ++++++++++++++++++++++++++++++++
+ include/linux/v4l2-subdev.h      | 15 ++++++++-
+ include/linux/videodev2.h        | 26 +++++++++++----
+ 4 files changed, 100 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/media-bus-format.h b/include/linux/media-bus-format.h
+index 3e1c867e9..40912155c 100644
+--- a/include/linux/media-bus-format.h
++++ b/include/linux/media-bus-format.h
+@@ -190,8 +190,14 @@
+ #define MEDIA_BUS_FMT_META_20			0x8006
+ #define MEDIA_BUS_FMT_META_24			0x8007
+ 
+-/* Specific metadata formats. Next is 0x9003. */
+-#define MEDIA_BUS_FMT_CCS_EMBEDDED		0x9001
+-#define MEDIA_BUS_FMT_OV2740_EMBEDDED		0x9002
++/* Generic (CFA independent) pixel data formats. Next is 0x9009. */
++#define MEDIA_BUS_FMT_RAW_8			0x9001
++#define MEDIA_BUS_FMT_RAW_10			0x9002
++#define MEDIA_BUS_FMT_RAW_12			0x9003
++#define MEDIA_BUS_FMT_RAW_14			0x9004
++#define MEDIA_BUS_FMT_RAW_16			0x9005
++#define MEDIA_BUS_FMT_RAW_20			0x9006
++#define MEDIA_BUS_FMT_RAW_24			0x9007
++#define MEDIA_BUS_FMT_RAW_28			0x9008
+ 
+ #endif /* __LINUX_MEDIA_BUS_FORMAT_H */
+diff --git a/include/linux/v4l2-controls.h b/include/linux/v4l2-controls.h
+index c0d9cab3c..a84008a06 100644
+--- a/include/linux/v4l2-controls.h
++++ b/include/linux/v4l2-controls.h
+@@ -121,6 +121,15 @@ enum v4l2_colorfx {
+  */
+ #define V4L2_CID_USER_MEYE_BASE			(V4L2_CID_USER_BASE + 0x1000)
+ 
++/*
++ * The base for the vim2m driver controls.
++ * We reserve 16 controls for this driver.
++ * The vim2m control range clashed with the meye control range, which was not
++ * intended, but since the meye driver has been removed, we can just keep the
++ * vim2m control range.
++ */
++#define V4L2_CID_USER_VIM2M_BASE		(V4L2_CID_USER_BASE + 0x1000)
++
+ /* The base for the bttv driver controls.
+  * We reserve 32 controls for this driver. */
+ #define V4L2_CID_USER_BTTV_BASE			(V4L2_CID_USER_BASE + 0x1010)
+@@ -236,6 +245,18 @@ enum v4l2_colorfx {
+  */
+ #define V4L2_CID_USER_MALI_C55_BASE		(V4L2_CID_USER_BASE + 0x1230)
+ 
++/*
++ * The base for the ST DCMIPP driver controls.
++ * We reserve 16 controls for this driver
++ */
++#define V4L2_CID_USER_DCMIPP_BASE		(V4L2_CID_USER_BASE + 0x1240)
++
++/*
++ * The base for IT6625/IT6626 driver controls.
++ * We reserve 16 controls for this driver.
++ */
++#define V4L2_CID_USER_IT6625_BASE		(V4L2_CID_USER_BASE + 0x1250)
++
+ /* MPEG-class control IDs */
+ /* The MPEG controls are applicable to all codec controls
+  * and the 'MPEG' part of the define is historical */
+@@ -464,6 +485,8 @@ enum v4l2_mpeg_video_intra_refresh_period_type {
+ 	V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD_TYPE_CYCLIC	= 1,
+ };
+ 
++#define V4L2_CID_MPEG_VIDEO_BACKGROUND_DETECTION	(V4L2_CID_CODEC_BASE + 238)
++
+ /* CIDs for the MPEG-2 Part 2 (H.262) codec */
+ #define V4L2_CID_MPEG_VIDEO_MPEG2_LEVEL			(V4L2_CID_CODEC_BASE+270)
+ enum v4l2_mpeg_video_mpeg2_level {
+@@ -1235,6 +1258,36 @@ enum v4l2_jpeg_chroma_subsampling {
+ #define V4L2_CID_UNIT_CELL_SIZE			(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 8)
+ #define V4L2_CID_NOTIFY_GAINS			(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 9)
+ 
++#define V4L2_CID_CFA_PATTERN			(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 10)
++#define V4L2_CFA_PATTERN_GRBG			0x00000000
++#define V4L2_CFA_PATTERN_RGGB			0x00000001
++#define V4L2_CFA_PATTERN_BGGR			0x00000002
++#define V4L2_CFA_PATTERN_GBRG			0x00000003
++#define V4L2_CFA_PATTERN_MONO			0x00010000
++
++#define V4L2_CID_CFA_PATTERN_FLIP		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 11)
++#define V4L2_CFA_PATTERN_FLIP_HORIZONTAL	(1U << 0)
++#define V4L2_CFA_PATTERN_FLIP_VERTICAL		(1U << 1)
++#define V4L2_CFA_PATTERN_FLIP_BOTH \
++	(V4L2_CFA_PATTERN_FLIP_HORIZONTAL | V4L2_CFA_PATTERN_FLIP_VERTICAL)
++
++#define V4L2_CID_METADATA_LAYOUT		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 12)
++#define V4L2_METADATA_LAYOUT_CCS		1U
++#define V4L2_METADATA_LAYOUT_OV2740		2U
++
++#define V4L2_CID_BINNING_FACTORS		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 13)
++#define V4L2_BINNING_FACTORS_MAKE(hnum, hdem, vnum, vdem)		\
++	(((__u64)(0xffff & hnum) << 48) | ((__u64)(0xffff & hdem) << 32) | \
++	 ((__u64)(0xffff & vnum) << 16) | (__u64)(0xffff & vdem))
++#define V4L2_BINNING_FACTORS_HNUM(binning)	(__u16)((binning >> 48) & 0xffff)
++#define V4L2_BINNING_FACTORS_HDEM(binning)	(__u16)((binning >> 32) & 0xffff)
++#define V4L2_BINNING_FACTORS_VNUM(binning)	(__u16)((binning >> 16) & 0xffff)
++#define V4L2_BINNING_FACTORS_VDEM(binning)	(__u16)(binning & 0xffff)
++#define V4L2_CID_SUBSAMPLING_HORIZONTAL		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 14)
++#define V4L2_CID_SUBSAMPLING_VERTICAL		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 15)
++
++#define V4L2_CID_FRAME_LENGTH_LINES		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 16)
++#define V4L2_CID_LINE_LENGTH_PIXELS		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 17)
+ 
+ /* Image processing controls */
+ 
+@@ -1246,6 +1299,10 @@ enum v4l2_jpeg_chroma_subsampling {
+ #define V4L2_CID_TEST_PATTERN			(V4L2_CID_IMAGE_PROC_CLASS_BASE + 3)
+ #define V4L2_CID_DEINTERLACING_MODE		(V4L2_CID_IMAGE_PROC_CLASS_BASE + 4)
+ #define V4L2_CID_DIGITAL_GAIN			(V4L2_CID_IMAGE_PROC_CLASS_BASE + 5)
++#define V4L2_CID_CONFIG_MODEL			(V4L2_CID_IMAGE_PROC_CLASS_BASE + 6)
++
++#define V4L2_CONFIG_MODEL_COMMON_RAW_SENSOR	(1U << 0)
++#define V4L2_CONFIG_MODEL_MIPI_CCS		(1U << 1)
+ 
+ /*  DV-class control IDs defined by V4L2 */
+ #define V4L2_CID_DV_CLASS_BASE			(V4L2_CTRL_CLASS_DV | 0x900)
+diff --git a/include/linux/v4l2-subdev.h b/include/linux/v4l2-subdev.h
+index 839b1329a..9d5ba062b 100644
+--- a/include/linux/v4l2-subdev.h
++++ b/include/linux/v4l2-subdev.h
+@@ -196,8 +196,11 @@ struct v4l2_subdev_capability {
+ /* The v4l2 sub-device video device node is registered in read-only mode. */
+ #define V4L2_SUBDEV_CAP_RO_SUBDEV		0x00000001
+ 
++/* Reserved, old STREAMS bit libcamera used before API stabilisation. */
++/* #define V4L2_SUBDEV_CAP_STREAMS_PRELIMINARY	0x00000002 */
++
+ /* The v4l2 sub-device supports routing and multiplexed streams. */
+-#define V4L2_SUBDEV_CAP_STREAMS			0x00000002
++#define V4L2_SUBDEV_CAP_STREAMS			0x00000004
+ 
+ /*
+  * Is the route active? An active route will start when streaming is enabled
+@@ -209,6 +212,10 @@ struct v4l2_subdev_capability {
+  * unset.
+  */
+ #define V4L2_SUBDEV_ROUTE_FL_IMMUTABLE		(1U << 1)
++/*
++ * Is the route static? Routes with the STATIC flag are not removable.
++ */
++#define V4L2_SUBDEV_ROUTE_FL_STATIC		(1U << 2)
+ 
+ /**
+  * struct v4l2_subdev_route - A route inside a subdev
+@@ -263,6 +270,12 @@ struct v4l2_subdev_routing {
+  */
+ #define V4L2_SUBDEV_CLIENT_CAP_INTERVAL_USES_WHICH	(1ULL << 1)
+ 
++/*
++ * The client is aware of the common raw sensor model and expects that on camera
++ * sensor UAPI where supported.
++ */
++#define V4L2_SUBDEV_CLIENT_CAP_COMMON_RAW_SENSOR	(1ULL << 2)
++
+ /**
+  * struct v4l2_subdev_client_capability - Capabilities of the client accessing
+  *					  the subdev
+diff --git a/include/linux/videodev2.h b/include/linux/videodev2.h
+index 8bccad84f..085b0ba62 100644
+--- a/include/linux/videodev2.h
++++ b/include/linux/videodev2.h
+@@ -718,6 +718,16 @@ struct v4l2_pix_format {
+ #define V4L2_PIX_FMT_SGRBG16 v4l2_fourcc('G', 'R', '1', '6') /* 16  GRGR.. BGBG.. */
+ #define V4L2_PIX_FMT_SRGGB16 v4l2_fourcc('R', 'G', '1', '6') /* 16  RGRG.. GBGB.. */
+ 
++/* Generic CSI-2 packed raw pixel formats */
++#define V4L2_PIX_FMT_RAW_8 v4l2_fourcc('R', 'A', 'W', '8')
++#define V4L2_PIX_FMT_RAW_CSI2_10 v4l2_fourcc('R', 'A', 'C', 'A')
++#define V4L2_PIX_FMT_RAW_CSI2_12 v4l2_fourcc('R', 'A', 'C', 'C')
++#define V4L2_PIX_FMT_RAW_CSI2_14 v4l2_fourcc('R', 'A', 'C', 'E')
++#define V4L2_PIX_FMT_RAW_16 v4l2_fourcc('R', 'A', 'W', 'G')
++#define V4L2_PIX_FMT_RAW_CSI2_20 v4l2_fourcc('R', 'A', 'C', 'K')
++#define V4L2_PIX_FMT_RAW_24 v4l2_fourcc('R', 'A', 'W', 'O')
++#define V4L2_PIX_FMT_RAW_CSI2_28 v4l2_fourcc('R', 'A', 'C', 'S')
++
+ /* HSV formats */
+ #define V4L2_PIX_FMT_HSV24 v4l2_fourcc('H', 'S', 'V', '3')
+ #define V4L2_PIX_FMT_HSV32 v4l2_fourcc('H', 'S', 'V', '4')
+@@ -864,17 +874,21 @@ struct v4l2_pix_format {
+ #define V4L2_META_FMT_MALI_C55_PARAMS	v4l2_fourcc('C', '5', '5', 'P') /* ARM Mali-C55 Parameters */
+ #define V4L2_META_FMT_MALI_C55_STATS	v4l2_fourcc('C', '5', '5', 'S') /* ARM Mali-C55 3A Statistics */
+ 
++/* Vendor specific - used for Dreamchip RPP-X1 ISP */
++#define V4L2_META_FMT_RPPX1_PARAMS	v4l2_fourcc('D', 'R', '1', 'P') /* Dreamchip RPP-X1 Parameters */
++#define V4L2_META_FMT_RPPX1_STATS	v4l2_fourcc('D', 'R', '1', 'S') /* Dreamchip RPP-X1 Statistics */
++
+ /*
+  * Line-based metadata formats. Remember to update v4l_fill_fmtdesc() when
+  * adding new ones!
+  */
+ #define V4L2_META_FMT_GENERIC_8		v4l2_fourcc('M', 'E', 'T', '8') /* Generic 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_10	v4l2_fourcc('M', 'C', '1', 'A') /* 10-bit CSI-2 packed 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_12	v4l2_fourcc('M', 'C', '1', 'C') /* 12-bit CSI-2 packed 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_14	v4l2_fourcc('M', 'C', '1', 'E') /* 14-bit CSI-2 packed 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_16	v4l2_fourcc('M', 'C', '1', 'G') /* 16-bit CSI-2 packed 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_20	v4l2_fourcc('M', 'C', '1', 'K') /* 20-bit CSI-2 packed 8-bit metadata */
+-#define V4L2_META_FMT_GENERIC_CSI2_24	v4l2_fourcc('M', 'C', '1', 'O') /* 24-bit CSI-2 packed 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_CSI2_10	v4l2_fourcc('M', 'E', 'C', 'A') /* 10-bit CSI-2 packed 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_CSI2_12	v4l2_fourcc('M', 'E', 'C', 'C') /* 12-bit CSI-2 packed 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_CSI2_14	v4l2_fourcc('M', 'E', 'C', 'E') /* 14-bit CSI-2 packed 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_16	v4l2_fourcc('M', 'E', 'T', 'G') /* Generic 16-bit 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_CSI2_20	v4l2_fourcc('M', 'E', 'C', 'K') /* 20-bit CSI-2 packed 8-bit metadata */
++#define V4L2_META_FMT_GENERIC_24	v4l2_fourcc('M', 'E', 'T', 'O') /* Generic 24-bit 8-bit metadata */
+ 
+ /* priv field value to indicates that subsequent fields are valid. */
+ #define V4L2_PIX_FMT_PRIV_MAGIC		0xfeedcafe

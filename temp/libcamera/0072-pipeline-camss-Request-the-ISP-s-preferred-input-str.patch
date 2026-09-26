@@ -1,0 +1,154 @@
+From 7c9ad34d2c3f3658c55cd4d2d43d05561eac5e71 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 20:33:34 +0000
+Subject: [PATCH 72/76] pipeline: camss: Request the ISP's preferred input
+ stride
+
+As the simple pipeline handler does, ask the capture node for the stride
+the software ISP prefers: the GPU debayer can import buffers of a 256
+byte aligned stride without a copy. A driver that cannot honour it
+keeps its own, which is logged.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss_csi.cpp    | 38 ++++++++++++++-----
+ src/libcamera/pipeline/camss/camss_csi.h      |  3 +-
+ src/libcamera/pipeline/camss/camss_isp.h      |  2 +
+ .../pipeline/camss/camss_isp_soft.cpp         |  5 +++
+ src/libcamera/pipeline/camss/camss_isp_soft.h |  1 +
+ 5 files changed, 38 insertions(+), 11 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss_csi.cpp b/src/libcamera/pipeline/camss/camss_csi.cpp
+index 6eddc7e8c..b63dcfe06 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.cpp
++++ b/src/libcamera/pipeline/camss/camss_csi.cpp
+@@ -227,14 +227,29 @@ V4L2SubdeviceFormat CamssCsiCamera::getSensorFormat(Size size,
+ 	return sensorFormat;
+ }
+ 
+-int CamssCsiCamera::tryFormat(const V4L2SubdeviceFormat &sensorFormat,
+-			      StreamConfiguration &cfg) const
++/*
++ * The capture format for a sensor format, with the ISP's preferred stride
++ * (for the GPU debayer, one it can import the buffers at without a copy).
++ * A driver that cannot honour the stride gives its own.
++ */
++V4L2DeviceFormat CamssCsiCamera::outputFormat(const V4L2SubdeviceFormat &sensorFormat) const
+ {
+-	/* Try format to get stride and framesize */
+ 	V4L2DeviceFormat format;
+ 	format.fourcc = mbusCodeToV4L2PixelFormat(sensorFormat.code);
+ 	format.size = sensorFormat.size;
+ 	format.planesCount = 1;
++	if (isp_)
++		format.planes[0].bpl = isp_->preferredInputStride(format.fourcc.toPixelFormat(),
++								  format.size);
++
++	return format;
++}
++
++int CamssCsiCamera::tryFormat(const V4L2SubdeviceFormat &sensorFormat,
++			      StreamConfiguration &cfg) const
++{
++	/* Try format to get stride and framesize */
++	V4L2DeviceFormat format = outputFormat(sensorFormat);
+ 
+ 	int ret = output_->tryFormat(&format);
+ 	if (ret < 0)
+@@ -303,7 +318,6 @@ StreamConfiguration CamssCsiCamera::validate(const StreamConfiguration &req) con
+ int CamssCsiCamera::configure(const StreamConfiguration &cfg, const Transform &transform)
+ {
+ 	V4L2SubdeviceFormat sensorFormat;
+-	V4L2DeviceFormat outputFormat;
+ 	int ret;
+ 
+ 	sensorFormat = getSensorFormat(cfg.size, cfg.pixelFormat, false);
+@@ -334,16 +348,20 @@ int CamssCsiCamera::configure(const StreamConfiguration &cfg, const Transform &t
+ 			return ret;
+ 	}
+ 
+-	outputFormat.fourcc = mbusCodeToV4L2PixelFormat(sensorFormat.code);
+-	outputFormat.size = sensorFormat.size;
+-	outputFormat.planesCount = 1;
++	V4L2DeviceFormat format = outputFormat(sensorFormat);
++	const unsigned int requestedBpl = format.planes[0].bpl;
+ 
+-	/* This updates outputFormat with the actual established format */
+-	ret = output_->setFormat(&outputFormat);
++	/* This updates format with the actual established format */
++	ret = output_->setFormat(&format);
+ 	if (ret)
+ 		return ret;
+ 
+-	if (!camssV4L2DeviceFormatMatchesStreamConfig(outputFormat, cfg, "CSI configure"))
++	if (requestedBpl && format.planes[0].bpl != requestedBpl)
++		LOG(Camss, Info)
++			<< "Input buffer stride ignored by the driver. Requested "
++			<< requestedBpl << ", got " << format.planes[0].bpl;
++
++	if (!camssV4L2DeviceFormatMatchesStreamConfig(format, cfg, "CSI configure"))
+ 		return -EIO; /* Must match the tryFormat() from validate() */
+ 
+ 	bufferCount_ = cfg.bufferCount;
+diff --git a/src/libcamera/pipeline/camss/camss_csi.h b/src/libcamera/pipeline/camss/camss_csi.h
+index 59642d8d1..59e157a7d 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.h
++++ b/src/libcamera/pipeline/camss/camss_csi.h
+@@ -111,6 +111,7 @@ private:
+ 					    const PixelFormat &format = {},
+ 					    bool useIspMargins = false) const;
+ 	int tryFormat(const V4L2SubdeviceFormat &sensorFormat, StreamConfiguration &cfg) const;
++	V4L2DeviceFormat outputFormat(const V4L2SubdeviceFormat &sensorFormat) const;
+ 	void freeBuffers();
+ 	int configurePdaf();
+ 	void pdafOutputReady(FrameBuffer *buffer);
+@@ -118,7 +119,7 @@ private:
+ 	std::unique_ptr<CameraSensor> sensor_;
+ 	std::unique_ptr<V4L2VideoDevice> output_;
+ 	std::array<linkInfo, LinkCount> links_;
+-	CamssIsp *isp_;
++	CamssIsp *isp_ = nullptr;
+ 
+ 	struct {
+ 		/* CSI decoder source pad 2 -> the next RDI of the same VFE */
+diff --git a/src/libcamera/pipeline/camss/camss_isp.h b/src/libcamera/pipeline/camss/camss_isp.h
+index c7d9940d2..1b7e74d18 100644
+--- a/src/libcamera/pipeline/camss/camss_isp.h
++++ b/src/libcamera/pipeline/camss/camss_isp.h
+@@ -31,6 +31,8 @@ public:
+ 
+ 	virtual bool isValid() = 0;
+ 	virtual Size getMargins(PixelFormat inputFormat) = 0;
++	virtual uint32_t preferredInputStride([[maybe_unused]] const PixelFormat &inputFormat,
++					      [[maybe_unused]] const Size &size) const { return 0; }
+ 
+ 	virtual StreamConfiguration generateConfiguration(const StreamConfiguration &raw) const = 0;
+ 	virtual StreamConfiguration validate(const StreamConfiguration &raw, const StreamConfiguration &req) const = 0;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index 558dce0a7..e073a0ba6 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -85,6 +85,11 @@ Size CamssIspSoft::getMargins(PixelFormat inputFormat)
+ 	return Size(1024 - sizes.max.width, 1024 - sizes.max.height);
+ }
+ 
++uint32_t CamssIspSoft::preferredInputStride(const PixelFormat &inputFormat, const Size &size) const
++{
++	return swIsp_->preferredInputStride(inputFormat, size);
++}
++
+ StreamConfiguration CamssIspSoft::generateConfiguration(const StreamConfiguration &raw) const
+ {
+ 	/*
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
+index fbaa838ed..6d3317775 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.h
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
+@@ -29,6 +29,7 @@ public:
+ 
+ 	bool isValid() override;
+ 	Size getMargins(PixelFormat inputFormat) override;
++	uint32_t preferredInputStride(const PixelFormat &inputFormat, const Size &size) const override;
+ 
+ 	StreamConfiguration generateConfiguration(const StreamConfiguration &raw) const override;
+ 	StreamConfiguration validate(const StreamConfiguration &raw, const StreamConfiguration &req) const override;

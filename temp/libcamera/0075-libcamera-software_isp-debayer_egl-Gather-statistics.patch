@@ -1,0 +1,43 @@
+From 59db91b13b20cb958079fbe5160cf95caa252b85 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 21:02:46 +0000
+Subject: [PATCH 75/76] libcamera: software_isp: debayer_egl: Gather statistics
+ on the output window
+
+The GPU debayer outputs a window of the input, centred when the output
+is smaller, but set the statistics window to that window's size at the
+origin, as the CPU debayer does. The CPU debayer hands the statistics
+only the lines it processes; the GPU debayer hands them the whole input
+buffer (SwStatsCpu::processFrame()), which then starts from the
+window's x and y. The statistics described the top left corner of the
+input: with a 1920x1080 output of a 4080x3072 sensor, a region that
+barely overlaps the image, so exposure brightened a scene whose top
+left corner was dark until what was shown clipped.
+
+Pass the window itself, as for quad Bayer input already.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index bdec26b05..6f9962b53 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -365,10 +365,12 @@ int DebayerEGL::configure(const StreamConfiguration &inputCfg,
+ 	}
+ 
+ 	/*
+-	 * Don't pass x,y from window_ since process() already adjusts for it.
+-	 * But crop the window to 2/3 of its width and height for speedup.
++	 * The statistics are gathered from the whole input buffer
++	 * (SwStatsCpu::processFrame()), which starts from the window's x and y:
++	 * pass them, or the statistics describe the top left corner of the
++	 * input instead of the part of it that is output.
+ 	 */
+-	stats_->setWindow(quadBayer_ ? window_ : Rectangle(window_.size()));
++	stats_->setWindow(window_);
+ 
+ 	inputBufferCount_ = inputCfg.bufferCount;
+ 	outputBufferCount_ = outputCfg.bufferCount;

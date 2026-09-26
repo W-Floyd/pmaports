@@ -1,0 +1,30 @@
+From f36899e4996b9ea27c0a4fd51c6451edca84df8b Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 10:55:19 +0000
+Subject: [PATCH 48/76] include: linux: Add the S5KJN1 PDAF metadata layout
+
+Add V4L2_METADATA_LAYOUT_S5KJN1_PDAF from the experimental kernel
+branch that exposes the S5KJN1's phase detection stream (exp-pdaf,
+"media: uapi: add a metadata layout for S5KJN1 phase detection
+data"). Not upstream; this goes away when the headers are next
+imported from a kernel that has it, or is replaced by whatever value
+upstream assigns.
+
+Signed-off-by: William Floyd <git@notmy.space>
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ include/linux/v4l2-controls.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/linux/v4l2-controls.h b/include/linux/v4l2-controls.h
+index a84008a06..85812b9fe 100644
+--- a/include/linux/v4l2-controls.h
++++ b/include/linux/v4l2-controls.h
+@@ -1274,6 +1274,7 @@ enum v4l2_jpeg_chroma_subsampling {
+ #define V4L2_CID_METADATA_LAYOUT		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 12)
+ #define V4L2_METADATA_LAYOUT_CCS		1U
+ #define V4L2_METADATA_LAYOUT_OV2740		2U
++#define V4L2_METADATA_LAYOUT_S5KJN1_PDAF	3U
+ 
+ #define V4L2_CID_BINNING_FACTORS		(V4L2_CID_IMAGE_SOURCE_CLASS_BASE + 13)
+ #define V4L2_BINNING_FACTORS_MAKE(hnum, hdem, vnum, vdem)		\

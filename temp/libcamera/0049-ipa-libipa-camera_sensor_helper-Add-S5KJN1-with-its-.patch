@@ -1,0 +1,117 @@
+From c4c7dd8b5eaad35faf1be9b1bb81a4063843ea08 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 10:56:57 +0000
+Subject: [PATCH 49/76] ipa: libipa: camera_sensor_helper: Add S5KJN1, with its
+ PDAF layout
+
+Give camera sensor helpers an optional PdafLayout, for sensors that
+send the raw values of their phase detection pixels as a metadata
+stream, and add a helper for the Samsung S5KJN1 (which also drives the
+S5KJNS) with the layout of its 4080x3072 mode's PD stream: one sample
+per 8x8 block, four R/L pairs per block, R then L in the stream. Its
+black level is 63 at 10 bits (the S5KJNS module's stock tuning), and
+the driver's analogue gain control is the real gain.
+
+Signed-off-by: William Floyd <git@notmy.space>
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 49 +++++++++++++++++++++++++
+ src/ipa/libipa/camera_sensor_helper.h   |  4 ++
+ 2 files changed, 53 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 09243d6a4..3c16943c0 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -76,6 +76,19 @@ namespace ipa {
+  * \return The black level of the sensor, or std::nullopt if not known
+  */
+ 
++/**
++ * \fn CameraSensorHelper::pdafLayout()
++ * \brief Fetch the layout of the sensor's phase detection data stream
++ *
++ * Sensors that send the raw values of their phase detection pixels, as a
++ * metadata stream next to the image, describe where each sample comes from.
++ * The layout is specific to the sensor model (and, for sensors with several
++ * modes, to the mode that sends PD data).
++ *
++ * \return The PD stream layout, or std::nullopt if the sensor has none or it
++ * is not known
++ */
++
+ /**
+  * \brief Compute gain code from the analogue gain absolute value
+  * \param[in] gain The real gain to pass
+@@ -875,6 +888,42 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("s5k5f1", CameraSensorHelperS5k5f1)
+ 
++class CameraSensorHelperS5kjn1 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5kjn1()
++	{
++		using Side = PdafLayout::Side;
++
++		/*
++		 * 63 at 10 bits: the S5KJNS module's stock tuning (TFE
++		 * demuxblklevel14, 252 at 12 bits), matching raw frames.
++		 */
++		blackLevel_ = 4032;
++		/* The driver's analogue gain control is the real gain. */
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 1 };
++
++		/*
++		 * The phase detection stream of the 4080x3072 mode, as
++		 * V4L2_METADATA_LAYOUT_S5KJN1_PDAF documents it: one sample
++		 * per 8x8 block, four R/L pairs per block, R then L.
++		 */
++		pdafLayout_ = PdafLayout{
++			.blocks = { 508, 382 },
++			.blockSize = { 8, 8 },
++			.offset = { 8, 8 },
++			.lines = {
++				{ Side::Right, 0, { 2, 0 } }, { Side::Left, 0, { 3, 0 } },
++				{ Side::Right, 1, { 0, 3 } }, { Side::Left, 1, { 1, 3 } },
++				{ Side::Right, 2, { 4, 4 } }, { Side::Left, 2, { 5, 4 } },
++				{ Side::Right, 3, { 6, 7 } }, { Side::Left, 3, { 7, 7 } },
++			},
++			.bitDepth = 10,
++		};
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5kjn1", CameraSensorHelperS5kjn1)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/ipa/libipa/camera_sensor_helper.h b/src/ipa/libipa/camera_sensor_helper.h
+index bd3d0beec..56f14fbe4 100644
+--- a/src/ipa/libipa/camera_sensor_helper.h
++++ b/src/ipa/libipa/camera_sensor_helper.h
+@@ -16,6 +16,8 @@
+ 
+ #include <libcamera/base/class.h>
+ 
++#include "pdaf.h"
++
+ namespace libcamera {
+ 
+ namespace ipa {
+@@ -27,6 +29,7 @@ public:
+ 	virtual ~CameraSensorHelper() = default;
+ 
+ 	std::optional<int16_t> blackLevel() const { return blackLevel_; }
++	const std::optional<PdafLayout> &pdafLayout() const { return pdafLayout_; }
+ 	virtual uint32_t gainCode(double gain) const;
+ 	virtual double gain(uint32_t gainCode) const;
+ 	double quantizeGain(double gain, double *quantizationGain) const;
+@@ -45,6 +48,7 @@ protected:
+ 	};
+ 
+ 	std::optional<int16_t> blackLevel_;
++	std::optional<PdafLayout> pdafLayout_;
+ 	std::variant<std::monostate, AnalogueGainLinear, AnalogueGainExp> gain_;
+ 
+ private:

@@ -1,0 +1,110 @@
+From 3059bdc63b3818d3db300403c6c7c5f88012b330 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 20:09:11 +0000
+Subject: [PATCH 70/76] ipa: soft: agc: Derive luminance scales from the
+ statistics
+
+Name the number of luminance levels in SwIspStats and derive the full
+scale and histogram bin width from it, instead of 255 and 256 literals.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/swisp_stats.h       |  5 +++++
+ src/ipa/soft/algorithms/agc.cpp               | 19 ++++++++++++-------
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index ea8b37947..9e180f648 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -35,6 +35,11 @@ struct SwIspStats {
+ 	 * \brief Number of bins in the yHistogram
+ 	 */
+ 	static constexpr unsigned int kYHistogramSize = 64;
++	/**
++	 * \brief Number of luminance levels the histogram spans: values 0 to
++	 * kYLevels - 1, kYLevels / kYHistogramSize to a bin
++	 */
++	static constexpr unsigned int kYLevels = 256;
+ 	/**
+ 	 * \brief Type of the histogram.
+ 	 */
+diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
+index b1787f733..3917e8e5e 100644
+--- a/src/ipa/soft/algorithms/agc.cpp
++++ b/src/ipa/soft/algorithms/agc.cpp
+@@ -23,6 +23,11 @@ LOG_DEFINE_CATEGORY(IPASoftExposure)
+ 
+ namespace ipa::soft::algorithms {
+ 
++/* The statistics' luminance scale: the top level, and the levels per bin */
++static constexpr double kYMax = SwIspStats::kYLevels - 1;
++static constexpr unsigned int kYBinWidth =
++	SwIspStats::kYLevels / SwIspStats::kYHistogramSize;
++
+ /*
+  * The number of bins to use for the optimal exposure calculations.
+  */
+@@ -198,7 +203,7 @@ std::optional<double> brightMean(const SwIspStats *stats, double black,
+ 				 double start, double end)
+ {
+ 	const auto &hist = stats->yHistogram;
+-	constexpr unsigned int kBinWidth = 256 / SwIspStats::kYHistogramSize;
++	constexpr unsigned int kBinWidth = kYBinWidth;
+ 	double total = 0.0;
+ 
+ 	for (unsigned int i = 0; i < hist.size(); i++)
+@@ -222,7 +227,7 @@ std::optional<double> brightMean(const SwIspStats *stats, double black,
+ 	if (count <= 0.0)
+ 		return {};
+ 
+-	return sum / count / (255.0 - black);
++	return sum / count / (kYMax - black);
+ }
+ 
+ } /* namespace */
+@@ -325,7 +330,7 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 		 * expects in mid-grey.
+ 		 */
+ 		const double black = context.activeState.blc.level;
+-		const double mean = std::max((meanY - black) / (255.0 - black), 1e-3);
++		const double mean = std::max((meanY - black) / (kYMax - black), 1e-3);
+ 		const double stops = std::log2(meanTarget / mean);
+ 
+ 		error = stops;
+@@ -362,7 +367,7 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 		const double black = context.activeState.blc.level;
+ 		const double targetY = black +
+ 				       (exposureOptimal_ - 0.5) / kExposureBinsCount *
+-					       (255.0 - black);
++					       (kYMax - black);
+ 		const double num = std::max(targetY - black, 1.0);
+ 		const double den = std::max(meanY - black, 1.0);
+ 
+@@ -471,7 +476,7 @@ void Agc::process(IPAContext &context,
+ 	 */
+ 	const auto &histogram = stats->yHistogram;
+ 	const unsigned int blackLevelHistIdx =
+-		context.activeState.blc.level / (256 / SwIspStats::kYHistogramSize);
++		context.activeState.blc.level / kYBinWidth;
+ 	const unsigned int histogramSize =
+ 		SwIspStats::kYHistogramSize - blackLevelHistIdx;
+ 	const unsigned int yHistValsPerBin = histogramSize / kExposureBinsCount;
+@@ -506,7 +511,7 @@ void Agc::process(IPAContext &context,
+ 	 * are too blunt for that: they saturate, so a completely blown frame
+ 	 * and a mildly bright one ask for corrections of a similar size.
+ 	 */
+-	constexpr unsigned int kBinWidth = 256 / SwIspStats::kYHistogramSize;
++	constexpr unsigned int kBinWidth = kYBinWidth;
+ 	uint64_t ySum = 0;
+ 	uint64_t yCount = 0;
+ 	for (unsigned int i = 0; i < SwIspStats::kYHistogramSize; i++) {
+@@ -526,7 +531,7 @@ void Agc::process(IPAContext &context,
+ 	 */
+ 	auto &agc = context.activeState.agc;
+ 	const double black = context.activeState.blc.level;
+-	agc.lastMean = std::max((meanY - black) / (255.0 - black), 1e-3);
++	agc.lastMean = std::max((meanY - black) / (kYMax - black), 1e-3);
+ 	agc.lastProduct = frameContext.sensor.exposure * frameContext.sensor.gain;
+ 
+ 	updateExposure(context, frameContext, exposureMSV, meanY, target);

@@ -1,0 +1,248 @@
+From 66ba317d50228e2c2b635f8ff8c15caab22bc522 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 17:33:44 +0000
+Subject: [PATCH 60/76] ipa: soft: af: Trust phase detection, measure only what
+ is used
+
+Once the phase puts the lens within 2% of the code range of focus, hold
+focus there instead of finishing with a contrast probe: the phase is
+accurate enough, and the probe only made the lens breathe. The same goes
+for focus beyond the end of travel and for the jump limit. While the
+phase confirms focus in Idle, contrast does not arm a refocus on a
+sharpness drop either, as that is motion or exposure, not defocus.
+Contrast AF still searches whenever the phase is not confident.
+
+The Af algorithm now names the regions it uses, the central window, and
+the IPA measures only those.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/algorithms/af.cpp | 77 +++++++++++++++++++---------------
+ src/ipa/soft/algorithms/af.h   | 10 ++---
+ src/ipa/soft/ipa_context.h     |  2 +
+ src/ipa/soft/soft_simple.cpp   |  4 ++
+ 4 files changed, 54 insertions(+), 39 deletions(-)
+
+diff --git a/src/ipa/soft/algorithms/af.cpp b/src/ipa/soft/algorithms/af.cpp
+index 02c2bd613..b7437b01d 100644
+--- a/src/ipa/soft/algorithms/af.cpp
++++ b/src/ipa/soft/algorithms/af.cpp
+@@ -129,8 +129,8 @@ static constexpr unsigned int kMeasureFrames = 2;
+  * kPdafFarFrames readings with the scene held for kPdafStableFrames (the
+  * phase does not mistake motion for defocus the way contrast does, but a
+  * moving subject is not worth chasing). The jump repeats until the defocus
+- * is within kPdafNear, at most kPdafMaxJumps times, and a fine contrast
+- * probe finishes, as the calibration leaves a small residual.
++ * is within kPdafNear, at most kPdafMaxJumps times, and focus holds there:
++ * a contrast probe after it would only make the lens breathe.
+  */
+ static constexpr double kPdafFar = 0.07;
+ static constexpr double kPdafNear = 0.02;
+@@ -285,6 +285,16 @@ void Af::parsePdaf(IPAContext &context, const ValueNode &pdaf)
+ 		tuning.dcc.clear();
+ 	}
+ 
++	/* Only the central window is used, so only it is measured. */
++	for (unsigned int ry = 0; ry < tuning.dccGrid.height && !tuning.dcc.empty(); ry++) {
++		const double cy = (ry + 0.5) / tuning.dccGrid.height;
++		for (unsigned int rx = 0; rx < tuning.dccGrid.width; rx++) {
++			const double cx = (rx + 0.5) / tuning.dccGrid.width;
++			tuning.regions.push_back(cx >= kPdafWindowStart && cx <= kPdafWindowEnd &&
++						 cy >= kPdafWindowStart && cy <= kPdafWindowEnd);
++		}
++	}
++
+ 	if (!tuning.dcc.empty())
+ 		LOG(IPASoftAutoFocus, Info)
+ 			<< "Phase detection calibration: DCC " << tuning.dccGrid
+@@ -629,30 +639,19 @@ std::optional<double> Af::pdafDefocus(const IPAContext &context)
+ 	const IPAPdafTuning &tuning = context.pdafTuning;
+ 
+ 	if (!pdaf.valid || tuning.dcc.empty() || pdaf.grid != tuning.dccGrid ||
+-	    pdaf.regions.size() != tuning.dcc.size() || !pdaf.pitch)
++	    pdaf.regions.size() != tuning.dcc.size() ||
++	    tuning.regions.size() != tuning.dcc.size() || !pdaf.pitch)
+ 		return {};
+ 
+-	const Size &grid = pdaf.grid;
+ 	double sum = 0.0, weight = 0.0;
+ 
+-	for (unsigned int ry = 0; ry < grid.height; ry++) {
+-		double cy = (ry + 0.5) / grid.height;
+-		if (cy < kPdafWindowStart || cy > kPdafWindowEnd)
++	for (unsigned int i = 0; i < pdaf.regions.size(); i++) {
++		const ipa::PdafData &d = pdaf.regions[i];
++		if (!tuning.regions[i] || d.conf < pdafMinConf_)
+ 			continue;
+ 
+-		for (unsigned int rx = 0; rx < grid.width; rx++) {
+-			double cx = (rx + 0.5) / grid.width;
+-			if (cx < kPdafWindowStart || cx > kPdafWindowEnd)
+-				continue;
+-
+-			const unsigned int i = ry * grid.width + rx;
+-			const ipa::PdafData &d = pdaf.regions[i];
+-			if (d.conf < pdafMinConf_)
+-				continue;
+-
+-			sum += (d.phase * pdaf.pitch + pdafOffset_) * tuning.dcc[i] * d.conf;
+-			weight += d.conf;
+-		}
++		sum += (d.phase * pdaf.pitch + pdafOffset_) * tuning.dcc[i] * d.conf;
++		weight += d.conf;
+ 	}
+ 
+ 	if (weight <= 0.0)
+@@ -661,21 +660,18 @@ std::optional<double> Af::pdafDefocus(const IPAContext &context)
+ 	return sum / weight;
+ }
+ 
+-void Af::pdafJump(IPAContext &context, double defocus)
++void Af::pdafJump(IPAContext &context, double defocus, double sharp)
+ {
+ 	const double pos = context.activeState.knobs.focus_pos.value_or(dioptresDef_);
+ 	const double code = lensCode(pos) - defocus;
+ 	const double target = inverseMap_.eval(inverseMap_.domain().clamp(code));
+ 
+-	/*
+-	 * Focus beyond the end of travel: the lens is as close as it gets,
+-	 * let contrast settle it there.
+-	 */
++	/* Focus beyond the end of travel: the lens is as close as it gets. */
+ 	const double clamped = std::clamp(target, dioptresMin_, dioptresMax_);
+ 	if (std::abs(clamped - pos) < (dioptresMax_ - dioptresMin_) * kRefineStepMin) {
+ 		LOG(IPASoftAutoFocus, Debug)
+ 			<< "Phase detection: focus beyond the end of travel";
+-		startProbe(context, kProbeStepFine);
++		settle(context, pos, sharp);
+ 		return;
+ 	}
+ 
+@@ -693,7 +689,7 @@ void Af::pdafJump(IPAContext &context, double defocus)
+  * Act on a new phase detection result, if there is one. Return true when it
+  * decided the frame, false to let contrast AF handle it.
+  */
+-bool Af::pdafStep(IPAContext &context)
++bool Af::pdafStep(IPAContext &context, double sharp)
+ {
+ 	const auto &pdaf = context.activeState.pdaf;
+ 
+@@ -706,14 +702,16 @@ bool Af::pdafStep(IPAContext &context)
+ 	std::optional<double> defocus = pdafDefocus(context);
+ 
+ 	if (state_ == State::Pdaf) {
++		const double pos = context.activeState.knobs.focus_pos.value();
++
+ 		if (!defocus) {
+ 			/* The phase went unreliable: fall back to contrast. */
+ 			startScan(context);
+ 		} else if (std::abs(*defocus) <= codes * kPdafNear ||
+ 			   pdafJumps_ >= kPdafMaxJumps) {
+-			startProbe(context, kProbeStepFine);
++			settle(context, pos, sharp);
+ 		} else {
+-			pdafJump(context, *defocus);
++			pdafJump(context, *defocus, sharp);
+ 		}
+ 		return true;
+ 	}
+@@ -736,7 +734,18 @@ bool Af::pdafStep(IPAContext &context)
+ 				<< " codes out of focus, jumping";
+ 			pdafJumps_ = 0;
+ 			armed_ = false;
+-			pdafJump(context, *defocus);
++			pdafJump(context, *defocus, sharp);
++			return true;
++		}
++
++		/*
++		 * The phase vouches for focus: a sharpness drop is motion or
++		 * an exposure change, not defocus, so contrast must not start
++		 * a search for it.
++		 */
++		if (!far) {
++			armed_ = false;
++			lostFrames_ = 0;
+ 			return true;
+ 		}
+ 		return false;
+@@ -748,7 +757,7 @@ bool Af::pdafStep(IPAContext &context)
+ 		if (!far)
+ 			return false;
+ 		pdafJumps_ = 0;
+-		pdafJump(context, *defocus);
++		pdafJump(context, *defocus, sharp);
+ 		return true;
+ 
+ 	default:
+@@ -813,11 +822,11 @@ void Af::step(IPAContext &context, const SwIspStats *stats)
+ 		return;
+ 	}
+ 
+-	if (pdafStep(context))
+-		return;
+-
+ 	const double s = static_cast<double>(stats->sharpness);
+ 
++	if (pdafStep(context, s))
++		return;
++
+ 	if (state_ == State::Idle) {
+ 		/* The first frames after configure(): acquire focus. */
+ 		if (reference_ == 0.0) {
+diff --git a/src/ipa/soft/algorithms/af.h b/src/ipa/soft/algorithms/af.h
+index 8e7cad7f5..92298bc10 100644
+--- a/src/ipa/soft/algorithms/af.h
++++ b/src/ipa/soft/algorithms/af.h
+@@ -48,9 +48,9 @@ private:
+ 	 * Scan:   a fast coarse scan across the range, for first focus,
+ 	 *         AfTrigger, and when a probe finds the sharpness curve flat
+ 	 *         (far out of focus); it hands the best point to Refine.
+-	 * Pdaf:   jump to where phase detection puts focus, then check the
+-	 *         phase again; once close, a fine Probe finishes with
+-	 *         contrast. Used whenever the phase is confident.
++	 * Pdaf:   jump to where phase detection puts focus, and again until
++	 *         the phase says it is there. Used whenever the phase is
++	 *         confident; contrast only searches when it is not.
+ 	 */
+ 	enum class State { Idle, Probe, Climb, Refine, Scan, Pdaf };
+ 
+@@ -68,8 +68,8 @@ private:
+ 	void measured(IPAContext &context, double sharp);
+ 	void settle(IPAContext &context, double dioptres, double sharp);
+ 	std::optional<double> pdafDefocus(const IPAContext &context);
+-	bool pdafStep(IPAContext &context);
+-	void pdafJump(IPAContext &context, double defocus);
++	bool pdafStep(IPAContext &context, double sharp);
++	void pdafJump(IPAContext &context, double defocus, double sharp);
+ 
+ 	State state_ = State::Idle;
+ 
+diff --git a/src/ipa/soft/ipa_context.h b/src/ipa/soft/ipa_context.h
+index 9c17435aa..7b0ab88df 100644
+--- a/src/ipa/soft/ipa_context.h
++++ b/src/ipa/soft/ipa_context.h
+@@ -137,6 +137,8 @@ struct IPAPdafTuning {
+ 	 */
+ 	Size dccGrid;
+ 	std::vector<double> dcc;
++	/* The regions the algorithms use, the only ones measured */
++	std::vector<bool> regions;
+ };
+ 
+ struct IPAContext {
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index 6605c1f00..42010b1dc 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -484,6 +484,10 @@ int IPASoftSimple::mapPdafBuffers(const std::vector<IPABuffer> &buffers,
+ 	    pdafPhase_->setShading(tuning.gainGrid, tuning.gainLeft, tuning.gainRight))
+ 		LOG(IPASoft, Warning) << "Ignoring the PDAF shading gains";
+ 
++	/* Measure only the regions the algorithms use, it is costly */
++	if (!tuning.regions.empty())
++		pdafPhase_->setActiveRegions(tuning.regions);
++
+ 	LOG(IPASoft, Info)
+ 		<< "Phase detection on " << buffers.size() << " buffers, "
+ 		<< grid << " regions" << (tuning.gainLeft.empty() ? "" : ", shading corrected");

@@ -1,0 +1,720 @@
+From 6cb6695dcb9f24dcd4905348708097142ca273de Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 10:54:57 +0000
+Subject: [PATCH 47/76] ipa: libipa: Add a PDAF phase estimator for raw PD
+ streams
+
+Many phase detection autofocus sensors, Samsung and OmniVision ones in
+particular, do not compute the phase difference on chip: they send the
+values of their phase detection (PD) pixels, as a CSI-2 stream of its
+own next to the image, and leave the computation to the host. With the
+V4L2 metadata series such a stream reaches user space as a line based
+metadata buffer, whose layout the sensor documents.
+
+Add PdafLayout, which describes such a stream (the grid of PD blocks,
+and which PD pixel of a block each line holds, left or right pupil
+half), and PdafPhase, which computes the phase difference in a grid of
+regions: the left and right samples of each block row are high-passed
+and the displacement that maximises their normalised cross-correlation
+over the region is found, to a fraction of a sample. The output is a
+phase and a confidence per region, the same shape of data the
+Raspberry Pi IPA gets from sensors that compute the phase on chip, so
+an autofocus algorithm can use either.
+
+The layout of a given sensor belongs in its camera sensor helper; the
+factor from phase to lens movement is a property of the module and
+belongs in the tuning file.
+
+The test checks the estimate on synthetic PD buffers with known
+displacements. On buffers captured from a Samsung S5KJNS at lens
+positions 0 to 700 of 1023 it gives a phase that moves linearly with
+the lens position and crosses zero where the image is sharpest.
+
+Signed-off-by: William Floyd <git@notmy.space>
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ src/ipa/libipa/meson.build  |   2 +
+ src/ipa/libipa/pdaf.cpp     | 387 ++++++++++++++++++++++++++++++++++++
+ src/ipa/libipa/pdaf.h       |  80 ++++++++
+ test/ipa/libipa/meson.build |   1 +
+ test/ipa/libipa/pdaf.cpp    | 158 +++++++++++++++
+ 5 files changed, 628 insertions(+)
+ create mode 100644 src/ipa/libipa/pdaf.cpp
+ create mode 100644 src/ipa/libipa/pdaf.h
+ create mode 100644 test/ipa/libipa/pdaf.cpp
+
+diff --git a/src/ipa/libipa/meson.build b/src/ipa/libipa/meson.build
+index 963c5ee73..d15488535 100644
+--- a/src/ipa/libipa/meson.build
++++ b/src/ipa/libipa/meson.build
+@@ -16,6 +16,7 @@ libipa_headers = files([
+     'lsc_polynomial.h',
+     'lux.h',
+     'module.h',
++    'pdaf.h',
+     'pwl.h',
+     'quantized.h',
+     'v4l2_params.h',
+@@ -37,6 +38,7 @@ libipa_sources = files([
+     'lsc_polynomial.cpp',
+     'lux.cpp',
+     'module.cpp',
++    'pdaf.cpp',
+     'pwl.cpp',
+     'quantized.cpp',
+     'v4l2_params.cpp',
+diff --git a/src/ipa/libipa/pdaf.cpp b/src/ipa/libipa/pdaf.cpp
+new file mode 100644
+index 000000000..e9522fa3f
+--- /dev/null
++++ b/src/ipa/libipa/pdaf.cpp
+@@ -0,0 +1,387 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Phase detection autofocus: phase from a sensor's raw PD pixel stream
++ */
++
++#include "pdaf.h"
++
++#include <algorithm>
++#include <cmath>
++#include <errno.h>
++
++#include <libcamera/base/log.h>
++
++/**
++ * \file pdaf.h
++ * \brief Phase detection autofocus helpers
++ *
++ * Sensors with phase detection (PD) pixels either compute the phase
++ * difference on chip and report it (the Sony IMX708 does, in its embedded
++ * data), or send the raw values of their PD pixels and leave the computation
++ * to the host (Samsung and OmniVision sensors commonly do, as a separate
++ * CSI-2 stream). This file handles the second kind: it describes where the
++ * samples of such a stream come from (PdafLayout, provided by the sensor
++ * helper) and computes the phase difference per region of the image
++ * (PdafPhase), as a grid of phase and confidence values that an autofocus
++ * algorithm can use the same way whatever the sensor.
++ */
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(Pdaf)
++
++namespace ipa {
++
++/**
++ * \struct PdafLayout
++ * \brief Layout of a sensor's raw phase detection data stream
++ *
++ * The PD pixels of a sensor sit on a grid of blocks. The stream sends one
++ * sample per block per line: a line holds the same PD pixel of every block
++ * in a block row, and each block row takes lines.size() lines, one for each
++ * PD pixel of a block, in the order given by \a lines.
++ *
++ * \var PdafLayout::blocks
++ * \brief Number of PD blocks across and down, the stream's width being
++ * blocks.width samples
++ *
++ * \var PdafLayout::blockSize
++ * \brief Size of a PD block in image pixels (the horizontal pitch of the
++ * samples of a line)
++ *
++ * \var PdafLayout::offset
++ * \brief Image position of the top left pixel of the first block
++ *
++ * \var PdafLayout::lines
++ * \brief What each line of a block row holds, in stream order
++ *
++ * \var PdafLayout::bitDepth
++ * \brief Bits per sample
++ */
++
++/**
++ * \enum PdafLayout::Side
++ * \brief The half of the lens pupil a PD pixel sees
++ * \var PdafLayout::Side::Left
++ * \brief The PD pixel is shielded to see the left half of the pupil
++ * \var PdafLayout::Side::Right
++ * \brief The PD pixel is shielded to see the right half of the pupil
++ */
++
++/**
++ * \struct PdafLayout::Line
++ * \brief The PD pixel a line of a block row holds
++ * \var PdafLayout::Line::side
++ * \brief The pupil half the pixel sees
++ * \var PdafLayout::Line::pair
++ * \brief The L/R pair of the block the pixel belongs to
++ * \var PdafLayout::Line::position
++ * \brief Position of the pixel inside its block, in image pixels
++ */
++
++/**
++ * \brief Tell whether the layout describes a usable stream
++ * \return True if it has blocks and both left and right lines
++ */
++bool PdafLayout::isValid() const
++{
++	bool left = false, right = false;
++
++	for (const Line &line : lines) {
++		left |= line.side == Side::Left;
++		right |= line.side == Side::Right;
++	}
++
++	return !blocks.isNull() && left && right && bitDepth >= 8 && bitDepth <= 16;
++}
++
++/**
++ * \brief Compute the size of the PD stream in samples
++ * \return The width and height of the stream
++ */
++Size PdafLayout::bufferSize() const
++{
++	return { blocks.width, blocks.height * static_cast<unsigned int>(lines.size()) };
++}
++
++/**
++ * \struct PdafData
++ * \brief The phase difference measured in one region
++ *
++ * \var PdafData::phase
++ * \brief Displacement of the left pupil image relative to the right one, in
++ * PD samples (block widths). It is proportional to the defocus of the
++ * region and changes sign across focus; the factor from phase to lens
++ * movement is a property of the module, calibrated in the tuning file.
++ *
++ * \var PdafData::conf
++ * \brief Confidence in the phase, from 0 (unusable: no texture, or no clear
++ * match) upwards, growing with the texture in the region and the quality of
++ * the match
++ */
++
++/**
++ * \class PdafPhase
++ * \brief Compute the phase difference from a raw PD stream, per region
++ *
++ * The image is divided in a grid of regions. In each block row of a region
++ * the left and right samples (the pairs of a block averaged) form two
++ * signals, which see the scene through opposite halves of the lens pupil
++ * and are displaced horizontally from one another by an amount proportional
++ * to the defocus. After a high-pass filter, the displacement is the shift
++ * that maximises their normalised cross-correlation, summed over the block
++ * rows of the region, refined to a fraction of a sample.
++ */
++
++/**
++ * \brief Construct a phase estimator
++ * \param[in] layout The layout of the PD stream
++ * \param[in] grid The number of regions across and down
++ * \param[in] maxShift The largest displacement searched, in samples
++ */
++PdafPhase::PdafPhase(const PdafLayout &layout, const Size &grid,
++		     unsigned int maxShift)
++	: layout_(layout), grid_(grid), maxShift_(maxShift)
++{
++	regions_.resize(grid_.width * grid_.height, { 0.0, 0.0 });
++}
++
++/**
++ * \brief Unpack one line of CSI-2 packed samples
++ * \param[in] line The packed line
++ * \param[in] bitDepth Bits per sample (8, 10, 12 or 14)
++ * \param[out] samples The unpacked samples, as many as it holds
++ *
++ * CSI-2 packs 10, 12 and 14 bit samples by putting the 8 most significant
++ * bits of each in a byte of their own, followed by the least significant
++ * bits of a group of samples (4, 2 and 4 samples respectively).
++ */
++void PdafPhase::unpackCsi2(Span<const uint8_t> line, unsigned int bitDepth,
++			   Span<uint16_t> samples)
++{
++	size_t n = samples.size();
++
++	switch (bitDepth) {
++	case 8:
++		for (size_t i = 0; i < n && i < line.size(); i++)
++			samples[i] = line[i];
++		break;
++	case 10:
++		for (size_t i = 0; i < n; i++) {
++			size_t g = (i / 4) * 5;
++			unsigned int k = i % 4;
++			if (g + 4 >= line.size())
++				break;
++			samples[i] = (line[g + k] << 2) | ((line[g + 4] >> (2 * k)) & 3);
++		}
++		break;
++	case 12:
++		for (size_t i = 0; i < n; i++) {
++			size_t g = (i / 2) * 3;
++			unsigned int k = i % 2;
++			if (g + 2 >= line.size())
++				break;
++			samples[i] = (line[g + k] << 4) | ((line[g + 2] >> (4 * k)) & 15);
++		}
++		break;
++	case 14:
++		for (size_t i = 0; i < n; i++) {
++			size_t g = (i / 4) * 7;
++			unsigned int k = i % 4;
++			if (g + 6 >= line.size())
++				break;
++			uint32_t lsb = line[g + 4] | (line[g + 5] << 8) | (line[g + 6] << 16);
++			samples[i] = (line[g + k] << 6) | ((lsb >> (6 * k)) & 63);
++		}
++		break;
++	default:
++		break;
++	}
++}
++
++/**
++ * \brief Compute the phase in every region from a CSI-2 packed PD buffer
++ * \param[in] buffer The PD buffer as captured (line based, CSI-2 packed)
++ * \param[in] bytesPerLine The buffer's line stride
++ * \return 0 on success, or -EINVAL if the buffer is too small for the layout
++ */
++int PdafPhase::process(Span<const uint8_t> buffer, unsigned int bytesPerLine)
++{
++	const Size size = layout_.bufferSize();
++
++	if (!layout_.isValid() || bytesPerLine * size.height > buffer.size())
++		return -EINVAL;
++
++	unpacked_.resize(size.width * size.height);
++	for (unsigned int y = 0; y < size.height; y++)
++		unpackCsi2(buffer.subspan(y * bytesPerLine, bytesPerLine),
++			   layout_.bitDepth,
++			   Span<uint16_t>(unpacked_).subspan(y * size.width, size.width));
++
++	return process(unpacked_, size.width);
++}
++
++/**
++ * \brief Compute the phase in every region from unpacked PD samples
++ * \param[in] samples The samples, one per element
++ * \param[in] stride The number of elements from one line to the next
++ * \return 0 on success, or -EINVAL if there are too few samples
++ */
++int PdafPhase::process(Span<const uint16_t> samples, unsigned int stride)
++{
++	const Size size = layout_.bufferSize();
++
++	if (!layout_.isValid() || grid_.isNull() || stride < size.width ||
++	    samples.size() < stride * (size.height - 1) + size.width)
++		return -EINVAL;
++
++	buildSignals(samples, stride);
++
++	for (unsigned int ry = 0; ry < grid_.height; ry++)
++		for (unsigned int rx = 0; rx < grid_.width; rx++)
++			regions_[ry * grid_.width + rx] = regionPhase(rx, ry);
++
++	return 0;
++}
++
++void PdafPhase::buildSignals(Span<const uint16_t> samples, unsigned int stride)
++{
++	const unsigned int width = layout_.blocks.width;
++	const unsigned int rows = layout_.blocks.height;
++	const unsigned int nlines = layout_.lines.size();
++	unsigned int nleft = 0, nright = 0;
++
++	for (const PdafLayout::Line &line : layout_.lines)
++		(line.side == PdafLayout::Side::Left ? nleft : nright)++;
++
++	left_.assign(width * rows, 0.0f);
++	right_.assign(width * rows, 0.0f);
++
++	for (unsigned int r = 0; r < rows; r++) {
++		float *l = &left_[r * width];
++		float *rt = &right_[r * width];
++
++		for (unsigned int j = 0; j < nlines; j++) {
++			const uint16_t *s = &samples[(r * nlines + j) * stride];
++			float *dst = layout_.lines[j].side == PdafLayout::Side::Left ? l : rt;
++
++			for (unsigned int x = 0; x < width; x++)
++				dst[x] += s[x];
++		}
++
++		for (unsigned int x = 0; x < width; x++) {
++			l[x] /= nleft;
++			rt[x] /= nright;
++		}
++
++		/*
++		 * High-pass both signals, subtracting a 9 sample running mean:
++		 * the correlation must follow edges and texture, not the
++		 * brightness difference of the two pupil halves.
++		 */
++		for (float *sig : { l, rt }) {
++			std::vector<float> in(sig, sig + width);
++			for (unsigned int x = 0; x < width; x++) {
++				unsigned int a = x >= 4 ? x - 4 : 0;
++				unsigned int b = std::min(x + 4, width - 1);
++				float sum = 0.0f;
++				for (unsigned int k = a; k <= b; k++)
++					sum += in[k];
++				sig[x] = in[x] - sum / (b - a + 1);
++			}
++		}
++	}
++}
++
++PdafData PdafPhase::regionPhase(unsigned int rx, unsigned int ry) const
++{
++	const unsigned int width = layout_.blocks.width;
++	const unsigned int rows = layout_.blocks.height;
++	const int M = maxShift_;
++
++	unsigned int x0 = rx * width / grid_.width;
++	unsigned int x1 = (rx + 1) * width / grid_.width;
++	unsigned int y0 = ry * rows / grid_.height;
++	unsigned int y1 = (ry + 1) * rows / grid_.height;
++
++	/* Keep the shifted window inside the stream, and away from its edges */
++	int xs = std::max<int>(x0, M + 4);
++	int xe = std::min<int>(x1, width - M - 4);
++	if (xe - xs < 8)
++		return { 0.0, 0.0 };
++
++	std::vector<double> num(2 * M + 1, 0.0), ll(2 * M + 1, 0.0);
++	double rr = 0.0;
++	unsigned int count = 0;
++
++	for (unsigned int y = y0; y < y1; y++) {
++		const float *l = &left_[y * width];
++		const float *r = &right_[y * width];
++
++		for (int x = xs; x < xe; x++) {
++			rr += r[x] * r[x];
++			for (int s = -M; s <= M; s++) {
++				num[s + M] += l[x + s] * r[x];
++				ll[s + M] += l[x + s] * l[x + s];
++			}
++		}
++		count += xe - xs;
++	}
++
++	if (!count || rr <= 0.0)
++		return { 0.0, 0.0 };
++
++	std::vector<double> ncc(2 * M + 1);
++	for (int i = 0; i <= 2 * M; i++)
++		ncc[i] = ll[i] > 0.0 ? num[i] / std::sqrt(ll[i] * rr) : 0.0;
++
++	int best = std::max_element(ncc.begin(), ncc.end()) - ncc.begin();
++	if (best == 0 || best == 2 * M || ncc[best] < 0.5)
++		return { 0.0, 0.0 };
++
++	double y_1 = ncc[best - 1], y0v = ncc[best], y1v = ncc[best + 1];
++	double den = y_1 - 2 * y0v + y1v;
++	double frac = den < 0.0 ? 0.5 * (y_1 - y1v) / den : 0.0;
++
++	/*
++	 * Confidence: the quality of the match, times how much texture there
++	 * is compared to the noise of a sample (about one least significant
++	 * bit of a 10 bit sample).
++	 */
++	double noise = std::ldexp(1.0, static_cast<int>(layout_.bitDepth) - 10);
++	double energy = rr / count;
++	double conf = y0v * energy / (energy + 4.0 * noise * noise);
++
++	return { best - M + frac, conf };
++}
++
++/**
++ * \brief Combine the regions into one phase
++ * \param[in] minConf The confidence below which a region is ignored
++ * \return The confidence-weighted mean phase, and the mean confidence of the
++ * regions used, or a confidence of 0 if none was usable
++ */
++PdafData PdafPhase::combined(double minConf) const
++{
++	double sumPc = 0.0, sumC = 0.0;
++	unsigned int n = 0;
++
++	for (const PdafData &d : regions_) {
++		if (d.conf <= minConf)
++			continue;
++		sumPc += d.phase * d.conf;
++		sumC += d.conf;
++		n++;
++	}
++
++	if (!n || sumC <= 0.0)
++		return { 0.0, 0.0 };
++
++	return { sumPc / sumC, sumC / n };
++}
++
++} /* namespace ipa */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/libipa/pdaf.h b/src/ipa/libipa/pdaf.h
+new file mode 100644
+index 000000000..6b7aef240
+--- /dev/null
++++ b/src/ipa/libipa/pdaf.h
+@@ -0,0 +1,80 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Phase detection autofocus: phase from a sensor's raw PD pixel stream
++ */
++
++#pragma once
++
++#include <stdint.h>
++#include <vector>
++
++#include <libcamera/base/span.h>
++
++#include <libcamera/geometry.h>
++
++namespace libcamera {
++
++namespace ipa {
++
++struct PdafLayout {
++	enum class Side {
++		Left,
++		Right,
++	};
++
++	struct Line {
++		Side side;
++		unsigned int pair;
++		Point position;
++	};
++
++	Size blocks;
++	Size blockSize;
++	Point offset;
++	std::vector<Line> lines;
++	unsigned int bitDepth;
++
++	bool isValid() const;
++	Size bufferSize() const;
++};
++
++struct PdafData {
++	double phase;
++	double conf;
++};
++
++class PdafPhase
++{
++public:
++	PdafPhase(const PdafLayout &layout, const Size &grid,
++		  unsigned int maxShift = 6);
++
++	int process(Span<const uint8_t> buffer, unsigned int bytesPerLine);
++	int process(Span<const uint16_t> samples, unsigned int stride);
++
++	const Size &grid() const { return grid_; }
++	const std::vector<PdafData> &regions() const { return regions_; }
++	PdafData combined(double minConf = 0.0) const;
++
++	static void unpackCsi2(Span<const uint8_t> line, unsigned int bitDepth,
++			       Span<uint16_t> samples);
++
++private:
++	void buildSignals(Span<const uint16_t> samples, unsigned int stride);
++	PdafData regionPhase(unsigned int rx, unsigned int ry) const;
++
++	PdafLayout layout_;
++	Size grid_;
++	unsigned int maxShift_;
++
++	std::vector<uint16_t> unpacked_;
++	std::vector<float> left_;
++	std::vector<float> right_;
++	std::vector<PdafData> regions_;
++};
++
++} /* namespace ipa */
++
++} /* namespace libcamera */
+diff --git a/test/ipa/libipa/meson.build b/test/ipa/libipa/meson.build
+index c3e255871..1990f4ef1 100644
+--- a/test/ipa/libipa/meson.build
++++ b/test/ipa/libipa/meson.build
+@@ -4,6 +4,7 @@ libipa_test = [
+     {'name': 'fixedpoint', 'sources': ['fixedpoint.cpp']},
+     {'name': 'histogram', 'sources': ['histogram.cpp']},
+     {'name': 'interpolator', 'sources': ['interpolator.cpp']},
++    {'name': 'pdaf', 'sources': ['pdaf.cpp']},
+     {'name': 'pwl', 'sources': ['pwl.cpp'] },
+     {'name': 'quantized', 'sources': ['quantized.cpp']},
+ ]
+diff --git a/test/ipa/libipa/pdaf.cpp b/test/ipa/libipa/pdaf.cpp
+new file mode 100644
+index 000000000..817b65c9a
+--- /dev/null
++++ b/test/ipa/libipa/pdaf.cpp
+@@ -0,0 +1,158 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * PDAF phase estimation tests
++ */
++
++#include "../src/ipa/libipa/pdaf.h"
++
++#include <cmath>
++#include <iostream>
++#include <random>
++#include <stdint.h>
++#include <vector>
++
++#include "test.h"
++
++using namespace std;
++using namespace libcamera;
++using namespace ipa;
++
++namespace {
++
++/* The S5KJN1 layout: 8x8 blocks, four R/L pairs, R then L in the stream */
++PdafLayout testLayout()
++{
++	using Side = PdafLayout::Side;
++
++	return {
++		.blocks = { 508, 382 },
++		.blockSize = { 8, 8 },
++		.offset = { 8, 8 },
++		.lines = {
++			{ Side::Right, 0, { 2, 0 } }, { Side::Left, 0, { 3, 0 } },
++			{ Side::Right, 1, { 0, 3 } }, { Side::Left, 1, { 1, 3 } },
++			{ Side::Right, 2, { 4, 4 } }, { Side::Left, 2, { 5, 4 } },
++			{ Side::Right, 3, { 6, 7 } }, { Side::Left, 3, { 7, 7 } },
++		},
++		.bitDepth = 10,
++	};
++}
++
++/*
++ * A scene of random vertical texture, seen by the left pixels displaced by
++ * +phase/2 samples and by the right ones by -phase/2, packed as the sensor
++ * sends it (CSI-2 RAW10, 640 bytes per line).
++ */
++vector<uint8_t> makeBuffer(const PdafLayout &layout, double phase, unsigned int bpl)
++{
++	const Size size = layout.bufferSize();
++	mt19937 rng(1234);
++	uniform_real_distribution<double> u(0.0, 1.0);
++
++	/* Smooth random texture, sampled finely (32 steps per sample) */
++	const unsigned int fine = 32;
++	vector<double> tex((size.width + 64) * fine);
++	double v = 0.5;
++	for (double &t : tex) {
++		v = 0.995 * v + 0.005 * u(rng);
++		t = v;
++	}
++	/* Add some edges, at random positions and of random widths */
++	for (unsigned int i = 0; i + 16 * fine < tex.size();
++	     i += static_cast<unsigned int>((20 + 40 * u(rng)) * fine)) {
++		unsigned int w = static_cast<unsigned int>((2 + 10 * u(rng)) * fine);
++		for (unsigned int k = i; k < i + w; k++)
++			tex[k] += 0.3;
++	}
++
++	/* A pixel integrates the light over its width */
++	auto sample = [&](double x) {
++		unsigned int i = static_cast<unsigned int>((x + 32 - 0.5) * fine);
++		double sum = 0.0;
++		for (unsigned int k = 0; k < fine; k++)
++			sum += tex[i + k];
++		return sum / fine;
++	};
++
++	vector<uint8_t> buf(bpl * size.height, 0);
++	vector<uint16_t> line(size.width);
++
++	for (unsigned int y = 0; y < size.height; y++) {
++		const PdafLayout::Line &l = layout.lines[y % layout.lines.size()];
++		double d = l.side == PdafLayout::Side::Left ? -phase / 2 : phase / 2;
++
++		for (unsigned int x = 0; x < size.width; x++)
++			line[x] = static_cast<uint16_t>(64 + 400 * sample(x + d) +
++							 (u(rng) - 0.5) * 2);
++
++		uint8_t *dst = &buf[y * bpl];
++		for (unsigned int x = 0; x + 3 < size.width; x += 4) {
++			uint8_t lsb = 0;
++			for (unsigned int k = 0; k < 4; k++) {
++				dst[x / 4 * 5 + k] = line[x + k] >> 2;
++				lsb |= (line[x + k] & 3) << (2 * k);
++			}
++			dst[x / 4 * 5 + 4] = lsb;
++		}
++	}
++
++	return buf;
++}
++
++} /* namespace */
++
++class PdafTest : public Test
++{
++protected:
++	int run()
++	{
++		const PdafLayout layout = testLayout();
++		const unsigned int bpl = 640;
++
++		if (!layout.isValid() || layout.bufferSize() != Size(508, 3056)) {
++			cout << "Bad layout" << endl;
++			return TestFail;
++		}
++
++		for (double phase : { -3.0, -1.25, 0.0, 0.4, 2.5 }) {
++			vector<uint8_t> buf = makeBuffer(layout, phase, bpl);
++			PdafPhase pdaf(layout, { 4, 3 });
++
++			if (pdaf.process(buf, bpl)) {
++				cout << "process() failed" << endl;
++				return TestFail;
++			}
++
++			PdafData all = pdaf.combined();
++			cout << "phase " << phase << ": measured " << all.phase
++			     << " conf " << all.conf << endl;
++
++			if (all.conf <= 0.0 || std::abs(all.phase - phase) > 0.15) {
++				cout << "Phase " << phase << " measured as "
++				     << all.phase << endl;
++				return TestFail;
++			}
++		}
++
++		/* A flat buffer has no texture, hence no confidence */
++		vector<uint8_t> flat(bpl * 3056, 0x00);
++		PdafPhase pdaf(layout, { 4, 3 });
++		pdaf.process(flat, bpl);
++		if (pdaf.combined().conf != 0.0) {
++			cout << "Confidence on a flat buffer" << endl;
++			return TestFail;
++		}
++
++		/* A buffer too small for the layout is refused */
++		if (pdaf.process(Span<const uint8_t>(flat).first(1000), bpl) != -EINVAL) {
++			cout << "Short buffer accepted" << endl;
++			return TestFail;
++		}
++
++		return TestPass;
++	}
++};
++
++TEST_REGISTER(PdafTest)

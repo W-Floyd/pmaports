@@ -1,0 +1,25 @@
+From bdcb6fd2ef6beaedb073ef504dab8b9e0cda01a1 Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Tue, 22 Sep 2026 12:10:24 +0530
+Subject: [PATCH 43/76] libcamera: camera_sensor_raw: Fix the check for
+ METADATA formats
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 644929219c62e7a6e4103d1b98f3f0373e5c2d90)
+---
+ src/libcamera/sensor/camera_sensor_raw.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index 8530eeeee..4ba9a65d1 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -326,7 +326,7 @@ std::optional<int> CameraSensorRaw::init()
+ 				continue;
+ 
+ 			if (MediaBusFormatInfo::info(formats.cbegin()->first).type !=
+-			    MediaBusFormatInfo::Type::EmbeddedData)
++			    MediaBusFormatInfo::Type::Metadata)
+ 				continue;
+ 
+ 			if (streams_.edata) {

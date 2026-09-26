@@ -1,0 +1,463 @@
+From acff3860121e3041f0819533c46897e86aa263d2 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 16:56:34 +0000
+Subject: [PATCH 54/76] ipa: soft: Measure the phase from the sensor's phase
+ detection stream
+
+Sensors that send their PD pixels as a metadata stream beside the image
+need the host to compute the phase. Give the soft IPA the buffers of such
+a stream: mapPdafBuffers() shares them once, processPdaf() measures one
+with libipa's PdafPhase, on the layout the camera sensor helper provides,
+and pdafProcessed() hands it back. The result, a phase and confidence
+per region, is kept in the active state for the algorithms.
+
+The Af algorithm reads the module's calibration from a "pdaf" block in
+its tuning: shading gain maps per pupil side, applied before the phase is
+measured, and a defocus conversion map, whose grid the phase is measured
+on so that each region has its own coefficient. SoftwareIsp forwards the
+calls, identifying buffers by cookie.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/software_isp.h      |  7 ++
+ include/libcamera/ipa/soft.mojom              | 14 +++
+ src/ipa/soft/algorithms/af.cpp                | 61 ++++++++++++
+ src/ipa/soft/algorithms/af.h                  |  1 +
+ src/ipa/soft/ipa_context.h                    | 31 ++++++
+ src/ipa/soft/soft_simple.cpp                  | 96 +++++++++++++++++++
+ src/libcamera/software_isp/software_isp.cpp   | 58 +++++++++++
+ 7 files changed, 268 insertions(+)
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 90c7393f7..c9169c0a8 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -73,6 +73,11 @@ public:
+ 	void processStats(const uint32_t frame, const uint32_t bufferId,
+ 			  const ControlList &sensorControls);
+ 
++	int mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++			   const Size &size, unsigned int bytesPerLine);
++	void unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers);
++	void processPdaf(uint32_t frame, unsigned int bufferId);
++
+ 	int start();
+ 	void stop();
+ 
+@@ -87,6 +92,8 @@ public:
+ 	Signal<uint32_t, uint32_t> ispStatsReady;
+ 	Signal<uint32_t, const ControlList &> metadataReady;
+ 	Signal<const ControlList &, const ControlList &, const ControlList &> setSensorControls;
++	/* A PD buffer given to processPdaf() is free again (its cookie) */
++	Signal<unsigned int> pdafProcessed;
+ 
+ private:
+ 	void saveIspParams(uint32_t frame);
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index bd4bc42b1..481de8ee2 100644
+--- a/include/libcamera/ipa/soft.mojom
++++ b/include/libcamera/ipa/soft.mojom
+@@ -33,6 +33,19 @@ interface IPASoftInterface {
+ 	[async] processStats(uint32 frame,
+ 			     uint32 bufferId,
+ 			     libcamera.ControlList sensorControls);
++
++	/*
++	 * The sensor's phase detection stream, raw PD pixel samples laid out
++	 * as the camera sensor helper's PDAF layout describes, in line based
++	 * buffers of the given geometry. Buffers are mapped once, and each
++	 * processPdaf() is answered by pdafProcessed() once the buffer is no
++	 * longer in use.
++	 */
++	mapPdafBuffers(array<libcamera.IPABuffer> buffers,
++		       uint32 width, uint32 height, uint32 bytesPerLine)
++		=> (int32 ret);
++	unmapPdafBuffers(array<uint32> ids);
++	[async] processPdaf(uint32 frame, uint32 bufferId);
+ };
+ 
+ interface IPASoftEventInterface {
+@@ -41,4 +54,5 @@ interface IPASoftEventInterface {
+ 			  libcamera.ControlList irisControls);
+ 	paramsComputed(uint32 frame);
+ 	metadataReady(uint32 frame, libcamera.ControlList metadata);
++	pdafProcessed(uint32 bufferId);
+ };
+diff --git a/src/ipa/soft/algorithms/af.cpp b/src/ipa/soft/algorithms/af.cpp
+index 5ce90f0ce..47db656b5 100644
+--- a/src/ipa/soft/algorithms/af.cpp
++++ b/src/ipa/soft/algorithms/af.cpp
+@@ -180,6 +180,8 @@ int Af::init(IPAContext &context, const ValueNode &tuningData)
+ 		<< " dioptres (actuator codes " << lensCode(dioptresMin_)
+ 		<< ".." << lensCode(dioptresMax_) << "), default " << dioptresDef_;
+ 
++	parsePdaf(context, tuningData["pdaf"]);
++
+ 	context.ctrlMap[&controls::AfMode] =
+ 		ControlInfo(kAfModeValues,
+ 			    ControlValue(static_cast<int32_t>(controls::AfModeContinuous)));
+@@ -193,6 +195,65 @@ int Af::init(IPAContext &context, const ValueNode &tuningData)
+ 	return 0;
+ }
+ 
++/*
++ * The module's phase detection calibration, as vendor EEPROMs carry it:
++ *
++ *   pdaf:
++ *     gainMap:            # shading gain per pupil side, 1.0 = none
++ *       size: [ 17, 13 ]  # grid points, corner to corner of the image
++ *       left: [ ... ]     # pixels seeing the left pupil half
++ *       right: [ ... ]
++ *     dcc:                # defocus conversion per region
++ *       size: [ 8, 6 ]    # regions tiling the image
++ *       values: [ ... ]   # actuator codes per image pixel of phase
++ *
++ * Both parts are optional. Without dcc, phase detection is not used for
++ * focusing, as there is no way to turn a phase into a lens movement.
++ */
++void Af::parsePdaf(IPAContext &context, const ValueNode &pdaf)
++{
++	IPAPdafTuning &tuning = context.pdafTuning;
++	tuning = {};
++
++	auto grid = [](const ValueNode &node, Size *size) {
++		auto s = node["size"].get<std::vector<uint32_t>>();
++		if (!s || s->size() != 2 || !(*s)[0] || !(*s)[1])
++			return false;
++		*size = Size((*s)[0], (*s)[1]);
++		return true;
++	};
++
++	const ValueNode &gainMap = pdaf["gainMap"];
++	Size gainGrid;
++	auto left = gainMap["left"].get<std::vector<double>>();
++	auto right = gainMap["right"].get<std::vector<double>>();
++	if (grid(gainMap, &gainGrid) && left && right &&
++	    left->size() == gainGrid.width * gainGrid.height &&
++	    right->size() == left->size()) {
++		tuning.gainGrid = gainGrid;
++		tuning.gainLeft.assign(left->begin(), left->end());
++		tuning.gainRight.assign(right->begin(), right->end());
++	} else if (gainMap.isDictionary()) {
++		LOG(IPASoftAutoFocus, Warning) << "Invalid PDAF gain map, ignored";
++	}
++
++	const ValueNode &dcc = pdaf["dcc"];
++	Size dccGrid;
++	auto values = dcc["values"].get<std::vector<double>>();
++	if (grid(dcc, &dccGrid) && values &&
++	    values->size() == dccGrid.width * dccGrid.height) {
++		tuning.dccGrid = dccGrid;
++		tuning.dcc = std::move(*values);
++	} else if (dcc.isDictionary()) {
++		LOG(IPASoftAutoFocus, Warning) << "Invalid PDAF DCC map, ignored";
++	}
++
++	if (!tuning.dcc.empty())
++		LOG(IPASoftAutoFocus, Info)
++			<< "Phase detection calibration: DCC " << tuning.dccGrid
++			<< (tuning.gainLeft.empty() ? "" : ", shading gains");
++}
++
+ /* Convert a position in dioptres to an actuator code. */
+ int32_t Af::lensCode(double dioptres) const
+ {
+diff --git a/src/ipa/soft/algorithms/af.h b/src/ipa/soft/algorithms/af.h
+index ffc13eeef..6788176b3 100644
+--- a/src/ipa/soft/algorithms/af.h
++++ b/src/ipa/soft/algorithms/af.h
+@@ -50,6 +50,7 @@ private:
+ 	 */
+ 	enum class State { Idle, Probe, Climb, Refine, Scan };
+ 
++	void parsePdaf(IPAContext &context, const ValueNode &pdaf);
+ 	bool isManual(const IPAContext &context) const;
+ 	int32_t lensCode(double dioptres) const;
+ 	void updateFocus(IPAContext &context, IPAFrameContext &frameContext, double focus);
+diff --git a/src/ipa/soft/ipa_context.h b/src/ipa/soft/ipa_context.h
+index af613954f..1536824c1 100644
+--- a/src/ipa/soft/ipa_context.h
++++ b/src/ipa/soft/ipa_context.h
+@@ -10,13 +10,16 @@
+ #include <array>
+ #include <optional>
+ #include <stdint.h>
++#include <vector>
+ 
+ #include <libcamera/controls.h>
++#include <libcamera/geometry.h>
+ 
+ #include "libcamera/internal/matrix.h"
+ #include "libcamera/internal/vector.h"
+ 
+ #include <libipa/fc_queue.h>
++#include <libipa/pdaf.h>
+ 
+ #include "core_ipa_interface.h"
+ 
+@@ -69,6 +72,14 @@ struct IPAActiveState {
+ 
+ 	Matrix<float, 3, 3> combinedMatrix;
+ 
++	/* The phase detection result of the most recent PD buffer. */
++	struct {
++		bool valid;
++		uint32_t frame;
++		Size grid;
++		std::vector<ipa::PdafData> regions;
++	} pdaf;
++
+ 	struct {
+ 		float gamma;
+ 		/* 0..2 range, 1.0 = normal */
+@@ -107,6 +118,25 @@ struct IPAFrameContext : public FrameContext {
+ 	std::optional<float> saturation;
+ };
+ 
++/*
++ * Phase detection tuning: the module's calibration, read by the Af algorithm
++ * from the tuning file in init(). It lives outside IPASessionConfiguration,
++ * which configure() clears, as the tuning file is read only once.
++ */
++struct IPAPdafTuning {
++	/* Shading gain grids per pupil side, points corner to corner */
++	Size gainGrid;
++	std::vector<float> gainLeft;
++	std::vector<float> gainRight;
++	/*
++	 * Defocus conversion per region: lens movement in actuator codes
++	 * per image pixel of phase. The regions tile the image; the phase
++	 * is computed on the same grid.
++	 */
++	Size dccGrid;
++	std::vector<double> dcc;
++};
++
+ struct IPAContext {
+ 	IPAContext(unsigned int frameContextSize)
+ 		: frameContexts(frameContextSize)
+@@ -119,6 +149,7 @@ struct IPAContext {
+ 	FCQueue<IPAFrameContext> frameContexts;
+ 	ControlInfoMap::Map ctrlMap;
+ 	bool ccmEnabled = false;
++	IPAPdafTuning pdafTuning;
+ };
+ 
+ } /* namespace ipa::soft */
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index ca262be61..7db88e5f3 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include <chrono>
+ #include <cmath>
++#include <map>
++#include <memory>
+ #include <stdint.h>
+ #include <sys/mman.h>
+ 
+@@ -23,12 +25,15 @@
+ #include <libcamera/ipa/ipa_module_info.h>
+ #include <libcamera/ipa/soft_ipa_interface.h>
+ 
++#include "libcamera/internal/framebuffer.h"
++#include "libcamera/internal/mapped_framebuffer.h"
+ #include "libcamera/internal/software_isp/debayer_params.h"
+ #include "libcamera/internal/software_isp/swisp_stats.h"
+ #include "libcamera/internal/yaml_parser.h"
+ 
+ #include "algorithms/adjust.h"
+ #include "libipa/camera_sensor_helper.h"
++#include "libipa/pdaf.h"
+ 
+ #include "module.h"
+ 
+@@ -71,6 +76,12 @@ public:
+ 	void processStats(const uint32_t frame, const uint32_t bufferId,
+ 			  const ControlList &sensorControls) override;
+ 
++	int mapPdafBuffers(const std::vector<IPABuffer> &buffers,
++			   const uint32_t width, const uint32_t height,
++			   const uint32_t bytesPerLine) override;
++	void unmapPdafBuffers(const std::vector<unsigned int> &ids) override;
++	void processPdaf(const uint32_t frame, const uint32_t bufferId) override;
++
+ protected:
+ 	std::string logPrefix() const override;
+ 
+@@ -86,6 +97,11 @@ private:
+ 	ControlInfoMap lensInfoMap_;
+ 	ControlInfoMap irisInfoMap_;
+ 
++	/* Phase detection */
++	std::map<unsigned int, MappedFrameBuffer> pdafBuffers_;
++	unsigned int pdafBytesPerLine_ = 0;
++	std::unique_ptr<PdafPhase> pdafPhase_;
++
+ 	/* Local parameter storage */
+ 	struct IPAContext context_;
+ };
+@@ -423,6 +439,86 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 	setSensorControls.emit(ctrls, lensCtrls, irisCtrls);
+ }
+ 
++int IPASoftSimple::mapPdafBuffers(const std::vector<IPABuffer> &buffers,
++				  const uint32_t width, const uint32_t height,
++				  const uint32_t bytesPerLine)
++{
++	if (!camHelper_ || !camHelper_->pdafLayout()) {
++		LOG(IPASoft, Error) << "No PDAF layout known for this sensor";
++		return -ENOTSUP;
++	}
++
++	const PdafLayout &layout = *camHelper_->pdafLayout();
++	const Size size = layout.bufferSize();
++	if (width < size.width || height < size.height ||
++	    bytesPerLine < (size.width * layout.bitDepth + 7) / 8) {
++		LOG(IPASoft, Error)
++			<< "PD buffers " << width << "x" << height << " ("
++			<< bytesPerLine << " bytes per line) do not fit the "
++			<< size << " PDAF layout";
++		return -EINVAL;
++	}
++
++	for (const IPABuffer &buffer : buffers) {
++		const FrameBuffer fb(buffer.planes);
++		MappedFrameBuffer mapped(&fb, MappedFrameBuffer::MapFlag::Read);
++		if (!mapped.isValid()) {
++			LOG(IPASoft, Error) << "Failed to map PD buffer " << buffer.id;
++			return -ENOMEM;
++		}
++		pdafBuffers_.emplace(buffer.id, std::move(mapped));
++	}
++
++	pdafBytesPerLine_ = bytesPerLine;
++
++	/*
++	 * Measure the phase on the grid of the module's defocus conversion
++	 * map, so that each region has its own coefficient; without one, on
++	 * a coarse grid of its own.
++	 */
++	const IPAPdafTuning &tuning = context_.pdafTuning;
++	const Size grid = tuning.dcc.empty() ? Size(4, 3) : tuning.dccGrid;
++	pdafPhase_ = std::make_unique<PdafPhase>(layout, grid);
++
++	if (!tuning.gainLeft.empty() &&
++	    pdafPhase_->setShading(tuning.gainGrid, tuning.gainLeft, tuning.gainRight))
++		LOG(IPASoft, Warning) << "Ignoring the PDAF shading gains";
++
++	LOG(IPASoft, Info)
++		<< "Phase detection on " << buffers.size() << " buffers, "
++		<< grid << " regions" << (tuning.gainLeft.empty() ? "" : ", shading corrected");
++
++	return 0;
++}
++
++void IPASoftSimple::unmapPdafBuffers(const std::vector<unsigned int> &ids)
++{
++	for (unsigned int id : ids)
++		pdafBuffers_.erase(id);
++
++	if (pdafBuffers_.empty())
++		pdafPhase_.reset();
++}
++
++void IPASoftSimple::processPdaf(const uint32_t frame, const uint32_t bufferId)
++{
++	auto it = pdafBuffers_.find(bufferId);
++
++	if (it != pdafBuffers_.end() && pdafPhase_) {
++		Span<uint8_t> data = it->second.planes()[0];
++		int ret = pdafPhase_->process(Span<const uint8_t>(data.data(), data.size()),
++					      pdafBytesPerLine_);
++
++		auto &pdaf = context_.activeState.pdaf;
++		pdaf.valid = !ret;
++		pdaf.frame = frame;
++		pdaf.grid = pdafPhase_->grid();
++		pdaf.regions = pdafPhase_->regions();
++	}
++
++	pdafProcessed.emit(bufferId);
++}
++
+ std::string IPASoftSimple::logPrefix() const
+ {
+ 	return "IPASoft";
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 528c1930d..dd11766ae 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -207,6 +207,10 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 					    metadataReady.emit(frame, metadata);
+ 				    });
+ 	ipa_->setSensorControls.connect(this, &SoftwareIsp::setSensorCtrls);
++	ipa_->pdafProcessed.connect(this,
++				    [this](uint32_t bufferId) {
++					    pdafProcessed.emit(bufferId);
++				    });
+ 
+ 	debayer_->moveToThread(&ispWorkerThread_);
+ }
+@@ -243,6 +247,60 @@ void SoftwareIsp::processStats(const uint32_t frame, const uint32_t bufferId,
+ 	ipa_->processStats(frame, bufferId, sensorControls);
+ }
+ 
++/**
++ * \brief Share the buffers of the sensor's phase detection stream with the IPA
++ * \param[in] buffers The PD buffers
++ * \param[in] size The PD stream's size, in samples by lines
++ * \param[in] bytesPerLine The PD buffers' line stride
++ *
++ * Each buffer's cookie is set to its index in \a buffers, which identifies it
++ * to processPdaf() and pdafProcessed.
++ *
++ * \return 0 on success, or a negative error code if the IPA cannot use the
++ * stream
++ */
++int SoftwareIsp::mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++				const Size &size, unsigned int bytesPerLine)
++{
++	std::vector<IPABuffer> ipaBuffers;
++
++	for (unsigned int i = 0; i < buffers.size(); i++) {
++		Span<const FrameBuffer::Plane> planes = buffers[i]->planes();
++
++		buffers[i]->setCookie(i);
++		ipaBuffers.emplace_back(i, std::vector<FrameBuffer::Plane>(planes.begin(),
++									  planes.end()));
++	}
++
++	return ipa_->mapPdafBuffers(ipaBuffers, size.width, size.height, bytesPerLine);
++}
++
++/**
++ * \brief Stop sharing the phase detection buffers with the IPA
++ * \param[in] buffers The PD buffers given to mapPdafBuffers()
++ */
++void SoftwareIsp::unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers)
++{
++	std::vector<unsigned int> ids;
++
++	for (const std::unique_ptr<FrameBuffer> &buffer : buffers)
++		ids.push_back(buffer->cookie());
++
++	ipa_->unmapPdafBuffers(ids);
++}
++
++/**
++ * \brief Have the IPA measure the phase in a phase detection buffer
++ * \param[in] frame The frame number the buffer belongs to
++ * \param[in] bufferId The buffer's cookie
++ *
++ * pdafProcessed is emitted once the IPA no longer uses the buffer.
++ */
++void SoftwareIsp::processPdaf(uint32_t frame, unsigned int bufferId)
++{
++	ipa_->processPdaf(frame, bufferId);
++}
++
+ /**
+  * \brief Check the validity of Software Isp object
+  * \return True if Software Isp is valid, false otherwise

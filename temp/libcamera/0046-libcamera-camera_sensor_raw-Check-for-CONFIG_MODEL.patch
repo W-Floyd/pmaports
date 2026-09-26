@@ -1,0 +1,39 @@
+From 3f4ab05e3c62dac2e38a70835bacb6eeff8118bf Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Fri, 18 Sep 2026 19:56:35 +0530
+Subject: [PATCH 46/76] libcamera: camera_sensor_raw: Check for CONFIG_MODEL
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit aaed149704144ca03191ea2879635a22f15db414)
+---
+ src/libcamera/sensor/camera_sensor_raw.cpp | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index 4ba9a65d1..9c59b4d7f 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -246,6 +246,23 @@ std::optional<int> CameraSensorRaw::init()
+ 	if (ret)
+ 		return { ret };
+ 
++	/* Ensure CONFIG_MODEL is set to COMMON_RAW_SENSOR */
++	ControlList configModel = subdev_->getControls({ { V4L2_CID_CONFIG_MODEL } });
++	if (configModel.empty()) {
++		LOG(CameraSensor, Debug)
++			<< entity_->name() << ": control "
++			<< "V4L2_CID_CONFIG_MODEL not available";
++		return { 0 };
++	}
++
++	int32_t model = configModel.get(V4L2_CID_CONFIG_MODEL).get<int32_t>();
++	if (!(model & V4L2_CONFIG_MODEL_COMMON_RAW_SENSOR)) {
++		LOG(CameraSensor, Debug)
++			<< entity_->name()
++			<< ": Common raw sensor model not supported";
++		return { 0 };
++	}
++
+ 	/*
+ 	 * 1. Identify the pads.
+ 	 */

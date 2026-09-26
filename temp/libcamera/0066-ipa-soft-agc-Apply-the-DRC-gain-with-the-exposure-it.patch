@@ -1,0 +1,209 @@
+From 4d9a89ac9ee5b482f165d77243902bb708fdcb0a Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 19:46:57 +0000
+Subject: [PATCH 66/76] ipa: soft: agc: Apply the DRC gain with the exposure it
+ goes with
+
+The tone curve took a new DRC gain at once, while the exposure lowered
+for it reaches the sensor frames later: the image brightened, then
+darkened back as the exposure caught up, on every change. Worse, the
+next statistics, of frames still taken at the old exposure, were scaled
+by the new gain, so the loop overestimated the highlights and swung
+back and forth.
+
+Remember, for each exposure decision, its exposure x gain and the DRC
+gain it was made for, and when a frame's statistics come in, look up the
+DRC gain its actual exposure was decided for: that one is what the tone
+curve uses and what the highlights are scaled by. Change the gain only
+by 10% or more at a time, past the exposure loop's own dead band, so
+that every gain comes with an exposure that tells it apart.
+
+Clipped highlights read no brighter than full scale however bright they
+are, which held the gain at about their ratio to the ceiling: keep
+raising it by a quarter per update while they clip, up to the maximum.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/algorithms/agc.cpp | 94 ++++++++++++++++++++++++++++-----
+ src/ipa/soft/algorithms/agc.h   | 11 ++++
+ 2 files changed, 92 insertions(+), 13 deletions(-)
+
+diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
+index 7ce60d826..50abb9b82 100644
+--- a/src/ipa/soft/algorithms/agc.cpp
++++ b/src/ipa/soft/algorithms/agc.cpp
+@@ -228,24 +228,73 @@ std::optional<double> brightMean(const SwIspStats *stats, double black,
+ } /* namespace */
+ 
+ /*
+- * The mean luminance target, adjusted from the histogram (see init()), and
+- * the DRC gain, updated in the active state. The histogram is of an image
+- * taken with the current DRC gain in effect, so the brightest pixels are
+- * scaled back up by it to judge the scene as the target would expose it.
++ * DRC changes smaller than this are not made: each DRC gain must come with
++ * an exposure of its own, and the exposure loop ignores changes under 0.1
++ * stop (7%), see kMeanSatisfactory.
++ */
++static constexpr double kDrcStep = 0.10;
++/* A saturation position this close to full scale is clipped */
++static constexpr double kClipped = 0.95;
++/* How far to raise the DRC gain at once while the highlights clip */
++static constexpr double kClippedStep = 1.25;
++/* Exposure decisions remembered, a few frames' worth */
++static constexpr unsigned int kDrcHistory = 16;
++/* Relative tolerance matching a frame's exposure to a decision */
++static constexpr double kDrcMatch = 0.02;
++
++/*
++ * Tell which DRC gain is in effect in the frame whose statistics these are:
++ * the one its exposure was decided for. The tone curve must use that one,
++ * not the one just decided, whose exposure only reaches the sensor frames
++ * later: applied early, the curve brightens the image before the exposure
++ * drops, and darkens it the other way, a visible pulse.
++ */
++void Agc::trackDrc(IPAContext &context, const IPAFrameContext &frameContext)
++{
++	const double product = frameContext.sensor.exposure * frameContext.sensor.gain;
++
++	for (auto it = drcHistory_.rbegin(); it != drcHistory_.rend(); ++it) {
++		if (std::abs(it->first - product) <= kDrcMatch * product) {
++			context.activeState.agc.drcGain = it->second;
++			return;
++		}
++	}
++}
++
++/*
++ * The mean luminance target, adjusted from the histogram (see init()), for
++ * the DRC gain decided here. The histogram is of a frame taken with the DRC
++ * gain in effect in it (see trackDrc()), so the brightest pixels are scaled
++ * back up by that one to judge the scene as the plain target would expose
++ * it, and the gain moves by at least kDrcStep, so that its exposure differs
++ * from the last one.
+  */
+ double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
+ {
+ 	const double black = context.activeState.blc.level;
+-	const double drcNow = std::max(context.activeState.agc.drcGain, 1.0);
++	const double applied = std::max(context.activeState.agc.drcGain, 1.0);
+ 
+ 	std::optional<double> sat = brightMean(stats, black, hist_->satStart, hist_->satEnd);
+ 	if (!sat)
+-		return *meanTarget_ / drcNow;
++		return *meanTarget_ / drcDecided_;
++
++	const double scene = *sat * applied;
++	double want = std::clamp(scene / hist_->satRef, 1.0, hist_->maxDrc);
++
++	/*
++	 * Clipped highlights read no brighter than full scale, however bright
++	 * they are: keep raising the gain while they clip.
++	 */
++	if (*sat >= kClipped)
++		want = std::clamp(std::max(want, applied * kClippedStep), 1.0, hist_->maxDrc);
+ 
+-	const double scene = *sat * drcNow;
+-	const double want = std::clamp(scene / hist_->satRef, 1.0, hist_->maxDrc);
+-	const double drc = hist_->filter * drcNow + (1.0 - hist_->filter) * want;
+-	context.activeState.agc.drcGain = drc;
++	double next = hist_->filter * drcDecided_ + (1.0 - hist_->filter) * want;
++	/* Close to none: none, rather than a step too small to make */
++	if (want == 1.0 && next < 1.0 + kDrcStep)
++		next = 1.0;
++	if ((next == 1.0 && drcDecided_ != 1.0) ||
++	    std::abs(next - drcDecided_) >= kDrcStep * drcDecided_)
++		drcDecided_ = next;
+ 
+ 	double adj;
+ 	if (scene > hist_->satRef) {
+@@ -255,15 +304,17 @@ double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
+ 		/* A flat scene, with no bright pixels: expose it brighter */
+ 		std::optional<double> up = brightMean(stats, black, hist_->upStart, hist_->upEnd);
+ 		adj = up && *up > 0.0
+-			      ? std::clamp(hist_->satRef / (*up * drcNow), 1.0, hist_->maxAdj)
++			      ? std::clamp(hist_->satRef / (*up * applied), 1.0, hist_->maxAdj)
+ 			      : 1.0;
+ 	}
+ 
+ 	LOG(IPASoftExposure, Debug)
+ 		<< "brightest " << scene << " of " << hist_->satRef
+-		<< ": DRC gain " << drc << ", target adjusted by " << adj;
++		<< (*sat >= kClipped ? " (clipped)" : "")
++		<< ": DRC gain " << drcDecided_ << ", in effect " << applied
++		<< ", target adjusted by " << adj;
+ 
+-	return *meanTarget_ * adj / drc;
++	return *meanTarget_ * adj / drcDecided_;
+ }
+ 
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+@@ -402,8 +453,17 @@ void Agc::process(IPAContext &context,
+ 		context.activeState.agc.exposure = frameContext.sensor.exposure;
+ 		context.activeState.agc.again = frameContext.sensor.gain;
+ 		context.activeState.agc.valid = true;
++
++		/* A new session starts without DRC */
++		context.activeState.agc.drcGain = 1.0;
++		drcDecided_ = 1.0;
++		drcHistory_.clear();
+ 	}
+ 
++	/* The DRC gain the tone curve must use from now on */
++	if (hist_)
++		trackDrc(context, frameContext);
++
+ 	if (!stats->valid) {
+ 		/*
+ 		 * Use the new exposure and gain values calculated the last time
+@@ -470,6 +530,14 @@ void Agc::process(IPAContext &context,
+ 		target = hist_ ? histTarget(context, stats) : *meanTarget_;
+ 
+ 	updateExposure(context, frameContext, exposureMSV, meanY, target);
++
++	/* Remember which DRC gain the exposure now set goes with */
++	if (hist_) {
++		drcHistory_.emplace_back(frameContext.sensor.exposure * frameContext.sensor.gain,
++					 drcDecided_);
++		if (drcHistory_.size() > kDrcHistory)
++			drcHistory_.pop_front();
++	}
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Agc, "Agc")
+diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
+index 798019917..8be2b11e5 100644
+--- a/src/ipa/soft/algorithms/agc.h
++++ b/src/ipa/soft/algorithms/agc.h
+@@ -7,7 +7,9 @@
+ 
+ #pragma once
+ 
++#include <deque>
+ #include <optional>
++#include <utility>
+ 
+ #include "algorithm.h"
+ 
+@@ -44,6 +46,7 @@ private:
+ 	};
+ 
+ 	double histTarget(IPAContext &context, const SwIspStats *stats);
++	void trackDrc(IPAContext &context, const IPAFrameContext &frameContext);
+ 	void updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 			    double exposureMSV, double meanY, double meanTarget);
+ 
+@@ -54,6 +57,14 @@ private:
+ 	float maxRatio_;
+ 	std::optional<double> meanTarget_;
+ 	std::optional<HistTuning> hist_;
++
++	/*
++	 * DRC gain: the one exposure is being set for, and, for each recent
++	 * exposure decision, its exposure x gain and the DRC gain it was
++	 * made for, to tell which one is in effect in a frame.
++	 */
++	double drcDecided_ = 1.0;
++	std::deque<std::pair<double, double>> drcHistory_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */

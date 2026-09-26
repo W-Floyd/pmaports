@@ -1,0 +1,220 @@
+From 9f7fcb8201a0defc25deeb5afbb1bf240faa2c96 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 16:53:44 +0000
+Subject: [PATCH 53/76] ipa: libipa: pdaf: Correct the shading of each pupil
+ half
+
+The two halves of the lens pupil vignette differently across the image,
+so a region's left and right signals differ in level and slope besides
+the displacement being measured. Module calibration measures a gain map
+per side that flattens this; Qualcomm's PDAF calibration, which vendor
+EEPROMs carry, is a 17x13 grid spanning the image corner to corner.
+
+Add PdafPhase::setShading() to take such grids, one per side, and apply
+each block's interpolated gain to the averaged samples before the
+high-pass filter.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/libipa/pdaf.cpp  | 67 ++++++++++++++++++++++++++++++++++++++++
+ src/ipa/libipa/pdaf.h    |  6 ++++
+ test/ipa/libipa/pdaf.cpp | 62 +++++++++++++++++++++++++++++++++++--
+ 3 files changed, 132 insertions(+), 3 deletions(-)
+
+diff --git a/src/ipa/libipa/pdaf.cpp b/src/ipa/libipa/pdaf.cpp
+index e9522fa3f..877039ed6 100644
+--- a/src/ipa/libipa/pdaf.cpp
++++ b/src/ipa/libipa/pdaf.cpp
+@@ -148,6 +148,66 @@ PdafPhase::PdafPhase(const PdafLayout &layout, const Size &grid,
+ 	regions_.resize(grid_.width * grid_.height, { 0.0, 0.0 });
+ }
+ 
++/**
++ * \brief Set the shading gains of the left and right PD pixels
++ * \param[in] grid The size of the gain grids
++ * \param[in] left The gains for the pixels that see the left pupil half
++ * \param[in] right The gains for the pixels that see the right pupil half
++ *
++ * Each half of the lens pupil vignettes differently across the image, so the
++ * two signals of a region differ in level and slope as well as in position.
++ * Module calibration commonly measures a gain map per pixel side that
++ * flattens this (Qualcomm's PDAF calibration does, as a 17x13 grid). The
++ * grids are row major, with their points spread evenly from the image's top
++ * left corner to its bottom right one; each block takes the gain
++ * interpolated at its centre.
++ *
++ * \return 0 on success, or -EINVAL if the grids do not match \a grid
++ */
++int PdafPhase::setShading(const Size &grid, Span<const float> left,
++			  Span<const float> right)
++{
++	const size_t n = static_cast<size_t>(grid.width) * grid.height;
++
++	if (grid.width < 2 || grid.height < 2 || left.size() != n ||
++	    right.size() != n)
++		return -EINVAL;
++
++	const unsigned int width = layout_.blocks.width;
++	const unsigned int rows = layout_.blocks.height;
++	const double imageWidth = width * layout_.blockSize.width + 2.0 * layout_.offset.x;
++	const double imageHeight = rows * layout_.blockSize.height + 2.0 * layout_.offset.y;
++
++	auto sample = [&](Span<const float> map, double gx, double gy) {
++		unsigned int x0 = std::min<unsigned int>(gx, grid.width - 2);
++		unsigned int y0 = std::min<unsigned int>(gy, grid.height - 2);
++		double fx = gx - x0, fy = gy - y0;
++		const float *r0 = &map[y0 * grid.width + x0];
++		const float *r1 = r0 + grid.width;
++
++		return (r0[0] * (1 - fx) + r0[1] * fx) * (1 - fy) +
++		       (r1[0] * (1 - fx) + r1[1] * fx) * fy;
++	};
++
++	gainLeft_.resize(width * rows);
++	gainRight_.resize(width * rows);
++
++	for (unsigned int r = 0; r < rows; r++) {
++		double cy = layout_.offset.y + (r + 0.5) * layout_.blockSize.height;
++		double gy = cy / (imageHeight - 1) * (grid.height - 1);
++
++		for (unsigned int x = 0; x < width; x++) {
++			double cx = layout_.offset.x + (x + 0.5) * layout_.blockSize.width;
++			double gx = cx / (imageWidth - 1) * (grid.width - 1);
++
++			gainLeft_[r * width + x] = sample(left, gx, gy);
++			gainRight_[r * width + x] = sample(right, gx, gy);
++		}
++	}
++
++	return 0;
++}
++
+ /**
+  * \brief Unpack one line of CSI-2 packed samples
+  * \param[in] line The packed line
+@@ -276,6 +336,13 @@ void PdafPhase::buildSignals(Span<const uint16_t> samples, unsigned int stride)
+ 			rt[x] /= nright;
+ 		}
+ 
++		if (!gainLeft_.empty()) {
++			for (unsigned int x = 0; x < width; x++) {
++				l[x] *= gainLeft_[r * width + x];
++				rt[x] *= gainRight_[r * width + x];
++			}
++		}
++
+ 		/*
+ 		 * High-pass both signals, subtracting a 9 sample running mean:
+ 		 * the correlation must follow edges and texture, not the
+diff --git a/src/ipa/libipa/pdaf.h b/src/ipa/libipa/pdaf.h
+index 6b7aef240..6c066f15d 100644
+--- a/src/ipa/libipa/pdaf.h
++++ b/src/ipa/libipa/pdaf.h
+@@ -51,6 +51,9 @@ public:
+ 	PdafPhase(const PdafLayout &layout, const Size &grid,
+ 		  unsigned int maxShift = 6);
+ 
++	int setShading(const Size &grid, Span<const float> left,
++		       Span<const float> right);
++
+ 	int process(Span<const uint8_t> buffer, unsigned int bytesPerLine);
+ 	int process(Span<const uint16_t> samples, unsigned int stride);
+ 
+@@ -72,6 +75,9 @@ private:
+ 	std::vector<uint16_t> unpacked_;
+ 	std::vector<float> left_;
+ 	std::vector<float> right_;
++	/* Shading gain per block, one vector per side, empty if none */
++	std::vector<float> gainLeft_;
++	std::vector<float> gainRight_;
+ 	std::vector<PdafData> regions_;
+ };
+ 
+diff --git a/test/ipa/libipa/pdaf.cpp b/test/ipa/libipa/pdaf.cpp
+index 817b65c9a..83a809061 100644
+--- a/test/ipa/libipa/pdaf.cpp
++++ b/test/ipa/libipa/pdaf.cpp
+@@ -45,7 +45,19 @@ PdafLayout testLayout()
+  * +phase/2 samples and by the right ones by -phase/2, packed as the sensor
+  * sends it (CSI-2 RAW10, 640 bytes per line).
+  */
+-vector<uint8_t> makeBuffer(const PdafLayout &layout, double phase, unsigned int bpl)
++/*
++ * Opposite shading of the two pupil halves across the image: the left
++ * pixels darken towards the right edge and the right ones towards the left,
++ * by a factor from 1 - slope/2 to 1 + slope/2.
++ */
++double shading(PdafLayout::Side side, double xFraction, double slope)
++{
++	double s = slope * (xFraction - 0.5);
++	return side == PdafLayout::Side::Left ? 1.0 - s : 1.0 + s;
++}
++
++vector<uint8_t> makeBuffer(const PdafLayout &layout, double phase, unsigned int bpl,
++			   double slope = 0.0)
+ {
+ 	const Size size = layout.bufferSize();
+ 	mt19937 rng(1234);
+@@ -83,9 +95,11 @@ vector<uint8_t> makeBuffer(const PdafLayout &layout, double phase, unsigned int
+ 		const PdafLayout::Line &l = layout.lines[y % layout.lines.size()];
+ 		double d = l.side == PdafLayout::Side::Left ? -phase / 2 : phase / 2;
+ 
+-		for (unsigned int x = 0; x < size.width; x++)
+-			line[x] = static_cast<uint16_t>(64 + 400 * sample(x + d) +
++		for (unsigned int x = 0; x < size.width; x++) {
++			double g = shading(l.side, (x + 0.5) / size.width, slope);
++			line[x] = static_cast<uint16_t>(64 + 400 * g * sample(x + d) +
+ 							 (u(rng) - 0.5) * 2);
++		}
+ 
+ 		uint8_t *dst = &buf[y * bpl];
+ 		for (unsigned int x = 0; x + 3 < size.width; x += 4) {
+@@ -136,6 +150,48 @@ protected:
+ 			}
+ 		}
+ 
++		/*
++		 * Strong opposite shading, corrected by gain grids (17x13 as in
++		 * Qualcomm calibration, points from corner to corner). The
++		 * phase must still come out right.
++		 */
++		{
++			const double slope = 1.2;
++			const Size grid(17, 13);
++			vector<float> gl, gr;
++			for (unsigned int y = 0; y < grid.height; y++) {
++				for (unsigned int x = 0; x < grid.width; x++) {
++					double f = static_cast<double>(x) / (grid.width - 1);
++					gl.push_back(1.0 / shading(PdafLayout::Side::Left, f, slope));
++					gr.push_back(1.0 / shading(PdafLayout::Side::Right, f, slope));
++				}
++			}
++
++			PdafPhase pdaf(layout, { 4, 3 });
++			if (pdaf.setShading({ 16, 13 }, gl, gr) != -EINVAL) {
++				cout << "Mismatched shading grid accepted" << endl;
++				return TestFail;
++			}
++			if (pdaf.setShading(grid, gl, gr)) {
++				cout << "setShading() failed" << endl;
++				return TestFail;
++			}
++
++			vector<uint8_t> buf = makeBuffer(layout, 1.5, bpl, slope);
++			if (pdaf.process(buf, bpl)) {
++				cout << "process() failed with shading" << endl;
++				return TestFail;
++			}
++
++			PdafData all = pdaf.combined();
++			cout << "shaded phase 1.5: measured " << all.phase
++			     << " conf " << all.conf << endl;
++			if (all.conf <= 0.0 || std::abs(all.phase - 1.5) > 0.15) {
++				cout << "Shaded phase measured as " << all.phase << endl;
++				return TestFail;
++			}
++		}
++
+ 		/* A flat buffer has no texture, hence no confidence */
+ 		vector<uint8_t> flat(bpl * 3056, 0x00);
+ 		PdafPhase pdaf(layout, { 4, 3 });

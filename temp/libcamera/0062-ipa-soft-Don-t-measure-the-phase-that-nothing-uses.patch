@@ -1,0 +1,54 @@
+From bf4400fd5a707e5af07f3282ed5b0faad95bf0f1 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 17:43:15 +0000
+Subject: [PATCH 62/76] ipa: soft: Don't measure the phase that nothing uses
+
+Without a defocus conversion map in the tuning, the Af algorithm cannot
+use the phase, so decline the PD buffers and let the pipeline leave the
+stream off. Log how long each measurement takes, at debug level.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/soft_simple.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index 42010b1dc..678e5baa3 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -448,6 +448,12 @@ int IPASoftSimple::mapPdafBuffers(const std::vector<IPABuffer> &buffers,
+ 		return -ENOTSUP;
+ 	}
+ 
++	/* Without a defocus conversion nothing uses the phase: don't measure it */
++	if (context_.pdafTuning.dcc.empty()) {
++		LOG(IPASoft, Info) << "No PDAF calibration, phase detection unused";
++		return -ENOTSUP;
++	}
++
+ 	const PdafLayout &layout = *camHelper_->pdafLayout();
+ 	const Size size = layout.bufferSize();
+ 	if (width < size.width || height < size.height ||
+@@ -509,9 +515,11 @@ void IPASoftSimple::processPdaf(const uint32_t frame, const uint32_t bufferId)
+ 	auto it = pdafBuffers_.find(bufferId);
+ 
+ 	if (it != pdafBuffers_.end() && pdafPhase_) {
++		const auto start = std::chrono::steady_clock::now();
+ 		Span<uint8_t> data = it->second.planes()[0];
+ 		int ret = pdafPhase_->process(Span<const uint8_t>(data.data(), data.size()),
+ 					      pdafBytesPerLine_);
++		const auto took = std::chrono::steady_clock::now() - start;
+ 
+ 		auto &pdaf = context_.activeState.pdaf;
+ 		pdaf.valid = !ret;
+@@ -523,7 +531,9 @@ void IPASoftSimple::processPdaf(const uint32_t frame, const uint32_t bufferId)
+ 		PdafData all = pdafPhase_->combined();
+ 		LOG(IPASoft, Debug)
+ 			<< "PD frame " << frame << ": phase " << all.phase
+-			<< " conf " << all.conf;
++			<< " conf " << all.conf << ", measured in "
++			<< std::chrono::duration_cast<std::chrono::microseconds>(took).count()
++			<< " us";
+ 	}
+ 
+ 	pdafProcessed.emit(bufferId);
