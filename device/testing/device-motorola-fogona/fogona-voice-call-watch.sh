@@ -66,11 +66,11 @@ speaker_state() {
 	echo 0
 }
 
-# 1: bottom speaker alone; 0: earpiece alone. The voice downlink is mono
-# on both channels, so either amp carries all of it.
+# 1: both amps, as HiFi; 0: earpiece alone. The voice downlink is mono on
+# both channels, so each amp carries all of it.
 set_output() {
 	if [ "$1" = 1 ]; then
-		amixer -c0 -q cset name="Receiver Switch" 0
+		amixer -c0 -q cset name="Receiver Switch" 1
 		amixer -c0 -q cset name="Speaker Switch" 1
 	else
 		amixer -c0 -q cset name="Speaker Switch" 0
