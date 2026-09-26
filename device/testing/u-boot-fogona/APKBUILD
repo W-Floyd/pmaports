@@ -13,13 +13,16 @@
 #                      tables and the PM6125 side keys. This is the bootable
 #                      one, and the one boot-deploy picks up.
 #
-# /usr/share/u-boot/fogona and the u-boot-fogona.bin name are an interface:
-# mkinitfs stages that directory (deviceinfo_uboot_boardname) and boot-deploy
-# selects the file (deviceinfo_bootimg_override_payload). Renaming either
-# silently stops the bootloader from reaching the hardware.
+# /usr/share/u-boot/fogona and the fogona-bootloader.bin name are an
+# interface: mkinitfs stages that directory (deviceinfo_uboot_boardname) and
+# boot-deploy selects the file (deviceinfo_bootimg_override_payload).
+# Renaming either silently stops the bootloader from reaching the hardware.
+#
+# One of the two providers of fogona-bootloader; linuxboot-fogona, the
+# default, is the other. `apk add u-boot-fogona` switches to this one.
 pkgname=u-boot-fogona
 pkgver=2026.10_rc5
-pkgrel=0
+pkgrel=1
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
 url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"
@@ -35,10 +38,14 @@ makedepends="
 	swig
 	"
 options="!check !strip !tracedeps"
+provides="fogona-bootloader=$pkgver-r$pkgrel"
+provider_priority=10
+replaces="linuxboot-fogona"
 # Deploy on upgrade, as u-boot-tolino-shine3 and u-boot-librem5 do. Theirs dd
 # themselves into place; ours has to go through mkinitfs + boot-deploy because
-# the payload needs wrapping in an Android boot image first.
-install="$pkgname.post-upgrade"
+# the payload needs wrapping in an Android boot image first. And on install,
+# for a switch back from linuxboot-fogona.
+install="$pkgname.post-install $pkgname.post-upgrade"
 
 # Tip of `fogona-uboot`, the board layer of the three-branch stack in ~/uboot
 # (upstream-fixes-uboot -> sm6225-uboot -> fogona-uboot). Bump on every rebase.
@@ -94,7 +101,11 @@ open('$pkgdir/usr/share/u-boot/fogona/u-boot-txt0.bin', 'wb').write(bytes(d))
 	# devicetree applies.
 	cat "$pkgdir"/usr/share/u-boot/fogona/u-boot-txt0.bin "$_dtb" \
 		> "$pkgdir"/usr/share/u-boot/fogona/u-boot-fogona.bin
+
+	# The fogona-bootloader interface: the payload boot-deploy wraps.
+	cp "$pkgdir"/usr/share/u-boot/fogona/u-boot-fogona.bin \
+		"$pkgdir"/usr/share/u-boot/fogona/fogona-bootloader.bin
 }
 sha512sums="
-803b47beab6dfdc7813d86b3266267b67516965ea509244372f922ba1f06437e91a411b018da3b85a256667558ea47b55773cc97c271fa4b55f4801e30a06d35  u-boot-fogona-f79d753f725c221b82f78bfb97a7c377de65cb03.tar.gz
+e3a927d19ef2aefd37e33c69d05cd8915114cfc092f160d0633fc253b8cde6998a28cc3efe24548e6ec1273e08195515f956945fc01a0c6e7aebe740403c7d92  u-boot-fogona-5b48c35e8878d47526ce6fb04c4c0ef028283850.tar.gz
 "
