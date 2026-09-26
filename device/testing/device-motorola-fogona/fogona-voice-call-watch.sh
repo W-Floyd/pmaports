@@ -47,14 +47,45 @@ mic_path() {
 	done
 }
 
+# callaudiod's in-call speaker toggle is a port switch on the current sink,
+# and the Voice Call profiles each have one port (UCM: Speaker and Earpiece
+# share a PCM). With no speaker port it switches nothing but still reports
+# success and sets SpeakerState, so follow that property and drive the amp
+# switches here, as this script already does for the earpiece. setpriv, not
+# su: su's PAM session costs over a second per poll.
+speaker_state() {
+	for d in /run/user/*; do
+		[ -S "$d/bus" ] || continue
+		u=$(stat -c %U "$d")
+		setpriv --reuid="$u" --regid="$u" --init-groups \
+			env DBUS_SESSION_BUS_ADDRESS="unix:path=$d/bus" \
+			busctl --user get-property org.mobian_project.CallAudio \
+			/org/mobian_project/CallAudio org.mobian_project.CallAudio \
+			SpeakerState 2>/dev/null | grep -q "^u 1$" && { echo 1; return; }
+	done
+	echo 0
+}
+
+# 1: bottom speaker alone; 0: earpiece alone. The voice downlink is mono
+# on both channels, so either amp carries all of it.
+set_output() {
+	if [ "$1" = 1 ]; then
+		amixer -c0 -q cset name="Receiver Switch" 0
+		amixer -c0 -q cset name="Speaker Switch" 1
+	else
+		amixer -c0 -q cset name="Speaker Switch" 0
+		amixer -c0 -q cset name="Receiver Switch" 1
+	fi
+	spk=$1
+}
+
 on=0
 while true; do
 	if mmcli -m any --voice-list-calls 2>/dev/null | grep -q "(active)"; then
 		if [ $on = 0 ]; then
 			suspend_sinks 1
 			amixer -c0 -q sset "PRI_MI2S_RX Audio Mixer MultiMedia1" on
-			amixer -c0 -q cset name="Speaker Switch" 0
-			amixer -c0 -q cset name="Receiver Switch" 1
+			set_output "$(speaker_state)"
 			aplay -q -D hw:0,0 -f S16_LE -r 48000 -c 2 /dev/zero &
 			apid=$!
 			# the mics: voice TX reads the capture backend's splitter
@@ -65,11 +96,18 @@ while true; do
 			echo start > $ctl
 			log "call active: start rc=$?"
 			on=1
+		else
+			s=$(speaker_state)
+			if [ "$s" != "$spk" ]; then
+				set_output "$s"
+				log "speaker $s"
+			fi
 		fi
 	elif [ $on = 1 ]; then
 		echo stop > $ctl
 		kill $apid $rpid 2>/dev/null
 		wait $apid $rpid 2>/dev/null
+		amixer -c0 -q cset name="Receiver Switch" 1
 		amixer -c0 -q cset name="Speaker Switch" 1
 		suspend_sinks 0
 		reapply_profile
