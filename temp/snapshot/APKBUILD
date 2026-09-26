@@ -2,8 +2,8 @@
 # Contributor: Thomas Aldrian <aldrian.thom@proton.me>
 maintainer="team/gnome <achill@achill.org>"
 pkgname=snapshot
-pkgver=50.0
-pkgrel=3
+pkgver=51.0
+pkgrel=1
 pkgdesc="Take pictures and videos"
 url="https://gitlab.gnome.org/GNOME/snapshot"
 arch="all"
@@ -38,9 +38,10 @@ depends="
 subpackages="$pkgname-lang"
 source="https://download.gnome.org/sources/snapshot/${pkgver%%.*}/snapshot-$pkgver.tar.xz
 	cargo-auditable.patch
-	0001-aperture-Add-a-camera-control-API.patch
-	0002-Add-manual-focus-controls.patch
-	0003-Add-an-aperture-control.patch
+	0001-cargo-Run-update.patch
+	0002-aperture-Add-a-camera-control-API.patch
+	0003-Add-manual-focus-controls.patch
+	0004-Add-an-aperture-control.patch
 	"
 options="net" # cargo fetch for rustix update
 
@@ -67,9 +68,10 @@ package() {
 }
 
 sha512sums="
-e7f4013e91ec8de1aec64df188da654374e02b1a2588d5f9e3edbc31eb347e58648c3c5d595fe6a5c194e496b8ffb164485d7a9b035d5686ad8f1c05f9988b32  snapshot-50.0.tar.xz
+49a1cf498f63227168599305c393f34e38f7f9a461262c1bdf08449d005cfca7c44d563fe7863e100a6da7152767cc066901c944f392ee6393778806f9e48f0b  snapshot-51.0.tar.xz
 236fdfe1f2c91ce4d24e9823c1d9d9448171f10065d4608ce0a0c9a003d48666dff98f458980aa1567ecb090c75be754de25fd845ad330d4d8fea2b20aed1d7a  cargo-auditable.patch
-d269a0e0aab8eb364334fb370bafe71a6aff09c66868b193dac329468fc9191aea4c294fa16236f391e7411954cd80f9bfa24b17b10887b844fa61e6ff334e1e  0001-aperture-Add-a-camera-control-API.patch
-64d26ddf5129d379ce0f68b54e05364498c853ae98cf6f24a8966a0bde74ec73243123778c11ad0fc021a4566f899c56fa4fffb24f2f691ec670ac986bb83de2  0002-Add-manual-focus-controls.patch
-ea98b0595903659f33d9d2f94d3e3a4ebc0f64931d324bd2f5c2776b6110baecbae4208eaee698f0a35808a064d5310a1bdb4dea6c9606b3f854fcacfad4e978  0003-Add-an-aperture-control.patch
+78bf6c8f6c4a3b59cb4e1e36c0a3f8fd3523cd711d3024b8ac768a3ebd188124f630659fdb0de696bf84cb564b8fd91d4abf7261389c031eb7286c8a45a98dc9  0001-cargo-Run-update.patch
+4c8fc6c0530d5d0ed7a772b437e1d0db5959f91bdc494601fd1304c8ecb18857125a4055c95692c46a7ad011d4248c5232534cacee1680efebe57782ab0f99a6  0002-aperture-Add-a-camera-control-API.patch
+4d10d3278f2b0b05c9cce4d96be2139ef4553d497a4f111ba1b2d13dbcff5ba9912eefde47bf6a8618e434c5c7da369725c8c4c3162e29a7237bf0023e3b2762  0003-Add-manual-focus-controls.patch
+9180cd51ddf157021667400d62aab5b06945d81a96c444528a57c2fbe2b2517b9237742e9c06b36864d443949d2804caa69da03b62fa6105571aee8f7a454605  0004-Add-an-aperture-control.patch
 "

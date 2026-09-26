@@ -1,4 +1,4 @@
-From d5340ad9b10cea49485b57d2cbedbca188f1f9b5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 18:29:05 +0000
 Subject: [PATCH] Add an aperture control
@@ -209,10 +209,10 @@ index 9dbcc38..1992723 100644
        <object class="GtkStack" id="gallery_button_stack">
          <child>
 diff --git a/src/widgets/camera.rs b/src/widgets/camera.rs
-index 262d11a..94362f9 100644
+index 0a328d0..448fbf8 100644
 --- a/src/widgets/camera.rs
 +++ b/src/widgets/camera.rs
-@@ -598,7 +598,8 @@ impl Camera {
+@@ -640,7 +640,8 @@ impl Camera {
          }
      }
  
@@ -222,7 +222,7 @@ index 262d11a..94362f9 100644
      ///
      /// The driver discards controls set on an idle camera, so the popover has
      /// nothing useful to do until the viewfinder is `Ready`. The camera and
-@@ -612,12 +613,13 @@ impl Camera {
+@@ -654,12 +655,13 @@ impl Camera {
              .flatten();
  
          log::debug!(
@@ -454,3 +454,6 @@ index 83250af..582f156 100644
      pub fn connect_camera_switched<F: Fn(&Self) + 'static>(&self, f: F) {
          self.connect_closure(
              "camera-switched",
+-- 
+2.55.0
+

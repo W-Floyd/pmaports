@@ -1,5 +1,6 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Mon, 8 Sep 2026 00:00:00 +0000
+Date: Tue, 8 Sep 2026 00:00:00 +0000
 Subject: [PATCH] Add manual focus controls
 
 Snapshot has no manual controls at all today, which issue #215 asks for:
@@ -33,13 +34,21 @@ Two details come from how the underlying control works:
 
 Because controls cannot be read back, the slider starts from the
 controls
+---
+ data/resources/ui/camera_controls.ui |  14 ++
+ src/widgets/camera.rs                |  32 +++++
+ src/widgets/camera_controls.rs       | 205 ++++++++++++++++++++++++++-
+ 3 files changed, 250 insertions(+), 1 deletion(-)
 
+diff --git a/data/resources/ui/camera_controls.ui b/data/resources/ui/camera_controls.ui
+index 36a05f9..9dbcc38 100644
 --- a/data/resources/ui/camera_controls.ui
 +++ b/data/resources/ui/camera_controls.ui
-@@ -5,6 +5,20 @@
+@@ -4,6 +4,20 @@
+     <property name="halign">center</property>
      <property name="valign">center</property>
      <property name="spacing">24</property>
-     <child>
++    <child>
 +      <object class="GtkMenuButton" id="focus_menu_button">
 +        <property name="halign">center</property>
 +        <property name="valign">center</property>
@@ -53,13 +62,14 @@ controls
 +        </style>
 +      </object>
 +    </child>
-+    <child>
+     <child>
        <object class="GtkStack" id="gallery_button_stack">
          <child>
-           <object class="AdwBin" id="fake_gallery_button"/>
+diff --git a/src/widgets/camera.rs b/src/widgets/camera.rs
+index 47b393e..0a328d0 100644
 --- a/src/widgets/camera.rs
 +++ b/src/widgets/camera.rs
-@@ -184,6 +184,14 @@
+@@ -196,6 +196,14 @@ mod imp {
                  }
              ));
  
@@ -74,7 +84,7 @@ controls
              self.viewfinder.connect_code_detected(glib::clone!(
                  #[weak]
                  obj,
-@@ -590,6 +598,28 @@
+@@ -632,6 +640,28 @@ impl Camera {
          }
      }
  
@@ -103,7 +113,7 @@ controls
      fn update_state(&self) {
          let imp = self.imp();
  
-@@ -598,6 +628,8 @@
+@@ -640,6 +670,8 @@ impl Camera {
              return;
          }
  
@@ -112,6 +122,8 @@ controls
          match imp.viewfinder.state() {
              aperture::ViewfinderState::Loading => {
                  imp.stack.set_visible_child_name("loading");
+diff --git a/src/widgets/camera_controls.rs b/src/widgets/camera_controls.rs
+index 45cba8f..83250af 100644
 --- a/src/widgets/camera_controls.rs
 +++ b/src/widgets/camera_controls.rs
 @@ -1,12 +1,20 @@
@@ -136,7 +148,7 @@ controls
      use std::sync::LazyLock;
  
      use gtk::CompositeTemplate;
-@@ -36,6 +44,14 @@
+@@ -36,6 +44,14 @@ mod imp {
          pub shutter_button: TemplateChild<crate::ShutterButton>,
          #[template_child]
          pub gallery_button_stack: TemplateChild<gtk::Stack>,
@@ -151,7 +163,7 @@ controls
      }
  
      #[glib::object_subclass]
-@@ -175,6 +191,193 @@
+@@ -175,6 +191,193 @@ impl CameraControls {
          self.imp().camera_menu_button.set_popover(Some(&popover));
      }
  
@@ -345,3 +357,6 @@ controls
      pub fn connect_camera_switched<F: Fn(&Self) + 'static>(&self, f: F) {
          self.connect_closure(
              "camera-switched",
+-- 
+2.55.0
+

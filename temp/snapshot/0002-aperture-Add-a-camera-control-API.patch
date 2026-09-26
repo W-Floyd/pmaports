@@ -1,5 +1,6 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Mon, 8 Sep 2026 00:00:00 +0000
+Date: Tue, 8 Sep 2026 00:00:00 +0000
 Subject: [PATCH] aperture: Add a camera control API
 
 Aperture has no notion of a camera control today -- the viewfinder
@@ -57,13 +58,27 @@ actuator) running libcamera 0.7.2 and PipeWire 1.6.8, reading the
 actuator back over V4L2 to confirm the lens really moves. The front
 camera, which is fixed-focus, correctly reports no focus controls. See
 aperture/examples/controls.rs.
+---
+ Cargo.lock                     | 186 ++++++++++++++-
+ aperture/Cargo.toml            |   1 +
+ aperture/examples/controls.rs  | 170 +++++++++++++
+ aperture/src/camera.rs         |  88 ++++++-
+ aperture/src/camera_control.rs | 422 +++++++++++++++++++++++++++++++++
+ aperture/src/error.rs          |  22 ++
+ aperture/src/lib.rs            |   4 +-
+ 7 files changed, 889 insertions(+), 4 deletions(-)
+ create mode 100644 aperture/examples/controls.rs
+ create mode 100644 aperture/src/camera_control.rs
 
+diff --git a/Cargo.lock b/Cargo.lock
+index 75f88ad..63a65d0 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -18,6 +18,22 @@
+@@ -17,6 +17,22 @@ version = "0.2.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
  
- [[package]]
++[[package]]
 +name = "annotate-snippets"
 +version = "0.11.5"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -79,11 +94,10 @@ aperture/examples/controls.rs.
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 +
-+[[package]]
+ [[package]]
  name = "anyhow"
- version = "1.0.102"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -34,6 +50,7 @@
+ version = "1.0.104"
+@@ -35,6 +51,7 @@ dependencies = [
   "gstreamer-video",
   "gtk4",
   "log",
@@ -91,10 +105,11 @@ aperture/examples/controls.rs.
   "rqrr",
  ]
  
-@@ -206,6 +223,25 @@
- checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
+@@ -206,6 +223,25 @@ version = "1.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
  
- [[package]]
++[[package]]
 +name = "bindgen"
 +version = "0.72.1"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -109,34 +124,36 @@ aperture/examples/controls.rs.
 + "quote",
 + "regex",
 + "rustc-hash",
-+ "shlex",
-+ "syn",
++ "shlex 1.3.0",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "bitflags"
+ version = "2.13.2"
+@@ -267,7 +303,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a3eb0f42d6c360dc3f8a821f6bf2fdea7f72bfd36b3076eb0e6d1e9e0752fff4"
+ dependencies = [
+  "find-msvc-tools",
+- "shlex",
++ "shlex 2.0.1",
 +]
 +
 +[[package]]
- name = "bitflags"
- version = "2.11.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -270,6 +306,15 @@
- ]
- 
- [[package]]
 +name = "cexpr"
 +version = "0.6.0"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
 +dependencies = [
 + "nom 7.1.3",
-+]
-+
-+[[package]]
- name = "cfg-expr"
- version = "0.20.6"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -286,6 +331,17 @@
- checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+ ]
  
  [[package]]
+@@ -286,6 +331,17 @@ version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+ 
++[[package]]
 +name = "clang-sys"
 +version = "1.9.1"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -147,49 +164,50 @@ aperture/examples/controls.rs.
 + "libloading",
 +]
 +
-+[[package]]
+ [[package]]
  name = "concurrent-queue"
  version = "2.5.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -295,6 +351,12 @@
+@@ -295,6 +351,12 @@ dependencies = [
+  "crossbeam-utils",
  ]
  
- [[package]]
++[[package]]
 +name = "cookie-factory"
 +version = "0.3.3"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "9885fa71e26b8ab7855e2ec7cae6e9b380edff76cd052e07c683a0319d51b3a2"
 +
-+[[package]]
+ [[package]]
  name = "crossbeam-utils"
- version = "0.8.21"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -729,6 +791,12 @@
+ version = "0.8.23"
+@@ -720,6 +782,12 @@ dependencies = [
+  "system-deps 9.0.0",
  ]
  
- [[package]]
++[[package]]
 +name = "glob"
 +version = "0.3.4"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 +
-+[[package]]
+ [[package]]
  name = "gobject-sys"
- version = "0.22.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -805,7 +873,7 @@
+ version = "0.22.9"
+@@ -795,7 +863,7 @@ dependencies = [
   "futures-util",
   "glib",
   "gstreamer-sys",
 - "itertools",
-+ "itertools 0.14.0",
++ "itertools 0.15.0",
   "kstring",
   "libc",
   "muldiv",
-@@ -1057,6 +1125,15 @@
+@@ -1028,6 +1096,15 @@ dependencies = [
+  "hashbrown",
+ ]
  
- [[package]]
- name = "itertools"
++[[package]]
++name = "itertools"
 +version = "0.13.0"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
@@ -197,15 +215,14 @@ aperture/examples/controls.rs.
 + "either",
 +]
 +
-+[[package]]
-+name = "itertools"
- version = "0.14.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-@@ -1191,6 +1268,43 @@
+ [[package]]
+ name = "itertools"
+ version = "0.15.0"
+@@ -1151,6 +1228,43 @@ dependencies = [
+  "system-deps 7.0.8",
  ]
  
- [[package]]
++[[package]]
 +name = "libloading"
 +version = "0.8.9"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,7 +245,7 @@ aperture/examples/controls.rs.
 + "libspa-sys",
 + "nom 8.0.0",
 + "rustix",
-+ "system-deps",
++ "system-deps 7.0.8",
 +]
 +
 +[[package]]
@@ -239,29 +256,29 @@ aperture/examples/controls.rs.
 +dependencies = [
 + "bindgen",
 + "cc",
-+ "system-deps",
++ "system-deps 7.0.8",
 +]
 +
-+[[package]]
+ [[package]]
  name = "linux-raw-sys"
  version = "0.12.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -1249,12 +1363,37 @@
+@@ -1209,12 +1323,37 @@ dependencies = [
+  "autocfg",
  ]
  
- [[package]]
++[[package]]
 +name = "minimal-lexical"
 +version = "0.2.1"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 +
-+[[package]]
+ [[package]]
  name = "muldiv"
  version = "1.0.1"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
  
- [[package]]
++[[package]]
 +name = "nom"
 +version = "7.1.3"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,14 +297,14 @@ aperture/examples/controls.rs.
 + "memchr",
 +]
 +
-+[[package]]
+ [[package]]
  name = "nu-ansi-term"
  version = "0.50.3"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -1399,6 +1538,31 @@
+@@ -1358,6 +1497,31 @@ dependencies = [
+  "futures-io",
  ]
  
- [[package]]
++[[package]]
 +name = "pipewire"
 +version = "0.10.1"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -309,47 +326,239 @@ aperture/examples/controls.rs.
 +dependencies = [
 + "bindgen",
 + "libspa-sys",
-+ "system-deps",
++ "system-deps 7.0.8",
 +]
 +
-+[[package]]
+ [[package]]
  name = "pkg-config"
- version = "0.3.32"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -1501,6 +1665,12 @@
+ version = "0.3.34"
+@@ -1450,6 +1614,12 @@ dependencies = [
+  "lru",
  ]
  
- [[package]]
++[[package]]
 +name = "rustc-hash"
 +version = "2.1.3"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 +
-+[[package]]
+ [[package]]
  name = "rustc_version"
  version = "0.4.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
-@@ -1863,6 +2033,12 @@
- checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+@@ -1543,6 +1713,12 @@ dependencies = [
+  "lazy_static",
+ ]
  
++[[package]]
++name = "shlex"
++version = "1.3.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
++
  [[package]]
+ name = "shlex"
+ version = "2.0.1"
+@@ -1823,6 +1999,12 @@ version = "1.0.26"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
+ 
++[[package]]
 +name = "unicode-width"
 +version = "0.2.2"
 +source = "registry+https://github.com/rust-lang/crates.io-index"
 +checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 +
-+[[package]]
- name = "unicode-xid"
- version = "0.2.6"
- source = "registry+https://github.com/rust-lang/crates.io-index"
+ [[package]]
+ name = "uuid"
+ version = "1.26.1"
+diff --git a/aperture/Cargo.toml b/aperture/Cargo.toml
+index be31a06..69c8735 100644
 --- a/aperture/Cargo.toml
 +++ b/aperture/Cargo.toml
-@@ -19,4 +19,5 @@
+@@ -20,4 +20,5 @@ gst-pbutils = { workspace = true }
  gst-video = { workspace = true }
  gtk = { workspace = true }
  log = { workspace = true }
 +pipewire = "0.10.1"
- rqrr = { version = "0.10", default-features = false }
+ rqrr = { version = "0.11", default-features = false }
+diff --git a/aperture/examples/controls.rs b/aperture/examples/controls.rs
+new file mode 100644
+index 0000000..36113e8
+--- /dev/null
++++ b/aperture/examples/controls.rs
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++//! Exercise the camera control API against real hardware.
++//!
++//! Lists every camera the device provider finds and the controls it exposes,
++//! then, if one of them has a focus control, streams from it and drives the
++//! lens through its range.
++//!
++//! Run it inside a graphical session, since `aperture::init` initialises GTK:
++//!
++//! ```sh
++//! WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 ./controls
++//! ```
++
++use std::time::{Duration, Instant};
++
++use gst::prelude::*;
++use gtk::gio::prelude::ListModelExt;
++use gtk::glib;
++
++/// Let the GLib main context run for a while so the device provider can
++/// deliver cameras and the pipeline can get going.
++fn pump(duration: Duration) {
++    let context = glib::MainContext::default();
++    let deadline = Instant::now() + duration;
++    while Instant::now() < deadline {
++        while context.iteration(false) {}
++        std::thread::sleep(Duration::from_millis(20));
++    }
++}
++
++/// Read the focus actuator directly, so the example checks itself rather than
++/// just reporting that a write did not fail.
++fn actuator_position() -> String {
++    let subdev = std::process::Command::new("sh")
++        .arg("-c")
++        .arg(
++            "media-ctl -d /dev/media0 -p 2>/dev/null \
++             | grep -A3 'entity.*ak7375' | grep 'device node name' | awk '{print $NF}'",
++        )
++        .output()
++        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
++        .unwrap_or_default();
++
++    if subdev.is_empty() {
++        return "<no ak7375 on this machine>".into();
++    }
++
++    std::process::Command::new("v4l2-ctl")
++        .args(["-d", &subdev, "-C", "focus_absolute"])
++        .output()
++        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
++        .unwrap_or_else(|_| "<v4l2-ctl failed>".into())
++}
++
++fn main() {
++    aperture::init("org.gnome.Snapshot.ControlsExample");
++
++    let provider = aperture::DeviceProvider::instance();
++    provider
++        .start()
++        .expect("could not start the device provider");
++    pump(Duration::from_secs(3));
++
++    let mut focus_camera = None;
++
++    for position in 0..provider.n_items() {
++        let Some(camera) = provider.camera(position) else {
++            continue;
++        };
++
++        println!("\n=== {} ===", camera.display_name());
++        let controls = camera.supported_controls();
++        if controls.is_empty() {
++            println!("  (no controls)");
++            continue;
++        }
++
++        for control in &controls {
++            if control.is_enum() {
++                let choices: Vec<String> = control
++                    .choices()
++                    .iter()
++                    .map(|choice| format!("{}={}", choice.label(), choice.value()))
++                    .collect();
++                println!("  {:<14} enum [{}]", control.name(), choices.join(", "));
++            } else {
++                println!(
++                    "  {:<14} {}..{} default {}",
++                    control.name(),
++                    control.minimum(),
++                    control.maximum(),
++                    control.default_value()
++                );
++            }
++        }
++
++        if camera.control("LensPosition").is_some() && focus_camera.is_none() {
++            focus_camera = Some(camera);
++        }
++    }
++
++    let Some(camera) = focus_camera else {
++        println!("\nNo camera with a LensPosition control; nothing more to do.");
++        return;
++    };
++
++    // The node id is what the control API binds to. It is also what we need to
++    // point a pipeline at, and it comes straight out of the device properties.
++    let node_id = camera
++        .properties()
++        .get("object.id")
++        .and_then(|value| value.get::<&str>().ok().map(str::to_string))
++        .expect("camera has no object.id");
++
++    println!(
++        "\n=== streaming from {} (node {node_id}) ===",
++        camera.display_name()
++    );
++    let pipeline = gst::parse::launch(&format!(
++        "pipewiresrc path={node_id} ! videoconvert ! fakesink"
++    ))
++    .expect("could not build the pipeline");
++    pipeline
++        .set_state(gst::State::Playing)
++        .expect("could not start the pipeline");
++
++    // Controls are discarded while the camera is idle, so wait for frames.
++    pump(Duration::from_secs(10));
++    println!("autofocus left the lens at {}", actuator_position());
++
++    let af_mode = camera.control("AfMode").expect("AfMode disappeared");
++    let manual = af_mode
++        .choices()
++        .iter()
++        .find(|choice| choice.label() == "AfModeManual")
++        .map(|choice| choice.value())
++        .expect("no AfModeManual choice");
++
++    println!("\nset AfMode = AfModeManual ({manual})");
++    camera
++        .set_control(&af_mode, manual)
++        .expect("could not set AfMode");
++    pump(Duration::from_secs(3));
++
++    let lens = camera
++        .control("LensPosition")
++        .expect("LensPosition disappeared");
++    for fraction in [0.0, 0.25, 0.5, 1.0] {
++        let value = lens.minimum() + (lens.maximum() - lens.minimum()) * fraction;
++        camera
++            .set_control(&lens, value)
++            .expect("could not set LensPosition");
++        pump(Duration::from_secs(4));
++        println!("set LensPosition = {value:<5} -> {}", actuator_position());
++    }
++
++    // Hand the lens back to the autofocus rather than leaving it parked.
++    println!("\nrestoring continuous autofocus");
++    if let Some(continuous) = af_mode
++        .choices()
++        .iter()
++        .find(|choice| choice.label() == "AfModeContinuous")
++    {
++        let _ = camera.set_control(&af_mode, continuous.value());
++        pump(Duration::from_secs(6));
++        println!("autofocus took over again at {}", actuator_position());
++    }
++
++    let _ = pipeline.set_state(gst::State::Null);
++}
+diff --git a/aperture/src/camera.rs b/aperture/src/camera.rs
+index fbe0f06..19c6da1 100644
 --- a/aperture/src/camera.rs
 +++ b/aperture/src/camera.rs
 @@ -1,15 +1,18 @@
@@ -372,7 +581,7 @@ aperture/examples/controls.rs.
  
      use glib::Properties;
  
-@@ -20,6 +23,9 @@
+@@ -20,6 +23,9 @@ mod imp {
      pub struct Camera {
          #[property(get, set, construct_only)]
          device: OnceCell<gst::Device>,
@@ -382,7 +591,7 @@ aperture/examples/controls.rs.
      }
  
      #[glib::object_subclass]
-@@ -122,6 +128,86 @@
+@@ -123,6 +129,86 @@ impl Camera {
              .unwrap_or_default()
      }
  
@@ -469,7 +678,10 @@ aperture/examples/controls.rs.
      /// Gets the `serial` of the device
      ///
      /// For newer pipewire versions this corresponds to the `target-object` of
---- a/aperture/src/camera_control.rs
+diff --git a/aperture/src/camera_control.rs b/aperture/src/camera_control.rs
+new file mode 100644
+index 0000000..2e42c69
+--- /dev/null
 +++ b/aperture/src/camera_control.rs
 @@ -0,0 +1,422 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
@@ -894,9 +1106,11 @@ aperture/examples/controls.rs.
 +        }
 +    }
 +}
+diff --git a/aperture/src/error.rs b/aperture/src/error.rs
+index 6b61c8e..25f3154 100644
 --- a/aperture/src/error.rs
 +++ b/aperture/src/error.rs
-@@ -85,3 +85,25 @@
+@@ -85,3 +85,25 @@ impl std::fmt::Display for PipewireError {
          }
      }
  }
@@ -922,9 +1136,11 @@ aperture/examples/controls.rs.
 +        }
 +    }
 +}
+diff --git a/aperture/src/lib.rs b/aperture/src/lib.rs
+index cb57112..2dd640d 100644
 --- a/aperture/src/lib.rs
 +++ b/aperture/src/lib.rs
-@@ -19,6 +19,7 @@
+@@ -19,6 +19,7 @@ use std::sync::{LazyLock, Once, OnceLock};
  use gst::prelude::*;
  
  mod camera;
@@ -932,7 +1148,7 @@ aperture/examples/controls.rs.
  mod code_detector;
  mod device_provider;
  mod enums;
-@@ -28,9 +29,10 @@
+@@ -28,9 +29,10 @@ mod utils;
  mod viewfinder;
  
  pub use camera::Camera;
@@ -944,176 +1160,6 @@ aperture/examples/controls.rs.
  pub(crate) use pipeline_tee::PipelineTee;
  pub use utils::{is_h264_encoding_supported, is_hardware_encoding_supported};
  pub use viewfinder::Viewfinder;
---- a/aperture/examples/controls.rs
-+++ b/aperture/examples/controls.rs
-@@ -0,0 +1,170 @@
-+// SPDX-License-Identifier: GPL-3.0-or-later
-+//! Exercise the camera control API against real hardware.
-+//!
-+//! Lists every camera the device provider finds and the controls it exposes,
-+//! then, if one of them has a focus control, streams from it and drives the
-+//! lens through its range.
-+//!
-+//! Run it inside a graphical session, since `aperture::init` initialises GTK:
-+//!
-+//! ```sh
-+//! WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 ./controls
-+//! ```
-+
-+use std::time::{Duration, Instant};
-+
-+use gst::prelude::*;
-+use gtk::gio::prelude::ListModelExt;
-+use gtk::glib;
-+
-+/// Let the GLib main context run for a while so the device provider can
-+/// deliver cameras and the pipeline can get going.
-+fn pump(duration: Duration) {
-+    let context = glib::MainContext::default();
-+    let deadline = Instant::now() + duration;
-+    while Instant::now() < deadline {
-+        while context.iteration(false) {}
-+        std::thread::sleep(Duration::from_millis(20));
-+    }
-+}
-+
-+/// Read the focus actuator directly, so the example checks itself rather than
-+/// just reporting that a write did not fail.
-+fn actuator_position() -> String {
-+    let subdev = std::process::Command::new("sh")
-+        .arg("-c")
-+        .arg(
-+            "media-ctl -d /dev/media0 -p 2>/dev/null \
-+             | grep -A3 'entity.*ak7375' | grep 'device node name' | awk '{print $NF}'",
-+        )
-+        .output()
-+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-+        .unwrap_or_default();
-+
-+    if subdev.is_empty() {
-+        return "<no ak7375 on this machine>".into();
-+    }
-+
-+    std::process::Command::new("v4l2-ctl")
-+        .args(["-d", &subdev, "-C", "focus_absolute"])
-+        .output()
-+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-+        .unwrap_or_else(|_| "<v4l2-ctl failed>".into())
-+}
-+
-+fn main() {
-+    aperture::init("org.gnome.Snapshot.ControlsExample");
-+
-+    let provider = aperture::DeviceProvider::instance();
-+    provider
-+        .start()
-+        .expect("could not start the device provider");
-+    pump(Duration::from_secs(3));
-+
-+    let mut focus_camera = None;
-+
-+    for position in 0..provider.n_items() {
-+        let Some(camera) = provider.camera(position) else {
-+            continue;
-+        };
-+
-+        println!("\n=== {} ===", camera.display_name());
-+        let controls = camera.supported_controls();
-+        if controls.is_empty() {
-+            println!("  (no controls)");
-+            continue;
-+        }
-+
-+        for control in &controls {
-+            if control.is_enum() {
-+                let choices: Vec<String> = control
-+                    .choices()
-+                    .iter()
-+                    .map(|choice| format!("{}={}", choice.label(), choice.value()))
-+                    .collect();
-+                println!("  {:<14} enum [{}]", control.name(), choices.join(", "));
-+            } else {
-+                println!(
-+                    "  {:<14} {}..{} default {}",
-+                    control.name(),
-+                    control.minimum(),
-+                    control.maximum(),
-+                    control.default_value()
-+                );
-+            }
-+        }
-+
-+        if camera.control("LensPosition").is_some() && focus_camera.is_none() {
-+            focus_camera = Some(camera);
-+        }
-+    }
-+
-+    let Some(camera) = focus_camera else {
-+        println!("\nNo camera with a LensPosition control; nothing more to do.");
-+        return;
-+    };
-+
-+    // The node id is what the control API binds to. It is also what we need to
-+    // point a pipeline at, and it comes straight out of the device properties.
-+    let node_id = camera
-+        .properties()
-+        .get("object.id")
-+        .and_then(|value| value.get::<&str>().ok().map(str::to_string))
-+        .expect("camera has no object.id");
-+
-+    println!(
-+        "\n=== streaming from {} (node {node_id}) ===",
-+        camera.display_name()
-+    );
-+    let pipeline = gst::parse::launch(&format!(
-+        "pipewiresrc path={node_id} ! videoconvert ! fakesink"
-+    ))
-+    .expect("could not build the pipeline");
-+    pipeline
-+        .set_state(gst::State::Playing)
-+        .expect("could not start the pipeline");
-+
-+    // Controls are discarded while the camera is idle, so wait for frames.
-+    pump(Duration::from_secs(10));
-+    println!("autofocus left the lens at {}", actuator_position());
-+
-+    let af_mode = camera.control("AfMode").expect("AfMode disappeared");
-+    let manual = af_mode
-+        .choices()
-+        .iter()
-+        .find(|choice| choice.label() == "AfModeManual")
-+        .map(|choice| choice.value())
-+        .expect("no AfModeManual choice");
-+
-+    println!("\nset AfMode = AfModeManual ({manual})");
-+    camera
-+        .set_control(&af_mode, manual)
-+        .expect("could not set AfMode");
-+    pump(Duration::from_secs(3));
-+
-+    let lens = camera
-+        .control("LensPosition")
-+        .expect("LensPosition disappeared");
-+    for fraction in [0.0, 0.25, 0.5, 1.0] {
-+        let value = lens.minimum() + (lens.maximum() - lens.minimum()) * fraction;
-+        camera
-+            .set_control(&lens, value)
-+            .expect("could not set LensPosition");
-+        pump(Duration::from_secs(4));
-+        println!("set LensPosition = {value:<5} -> {}", actuator_position());
-+    }
-+
-+    // Hand the lens back to the autofocus rather than leaving it parked.
-+    println!("\nrestoring continuous autofocus");
-+    if let Some(continuous) = af_mode
-+        .choices()
-+        .iter()
-+        .find(|choice| choice.label() == "AfModeContinuous")
-+    {
-+        let _ = camera.set_control(&af_mode, continuous.value());
-+        pump(Duration::from_secs(6));
-+        println!("autofocus took over again at {}", actuator_position());
-+    }
-+
-+    let _ = pipeline.set_state(gst::State::Null);
-+}
+-- 
+2.55.0
+
