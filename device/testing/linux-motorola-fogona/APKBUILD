@@ -94,7 +94,7 @@ makedepends="
 # so a '#' line is parsed as a package name: "dependency not found: #".)
 
 # Tip of `fogona-mainline`. Bump with every rebase; see the note above.
-_commit="b8d01b144e88ac8d3417defe94f2a1cbbdda7426"
+_commit="093cb951e4e0463dbedc87f5b550c65194a0c9f0"
 _config="config-$_flavor.$arch"
 
 source="
