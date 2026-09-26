@@ -19,6 +19,19 @@ suspend_sinks() {
 	done
 }
 
+# callaudiod switches the card back to HiFi on hangup, typically before this
+# loop notices the call is gone. The new HiFi node then fails to open hw:0,0
+# (EBUSY, our aplay still holds it), and WirePlumber drops it for good: no
+# output until the profile changes again. Once the PCMs are released, going
+# through "off" and back to the active profile recreates the node (setting
+# the same profile again is not reliably enough).
+reapply_profile() {
+	for d in /run/user/*; do
+		u=$(stat -c %U "$d")
+		su -s /bin/sh "$u" -c "export XDG_RUNTIME_DIR=$d; c=alsa_card.platform-sound; p=\$(pactl list cards 2>/dev/null | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1); [ -n \"\$p\" ] && pactl set-card-profile \$c off && pactl set-card-profile \$c \"\$p\""
+	done
+}
+
 # Both handset mics into TX_CODEC_DMA_TX_3 (MultiMedia2). Stock's
 # handset-dmic-endfire, with the second mic on DEC1 instead of DEC2 (the
 # backend runs channel mask 0x3): ch0 = AMIC1, bottom (ADC1, SWR_MIC0);
@@ -56,8 +69,10 @@ while true; do
 	elif [ $on = 1 ]; then
 		echo stop > $ctl
 		kill $apid $rpid 2>/dev/null
+		wait $apid $rpid 2>/dev/null
 		amixer -c0 -q cset name="Speaker Switch" 1
 		suspend_sinks 0
+		reapply_profile
 		log "call gone: stop"
 		on=0
 	fi
