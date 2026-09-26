@@ -18,8 +18,8 @@
 # selects the file (deviceinfo_bootimg_override_payload). Renaming either
 # silently stops the bootloader from reaching the hardware.
 pkgname=u-boot-fogona
-pkgver=2026.10_rc4
-pkgrel=4
+pkgver=2026.10_rc5
+pkgrel=0
 pkgdesc="U-Boot for the Motorola Moto G Play (2024), chainloaded by ABL"
 url="https://github.com/W-Floyd/u-boot"
 arch="aarch64"
