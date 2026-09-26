@@ -1,7 +1,7 @@
-From 929eac400d4aa9ce248bba12e4fc9779bcfb5ef2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Thu, 23 Jul 2026 09:19:33 +0200
-Subject: [PATCH 3/8] software_isp: debayer_egl: Re-add log for failing DMABuf
+Subject: [PATCH] software_isp: debayer_egl: Re-add log for failing DMABuf
  import
 
 The log was introduced in commit
@@ -21,7 +21,7 @@ Signed-off-by: Kieran Bingham <kieran.bingham@ideasonboard.com>
  1 file changed, 3 insertions(+)
 
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index 02651fe87922..09ab5a58c994 100644
+index 02651fe87..09ab5a58c 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -533,6 +533,9 @@ eGLImage *DebayerEGL::getCachedInputFrameBuffer(FrameBuffer *input, std::optiona

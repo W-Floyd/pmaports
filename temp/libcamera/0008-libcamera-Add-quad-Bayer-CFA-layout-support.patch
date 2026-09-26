@@ -1,7 +1,7 @@
-From 5f350d71db338ac8d363762231d5111e87e511e0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Frederic Laing <dev@fredfunk.tech>
 Date: Tue, 25 Aug 2026 18:16:06 +0000
-Subject: [PATCH 8/8] libcamera: Add quad-Bayer CFA layout support
+Subject: [PATCH] libcamera: Add quad-Bayer CFA layout support
 
 Quad-Bayer sensors arrange pixels in 2x2 same-colour cells. Treating
 the IMX371 full-resolution stream as a conventional Bayer pattern
@@ -44,7 +44,7 @@ Signed-off-by: Frederic Laing <dev@fredfunk.tech>
  create mode 100644 test/quad-bayer.cpp
 
 diff --git a/include/libcamera/internal/meson.build b/include/libcamera/internal/meson.build
-index fd375134a5c4..f928d241f770 100644
+index fd375134a..f928d241f 100644
 --- a/include/libcamera/internal/meson.build
 +++ b/include/libcamera/internal/meson.build
 @@ -40,6 +40,7 @@ libcamera_internal_headers = files([
@@ -57,7 +57,7 @@ index fd375134a5c4..f928d241f770 100644
      'sysfs.h',
 diff --git a/include/libcamera/internal/sensor_cfa_layout.h b/include/libcamera/internal/sensor_cfa_layout.h
 new file mode 100644
-index 000000000000..2ab95e2bfc76
+index 000000000..2ab95e2bf
 --- /dev/null
 +++ b/include/libcamera/internal/sensor_cfa_layout.h
 @@ -0,0 +1,46 @@
@@ -108,7 +108,7 @@ index 000000000000..2ab95e2bfc76
 +
 +} /* namespace libcamera */
 diff --git a/include/libcamera/internal/software_isp/meson.build b/include/libcamera/internal/software_isp/meson.build
-index df7c3b97dbca..598b44873296 100644
+index df7c3b97d..598b44873 100644
 --- a/include/libcamera/internal/software_isp/meson.build
 +++ b/include/libcamera/internal/software_isp/meson.build
 @@ -3,6 +3,7 @@
@@ -121,7 +121,7 @@ index df7c3b97dbca..598b44873296 100644
      'swstats_cpu.h',
 diff --git a/include/libcamera/internal/software_isp/quad_bayer.h b/include/libcamera/internal/software_isp/quad_bayer.h
 new file mode 100644
-index 000000000000..9971e6def5ee
+index 000000000..9971e6def
 --- /dev/null
 +++ b/include/libcamera/internal/software_isp/quad_bayer.h
 @@ -0,0 +1,158 @@
@@ -284,7 +284,7 @@ index 000000000000..9971e6def5ee
 +
 +} /* namespace libcamera */
 diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
-index 551870921862..6fe60e6a0bb2 100644
+index 551870921..6fe60e6a0 100644
 --- a/include/libcamera/internal/software_isp/swstats_cpu.h
 +++ b/include/libcamera/internal/software_isp/swstats_cpu.h
 @@ -35,7 +35,7 @@ struct StreamConfiguration;
@@ -320,7 +320,7 @@ index 551870921862..6fe60e6a0bb2 100644
  	std::vector<SwIspStats> stats_;
  	SharedMemObject<SwIspStats> sharedStats_;
 diff --git a/src/ipa/rpi/cam_helper/cam_helper.cpp b/src/ipa/rpi/cam_helper/cam_helper.cpp
-index dfdcd167839a..6c7cf3a29e30 100644
+index dfdcd1678..6c7cf3a29 100644
 --- a/src/ipa/rpi/cam_helper/cam_helper.cpp
 +++ b/src/ipa/rpi/cam_helper/cam_helper.cpp
 @@ -206,8 +206,12 @@ unsigned int CamHelper::mistrustFramesModeSwitch() const
@@ -339,7 +339,7 @@ index dfdcd167839a..6c7cf3a29e30 100644
  
  void CamHelper::parseEmbeddedData(Span<const uint8_t> buffer,
 diff --git a/src/ipa/rpi/cam_helper/cam_helper.h b/src/ipa/rpi/cam_helper/cam_helper.h
-index bd101895f23e..6dac8c7a7b62 100644
+index bd101895f..6dac8c7a7 100644
 --- a/src/ipa/rpi/cam_helper/cam_helper.h
 +++ b/src/ipa/rpi/cam_helper/cam_helper.h
 @@ -13,12 +13,14 @@
@@ -376,7 +376,7 @@ index bd101895f23e..6dac8c7a7b62 100644
  private:
  	/*
 diff --git a/src/ipa/rpi/cam_helper/cam_helper_imx708.cpp b/src/ipa/rpi/cam_helper/cam_helper_imx708.cpp
-index e7b8d6712185..6150909ca34f 100644
+index e7b8d6712..6150909ca 100644
 --- a/src/ipa/rpi/cam_helper/cam_helper_imx708.cpp
 +++ b/src/ipa/rpi/cam_helper/cam_helper_imx708.cpp
 @@ -58,7 +58,6 @@ public:
@@ -401,7 +401,7 @@ index e7b8d6712185..6150909ca34f 100644
  				       Metadata &metadata) const
  {
 diff --git a/src/ipa/rpi/common/ipa_base.cpp b/src/ipa/rpi/common/ipa_base.cpp
-index dacafa578c98..8f6b987edcd3 100644
+index dacafa578..8f6b987ed 100644
 --- a/src/ipa/rpi/common/ipa_base.cpp
 +++ b/src/ipa/rpi/common/ipa_base.cpp
 @@ -144,6 +144,7 @@ int32_t IpaBase::init(const IPASettings &settings, const InitParams &params, Ini
@@ -413,7 +413,7 @@ index dacafa578c98..8f6b987edcd3 100644
  	/* Pass out the sensor metadata to the pipeline handler */
  	int sensorMetadata = helper_->sensorEmbeddedDataPresent();
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 0b641a5f35c5..d20d9d6fb694 100644
+index 0b641a5f3..d20d9d6fb 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
 @@ -71,6 +71,26 @@ uniform vec3 blacklevel;
@@ -512,7 +512,7 @@ index 0b641a5f35c5..d20d9d6fb694 100644
  		fetch(xcoords[0], ycoords[1]));		/* D2: (-1,1) */
  	patterns = (patterns + temp) * 0.5;
 diff --git a/src/libcamera/software_isp/debayer.cpp b/src/libcamera/software_isp/debayer.cpp
-index 56446f55d44f..d60b2a2318a8 100644
+index 56446f55d..d60b2a231 100644
 --- a/src/libcamera/software_isp/debayer.cpp
 +++ b/src/libcamera/software_isp/debayer.cpp
 @@ -56,8 +56,8 @@ LOG_DEFINE_CATEGORY(Debayer)
@@ -527,7 +527,7 @@ index 56446f55d44f..d60b2a2318a8 100644
  }
  
 diff --git a/src/libcamera/software_isp/debayer.h b/src/libcamera/software_isp/debayer.h
-index 28f1b857b388..6c52ed0249a4 100644
+index 28f1b857b..6c52ed024 100644
 --- a/src/libcamera/software_isp/debayer.h
 +++ b/src/libcamera/software_isp/debayer.h
 @@ -35,7 +35,7 @@ LOG_DECLARE_CATEGORY(Debayer)
@@ -548,7 +548,7 @@ index 28f1b857b388..6c52ed0249a4 100644
  private:
  	virtual Size patternSize(PixelFormat inputFormat) = 0;
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index ae06dc0d2a3d..f8cf81dad172 100644
+index ae06dc0d2..f8cf81dad 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -24,6 +24,7 @@
@@ -696,7 +696,7 @@ index ae06dc0d2a3d..f8cf81dad172 100644
  	unsigned int borderHeight = patternSize.height;
  
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index d6223f3a9724..8e6b4af91476 100644
+index d6223f3a9..8e6b4af91 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -9,6 +9,7 @@
@@ -726,7 +726,7 @@ index d6223f3a9724..8e6b4af91476 100644
  	GLint textureUniformBayerDataIn_;
  
 diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
-index c73a16ce0a29..74973d9ef99e 100644
+index c73a16ce0..74973d9ef 100644
 --- a/src/libcamera/software_isp/software_isp.cpp
 +++ b/src/libcamera/software_isp/software_isp.cpp
 @@ -26,6 +26,7 @@
@@ -772,7 +772,7 @@ index c73a16ce0a29..74973d9ef99e 100644
  		debayer_ = std::make_unique<DebayerCpu>(std::move(stats), cm);
  
 diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
-index 7fb77ce7ddd6..0d3359422caf 100644
+index 7fb77ce7d..0d3359422 100644
 --- a/src/libcamera/software_isp/swstats_cpu.cpp
 +++ b/src/libcamera/software_isp/swstats_cpu.cpp
 @@ -17,6 +17,7 @@
@@ -869,7 +869,7 @@ index 7fb77ce7ddd6..0d3359422caf 100644
   * \brief Calculate statistics for a frame in one go
   * \param[in] frame The frame number
 diff --git a/test/meson.build b/test/meson.build
-index e4450625ee4c..d41ce23c0fd3 100644
+index e4450625e..d41ce23c0 100644
 --- a/test/meson.build
 +++ b/test/meson.build
 @@ -51,6 +51,7 @@ public_tests = [
@@ -882,7 +882,7 @@ index e4450625ee4c..d41ce23c0fd3 100644
      {'name': 'delayed_controls', 'sources': ['delayed_controls.cpp']},
 diff --git a/test/quad-bayer.cpp b/test/quad-bayer.cpp
 new file mode 100644
-index 000000000000..ddbee01c3f12
+index 000000000..ddbee01c3
 --- /dev/null
 +++ b/test/quad-bayer.cpp
 @@ -0,0 +1,224 @@

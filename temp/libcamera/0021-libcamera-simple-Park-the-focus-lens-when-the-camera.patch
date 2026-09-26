@@ -24,7 +24,7 @@ Signed-off-by: William Floyd <git@notmy.space>
  1 file changed, 37 insertions(+), 3 deletions(-)
 
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index f90bb88..d3dcb80 100644
+index f90bb88f0..d3dcb8012 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -7,6 +7,7 @@

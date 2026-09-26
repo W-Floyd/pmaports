@@ -1,7 +1,7 @@
-From 41a104edbb6c86f216d325a42a77bae2d39ccc42 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
-Subject: [PATCH 20/20] ipa: soft: Add an Aperture algorithm
+Subject: [PATCH] ipa: soft: Add an Aperture algorithm
 
 Map controls::LensAperture onto the iris actuator, supporting both kinds
 of hardware from one tuning description.
@@ -32,7 +32,7 @@ Signed-off-by: William Floyd <git@notmy.space>
  create mode 100644 src/ipa/simple/algorithms/aperture.h
 
 diff --git a/src/apps/cam/camera_session.cpp b/src/apps/cam/camera_session.cpp
-index 17444a2..7d81e4d 100644
+index 17444a217..7d81e4d75 100644
 --- a/src/apps/cam/camera_session.cpp
 +++ b/src/apps/cam/camera_session.cpp
 @@ -197,15 +197,31 @@ void CameraSession::listControls() const
@@ -71,7 +71,7 @@ index 17444a2..7d81e4d 100644
  				else
 diff --git a/src/ipa/simple/algorithms/aperture.cpp b/src/ipa/simple/algorithms/aperture.cpp
 new file mode 100644
-index 0000000..708b1c1
+index 000000000..708b1c10b
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/aperture.cpp
 @@ -0,0 +1,302 @@
@@ -379,7 +379,7 @@ index 0000000..708b1c1
 +} /* namespace libcamera */
 diff --git a/src/ipa/simple/algorithms/aperture.h b/src/ipa/simple/algorithms/aperture.h
 new file mode 100644
-index 0000000..0006198
+index 000000000..000619889
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/aperture.h
 @@ -0,0 +1,72 @@
@@ -456,7 +456,7 @@ index 0000000..0006198
 +
 +} /* namespace libcamera */
 diff --git a/src/ipa/simple/algorithms/meson.build b/src/ipa/simple/algorithms/meson.build
-index 8950b00..a74adf6 100644
+index 8950b008f..a74adf6c7 100644
 --- a/src/ipa/simple/algorithms/meson.build
 +++ b/src/ipa/simple/algorithms/meson.build
 @@ -7,4 +7,5 @@ soft_simple_ipa_algorithms = files([
@@ -466,7 +466,7 @@ index 8950b00..a74adf6 100644
 +    'aperture.cpp',
  ])
 diff --git a/src/libcamera/control_ids_core.yaml b/src/libcamera/control_ids_core.yaml
-index 6f87091..4af6abd 100644
+index 6f870910d..4af6abd2d 100644
 --- a/src/libcamera/control_ids_core.yaml
 +++ b/src/libcamera/control_ids_core.yaml
 @@ -1386,25 +1386,31 @@ controls:
@@ -518,3 +518,6 @@ index 6f87091..4af6abd 100644
 +        offer the real choices instead of a slider.
  
  ...
+-- 
+2.55.0
+

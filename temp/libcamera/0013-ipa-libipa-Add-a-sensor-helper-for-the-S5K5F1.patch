@@ -1,7 +1,7 @@
-From 438a461fd5d183f912194677148f0caf6735a76c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Tue, 8 Sep 2026 13:19:17 +0000
-Subject: [PATCH 13/14] ipa: libipa: Add a sensor helper for the S5K5F1
+Subject: [PATCH] ipa: libipa: Add a sensor helper for the S5K5F1
 
 The Samsung S5K5F1 is the monochrome infrared iris sensor on the Snapdragon
 Galaxy S9. Without a helper the SoftISP cannot convert between gain code
@@ -19,7 +19,7 @@ frames captured with the infrared illuminator off, at 64 in 10 bits.
  1 file changed, 12 insertions(+)
 
 diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
-index 8995a53..93c0dd2 100644
+index 8995a53ba..93c0dd2a2 100644
 --- a/src/ipa/libipa/camera_sensor_helper.cpp
 +++ b/src/ipa/libipa/camera_sensor_helper.cpp
 @@ -851,6 +851,18 @@ public:
@@ -41,3 +41,6 @@ index 8995a53..93c0dd2 100644
  class CameraSensorHelperVd55g1 : public CameraSensorHelper
  {
  public:
+-- 
+2.55.0
+

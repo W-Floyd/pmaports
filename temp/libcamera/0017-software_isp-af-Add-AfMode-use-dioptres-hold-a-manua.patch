@@ -1,6 +1,8 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Mon, 8 Sep 2026 00:00:00 +0000
-Subject: [PATCH] software_isp: af: Add AfMode, use dioptres, hold a manual position
+Date: Tue, 8 Sep 2026 00:00:00 +0000
+Subject: [PATCH] software_isp: af: Add AfMode, use dioptres, hold a manual
+ position
 
 The soft ISP autofocus added in 0015 self-triggers: Af::step() treats any
 sharpness change of more than 30% as "focus lost" and restarts a sweep.
@@ -63,9 +65,34 @@ Along the way:
   - Offset the lens position by focus_min when mapping it onto the
     actuator range. This is a no-op for the ak7375 on starqltechn, whose
     range starts at 0, but it is wrong for any actuator that does not.
+---
+ .../internal/software_isp/software_isp.h      |   2 +-
+ include/libcamera/ipa/soft.mojom              |   3 +-
+ src/ipa/simple/algorithms/af.cpp              | 232 ++++++++++++++++--
+ src/ipa/simple/algorithms/af.h                |  15 ++
+ src/ipa/simple/ipa_context.h                  |   2 +
+ src/ipa/simple/soft_simple.cpp                |  49 ++--
+ src/libcamera/software_isp/software_isp.cpp   |  13 +-
+ 7 files changed, 272 insertions(+), 44 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index bf2cfea43..1d4b80212 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -47,7 +47,7 @@ LOG_DECLARE_CATEGORY(SoftwareIsp)
+ class SoftwareIsp : public Object
+ {
+ public:
+-	SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
++	SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 		    ControlInfoMap *ipaControls);
+ 	~SoftwareIsp();
+ 
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index e5767532c..3947d935d 100644
 --- a/include/libcamera/ipa/soft.mojom
 +++ b/include/libcamera/ipa/soft.mojom
-@@ -18,7 +18,8 @@
+@@ -18,7 +18,8 @@ interface IPASoftInterface {
  	     libcamera.SharedFD fdStats,
  	     libcamera.SharedFD fdParams,
  	     libcamera.IPACameraSensorInfo sensorInfo,
@@ -75,17 +102,8 @@ Along the way:
  		=> (int32 ret, libcamera.ControlInfoMap ipaControls, bool ccmEnabled);
  	start() => (int32 ret);
  	stop();
---- a/include/libcamera/internal/software_isp/software_isp.h
-+++ b/include/libcamera/internal/software_isp/software_isp.h
-@@ -47,7 +47,7 @@
- class SoftwareIsp : public Object
- {
- public:
--	SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
-+	SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
- 		    ControlInfoMap *ipaControls);
- 	~SoftwareIsp();
- 
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+index ea3c1b810..26aaa19e1 100644
 --- a/src/ipa/simple/algorithms/af.cpp
 +++ b/src/ipa/simple/algorithms/af.cpp
 @@ -8,11 +8,16 @@
@@ -105,7 +123,7 @@ Along the way:
  #include "control_ids.h"
  
  namespace libcamera {
-@@ -21,48 +26,199 @@
+@@ -21,48 +26,199 @@ LOG_DEFINE_CATEGORY(IPASoftAutoFocus)
  
  namespace ipa::soft::algorithms {
  
@@ -320,7 +338,7 @@ Along the way:
  }
  
    /*
-@@ -75,25 +231,37 @@
+@@ -75,25 +231,37 @@ void Af::queueRequest([[maybe_unused]] typename Module::Context &context,
  
  void Af::updateFocus([[maybe_unused]] IPAContext &context, [[maybe_unused]] IPAFrameContext &frameContext, [[maybe_unused]] double exposureMSV)
  {
@@ -364,7 +382,7 @@ Along the way:
    steps ++;
    // Even for sweep, we need some time to move to new lens position
    if(context.configuration.focus.skip != 0){
-@@ -115,13 +283,13 @@
+@@ -115,13 +283,13 @@ void Af::step(IPAContext &context, double& focus_pos, uint64_t sharp, bool& swee
  	if (focus_pos > context.configuration.focus.start && focus_pos < context.configuration.focus.stop)
  	  return;
  	
@@ -381,7 +399,7 @@ Along the way:
  	  // We want to search for maximum at smaller step, forget maximum from prev step
  	  context.configuration.focus.sharpness_max = 0;
  	  return;
-@@ -129,7 +297,7 @@
+@@ -129,7 +297,7 @@ void Af::step(IPAContext &context, double& focus_pos, uint64_t sharp, bool& swee
  
  	//We are done
  	sweep = false;
@@ -390,7 +408,7 @@ Along the way:
  	// We want to keep context.configuration.focus.sharpness_max, to detect when scene changes (aka focus lost)
  	focus_pos = context.configuration.focus.focus_max_pos;
  }
-@@ -146,12 +314,22 @@
+@@ -146,12 +314,22 @@ void Af::process([[maybe_unused]] IPAContext &context,
  		context.activeState.knobs.focus_sweep.value());
  	updateFocus(context, frameContext, 0);
  
@@ -415,20 +433,21 @@ Along the way:
  			     ? controls::AfStateScanning
  			     : controls::AfStateFocused);
  }
+diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
+index b9edb24f4..54bc3d409 100644
 --- a/src/ipa/simple/algorithms/af.h
 +++ b/src/ipa/simple/algorithms/af.h
-@@ -7,7 +7,10 @@
+@@ -7,6 +7,9 @@
  
  #pragma once
  
 +#include <stdint.h>
- 
-+#include "libipa/pwl.h"
 +
++#include "libipa/pwl.h"
+ 
  #include "algorithm.h"
  
- namespace libcamera {
-@@ -33,9 +36,21 @@
+@@ -33,9 +36,21 @@ public:
  		     ControlList &metadata) override;
  
  private:
@@ -450,9 +469,11 @@ Along the way:
  };
  
  } /* namespace ipa::soft::algorithms */
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 7d2a3282f..952b028e8 100644
 --- a/src/ipa/simple/ipa_context.h
 +++ b/src/ipa/simple/ipa_context.h
-@@ -70,6 +70,8 @@
+@@ -70,6 +70,8 @@ struct IPAActiveState {
  		/* 0..100 range, 50.0 = normal */
  		std::optional<double> focus_pos;
  		std::optional<bool> focus_sweep;
@@ -461,9 +482,11 @@ Along the way:
  	} knobs;
  };
  
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index 7c5c001a5..efd66652f 100644
 --- a/src/ipa/simple/soft_simple.cpp
 +++ b/src/ipa/simple/soft_simple.cpp
-@@ -57,6 +57,7 @@
+@@ -57,6 +57,7 @@ public:
  		 const SharedFD &fdParams,
  		 const IPACameraSensorInfo &sensorInfo,
  		 const ControlInfoMap &sensorControls,
@@ -471,7 +494,7 @@ Along the way:
  		 ControlInfoMap *ipaControls,
  		 bool *ccmEnabled) override;
  	int configure(const IPAConfigInfo &configInfo) override;
-@@ -74,6 +75,7 @@
+@@ -74,6 +75,7 @@ protected:
  
  private:
  	void updateExposure(double exposureMSV);
@@ -479,7 +502,7 @@ Along the way:
  
  	DebayerParams *params_;
  	SwIspStats *stats_;
-@@ -98,6 +100,7 @@
+@@ -98,6 +100,7 @@ int IPASoftSimple::init(const IPASettings &settings,
  			const SharedFD &fdParams,
  			const IPACameraSensorInfo &sensorInfo,
  			const ControlInfoMap &sensorControls,
@@ -487,7 +510,7 @@ Along the way:
  			ControlInfoMap *ipaControls,
  			bool *ccmEnabled)
  {
-@@ -110,6 +113,13 @@
+@@ -110,6 +113,13 @@ int IPASoftSimple::init(const IPASettings &settings,
  
  	context_.sensorInfo = sensorInfo;
  
@@ -501,7 +524,7 @@ Along the way:
  	/* Load the tuning data file */
  	File file(settings.configurationFile);
  	if (!file.open(File::OpenModeFlag::ReadOnly)) {
-@@ -201,6 +211,30 @@
+@@ -201,6 +211,30 @@ int IPASoftSimple::init(const IPASettings &settings,
  	return 0;
  }
  
@@ -532,7 +555,7 @@ Along the way:
  int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
  {
  	sensorInfoMap_ = configInfo.sensorControls;
-@@ -219,20 +253,7 @@
+@@ -219,20 +253,7 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
  	 * otherwise it is wiped along with the rest of the configuration and
  	 * the AF algorithm ends up mapping every position onto zero.
  	 */
@@ -554,6 +577,8 @@ Along the way:
  
  	context_.configuration.agc.lineDuration =
  		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 916097d8c..196b277ad 100644
 --- a/src/libcamera/software_isp/software_isp.cpp
 +++ b/src/libcamera/software_isp/software_isp.cpp
 @@ -24,6 +24,7 @@
@@ -564,7 +589,7 @@ Along the way:
  #include "libcamera/internal/framebuffer.h"
  #include "libcamera/internal/software_isp/debayer_params.h"
  #include "libcamera/internal/software_isp/quad_bayer.h"
-@@ -80,7 +81,7 @@
+@@ -80,7 +81,7 @@ LOG_DEFINE_CATEGORY(SoftwareIsp)
   * \param[out] ipaControls The IPA controls to update
   * handler
   */
@@ -573,7 +598,7 @@ Along the way:
  			 ControlInfoMap *ipaControls)
  	: ispWorkerThread_("SWIspWorker"),
  	  dmaHeap_(DmaBufAllocator::DmaBufAllocatorFlag::CmaHeap |
-@@ -166,11 +167,21 @@
+@@ -166,11 +167,21 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, const CameraSensor *sensor,
  		return;
  	}
  
@@ -595,3 +620,6 @@ Along the way:
  			 ipaControls,
  			 &ccmEnabled_);
  	if (ret) {
+-- 
+2.55.0
+

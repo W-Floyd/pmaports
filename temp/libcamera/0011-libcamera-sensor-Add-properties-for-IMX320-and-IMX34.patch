@@ -1,3 +1,4 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Fri, 4 Sep 2026 00:00:00 +0000
 Subject: [PATCH] libcamera: sensor: Add properties for IMX320 and IMX345
@@ -12,10 +13,15 @@ overshoots on a scene change and clips.
 Pixel pitches are from the Galaxy S9, which pairs a 1.4um rear IMX345 with a
 1.22um front IMX320. The delays follow the Sony family convention rather than
 individual measurement.
+---
+ .../sensor/camera_sensor_properties.cpp       | 20 +++++++++++++++++++
+ 1 file changed, 20 insertions(+)
 
---- a/b/src/libcamera/sensor/camera_sensor_properties.cpp
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 28043150e..7cc2d26bd 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
 +++ b/src/libcamera/sensor/camera_sensor_properties.cpp
-@@ -256,10 +256,30 @@
+@@ -256,11 +256,31 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
  			.testPatternModes = {},
  			.sensorDelays = { },
  		} },
@@ -33,7 +39,7 @@ individual measurement.
  			.unitCellSize = { 2000, 2000 },
  			.testPatternModes = {},
  			.sensorDelays = { },
-+		} },
+ 		} },
 +		{ "imx345", {
 +			.unitCellSize = { 1400, 1400 },
 +			.testPatternModes = {},
@@ -43,6 +49,10 @@ individual measurement.
 +				.vblankDelay = 2,
 +				.hblankDelay = 2
 +			},
- 		} },
++		} },
  		{ "imx415", {
  			.unitCellSize = { 1450, 1450 },
+ 			.testPatternModes = {},
+-- 
+2.55.0
+

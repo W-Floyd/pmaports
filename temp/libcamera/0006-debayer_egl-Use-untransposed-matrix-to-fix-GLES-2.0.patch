@@ -1,7 +1,7 @@
-From 2e2d412965dc84cc0bdcd770b76674a8da0cf419 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Sat, 29 Aug 2026 01:38:26 +0200
-Subject: [PATCH 6/8] debayer_egl: Use untransposed matrix to fix GLES 2.0
+Subject: [PATCH] debayer_egl: Use untransposed matrix to fix GLES 2.0
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -19,19 +19,12 @@ the matrix.
 Fixes: d780e285b593 ("shaders: bayer: Use native matrix multiplication")
 Closes: https://gitlab.freedesktop.org/camera/libcamera/-/work_items/342
 Signed-off-by: Robert Mader <robert.mader@collabora.com>
-
----
-
-Changes in v2:
- - Actually transpose the matrix to not re-introduce issues with CCMs
- - Add comment about GLES 2.0
- - Add "Closes:" link
 ---
  src/libcamera/software_isp/debayer_egl.cpp | 17 +++++++++++++++--
  1 file changed, 15 insertions(+), 2 deletions(-)
 
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index 5c0508239f9c..ae06dc0d2a3d 100644
+index 5c0508239..ae06dc0d2 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -479,8 +479,21 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara

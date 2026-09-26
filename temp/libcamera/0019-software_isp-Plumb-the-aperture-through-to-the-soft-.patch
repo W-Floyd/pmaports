@@ -1,8 +1,7 @@
-From 8cb6e8629a590a988dfce2bddf83d5ed3536f7fd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
-Subject: [PATCH 19/20] software_isp: Plumb the aperture through to the soft
- IPA
+Subject: [PATCH] software_isp: Plumb the aperture through to the soft IPA
 
 Carry the iris lens's controls to the IPA and its chosen iris position
 back, alongside the existing focus path. As with focus, the ControlInfoMap
@@ -31,7 +30,7 @@ Signed-off-by: William Floyd <git@notmy.space>
  6 files changed, 93 insertions(+), 15 deletions(-)
 
 diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
-index 1d4b802..70a9175 100644
+index 1d4b80212..70a9175a9 100644
 --- a/include/libcamera/internal/software_isp/software_isp.h
 +++ b/include/libcamera/internal/software_isp/software_isp.h
 @@ -86,11 +86,13 @@ public:
@@ -51,7 +50,7 @@ index 1d4b802..70a9175 100644
  	void inputReady(FrameBuffer *input);
  	void outputReady(FrameBuffer *output);
 diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
-index 3947d93..3c1e849 100644
+index 3947d935d..3c1e84994 100644
 --- a/include/libcamera/ipa/soft.mojom
 +++ b/include/libcamera/ipa/soft.mojom
 @@ -11,6 +11,7 @@ import "include/libcamera/ipa/core.mojom";
@@ -84,7 +83,7 @@ index 3947d93..3c1e849 100644
  	metadataReady(uint32 frame, libcamera.ControlList metadata);
  };
 diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
-index 952b028..af61395 100644
+index 952b028e8..af613954f 100644
 --- a/src/ipa/simple/ipa_context.h
 +++ b/src/ipa/simple/ipa_context.h
 @@ -40,6 +40,13 @@ struct IPASessionConfiguration {
@@ -122,7 +121,7 @@ index 952b028..af61395 100644
  
  	float gamma;
 diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
-index efd6665..e2f1e37 100644
+index efd66652f..e2f1e370a 100644
 --- a/src/ipa/simple/soft_simple.cpp
 +++ b/src/ipa/simple/soft_simple.cpp
 @@ -58,6 +58,7 @@ public:
@@ -228,7 +227,7 @@ index efd6665..e2f1e37 100644
  
  std::string IPASoftSimple::logPrefix() const
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index 553e4c6..f90bb88 100644
+index 553e4c6d5..f90bb88f0 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -375,7 +375,8 @@ private:
@@ -283,7 +282,7 @@ index 553e4c6..f90bb88 100644
  	}
  }
 diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
-index 196b277..503ff45 100644
+index 196b277ad..503ff45d9 100644
 --- a/src/libcamera/software_isp/software_isp.cpp
 +++ b/src/libcamera/software_isp/software_isp.cpp
 @@ -176,12 +176,23 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
@@ -324,3 +323,6 @@ index 196b277..503ff45 100644
  }
  
  void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)
+-- 
+2.55.0
+

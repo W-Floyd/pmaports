@@ -1,6 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 08:55:58 +0000
+Subject: [PATCH] software_isp: Add contrast autofocus
+
+The simple pipeline handler had no autofocus at all: libcamera's AF
+algorithms live only in the ipu3 and rpi IPAs, so on qcom-camss the
+focus actuator was unreachable even though the kernel side was
+complete (imx345 declares lens-focus = <&cam_vcm>, and camss creates
+the ancillary link that CameraSensor turns into a CameraLens).
+
+Port the AF stack from Pavel Machek's millicam_af_5 branch, whose
+manual-focus foundation is on the list as patchwork 26241. The IPA
+gains a sharpness statistic and an Af algorithm, and drives the lens
+through a new lensControls argument to setSensorControls, which the
+pipeline handler applies via CameraLens::setFocusPosition().
+
+Rebased onto 0.7.2, which needed the per-line stats functions to take
+the row number so the metric can be windowed vertically. Three fixes
+on top of the original:
+
+- SwStatsCpu::startFrame() and finishFrame() enumerate the fields they
+  reset and merge, so sharpness had to be added to both. Without that
+  the shared statistics buffer was never written and the IPA read a
+  constant zero, leaving AF permanently idle.
+
+- The packed formats compared a byte offset against a pixel width when
+  windowing, so the horizontal window was wrong for them.
+
+- The focus range was recorded before configure() clears the IPA
+  context, so it was wiped and every focus position mapped onto zero.
+  The lens then never moved despite the sweep converging.
+
+Report sharpness as FocusFoM and the scan progress as AfState rather
+than overloading AeState.
+
+Verified on samsung-starqltechn (IMX345 + AK7375): the sweep
+converges coarse-to-fine in ~3.5s and parks the actuator at the peak,
+e.g. best focus 34.5 -> code 352, which agrees with a manual sweep of
+focus_absolute that peaked at 384 on a different scene. AF re-runs by
+itself when the scene changes, so it needs no app or PipeWire support.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/software_isp.h      |   4 +-
+ .../internal/software_isp/swisp_stats.h       |   4 +
+ .../internal/software_isp/swstats_cpu.h       |  22 +--
+ include/libcamera/ipa/soft.mojom              |   3 +-
+ src/ipa/simple/algorithms/af.cpp              | 163 ++++++++++++++++++
+ src/ipa/simple/algorithms/af.h                |  43 +++++
+ src/ipa/simple/algorithms/meson.build         |   1 +
+ src/ipa/simple/data/uncalibrated.yaml         |   1 +
+ src/ipa/simple/ipa_context.h                  |  14 ++
+ src/ipa/simple/soft_simple.cpp                |  28 ++-
+ src/libcamera/pipeline/simple/simple.cpp      |  24 ++-
+ src/libcamera/software_isp/software_isp.cpp   |   4 +-
+ src/libcamera/software_isp/swstats_cpu.cpp    |  56 ++++--
+ 13 files changed, 335 insertions(+), 32 deletions(-)
+ create mode 100644 src/ipa/simple/algorithms/af.cpp
+ create mode 100644 src/ipa/simple/algorithms/af.h
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 4f72dce9b..bf2cfea43 100644
 --- a/include/libcamera/internal/software_isp/software_isp.h
 +++ b/include/libcamera/internal/software_isp/software_isp.h
-@@ -86,11 +86,11 @@
+@@ -86,11 +86,11 @@ public:
  	Signal<FrameBuffer *> outputBufferReady;
  	Signal<uint32_t, uint32_t> ispStatsReady;
  	Signal<uint32_t, const ControlList &> metadataReady;
@@ -14,9 +77,11 @@
  	void statsReady(uint32_t frame, uint32_t bufferId);
  	void inputReady(FrameBuffer *input);
  	void outputReady(FrameBuffer *output);
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index d9d0d9be8..c2ec20e42 100644
 --- a/include/libcamera/internal/software_isp/swisp_stats.h
 +++ b/include/libcamera/internal/software_isp/swisp_stats.h
-@@ -43,6 +43,10 @@
+@@ -43,6 +43,10 @@ struct SwIspStats {
  	 * \brief A histogram of luminance values of all the sampled pixels
  	 */
  	Histogram yHistogram;
@@ -27,9 +92,11 @@
  };
  
  } /* namespace libcamera */
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index 6fe60e6a0..dda4a66bc 100644
 --- a/include/libcamera/internal/software_isp/swstats_cpu.h
 +++ b/include/libcamera/internal/software_isp/swstats_cpu.h
-@@ -67,7 +67,7 @@
+@@ -67,7 +67,7 @@ public:
  		    y >= (window_.y + window_.height))
  			return;
  
@@ -38,7 +105,7 @@
  	}
  
  	void processLine2(uint32_t frame, unsigned int y, const uint8_t *src[], unsigned int statsBufferIndex = 0)
-@@ -79,29 +79,29 @@
+@@ -79,29 +79,29 @@ public:
  		    y >= (window_.y + window_.height))
  			return;
  
@@ -78,9 +145,11 @@
  
  	void processBayerFrame2(MappedFrameBuffer &in);
  	void processQuadBayerFrame(MappedFrameBuffer &in);
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index 77328c5fd..e5767532c 100644
 --- a/include/libcamera/ipa/soft.mojom
 +++ b/include/libcamera/ipa/soft.mojom
-@@ -10,6 +10,7 @@
+@@ -10,6 +10,7 @@ import "include/libcamera/ipa/core.mojom";
  
  struct IPAConfigInfo {
  	libcamera.ControlInfoMap sensorControls;
@@ -88,7 +157,7 @@
  };
  
  interface IPASoftInterface {
-@@ -32,7 +33,7 @@
+@@ -32,7 +33,7 @@ interface IPASoftInterface {
  };
  
  interface IPASoftEventInterface {
@@ -97,6 +166,9 @@
  	setIspParams();
  	metadataReady(uint32 frame, libcamera.ControlList metadata);
  };
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+new file mode 100644
+index 000000000..ea3c1b810
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/af.cpp
 @@ -0,0 +1,163 @@
@@ -263,6 +335,9 @@
 +} /* namespace ipa::soft::algorithms */
 +
 +} /* namespace libcamera */
+diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
+new file mode 100644
+index 000000000..b9edb24f4
 --- /dev/null
 +++ b/src/ipa/simple/algorithms/af.h
 @@ -0,0 +1,43 @@
@@ -309,25 +384,31 @@
 +} /* namespace ipa::soft::algorithms */
 +
 +} /* namespace libcamera */
+diff --git a/src/ipa/simple/algorithms/meson.build b/src/ipa/simple/algorithms/meson.build
+index 73c637220..8950b008f 100644
 --- a/src/ipa/simple/algorithms/meson.build
 +++ b/src/ipa/simple/algorithms/meson.build
-@@ -6,4 +6,5 @@
+@@ -6,4 +6,5 @@ soft_simple_ipa_algorithms = files([
      'agc.cpp',
      'blc.cpp',
      'ccm.cpp',
 +    'af.cpp',
  ])
+diff --git a/src/ipa/simple/data/uncalibrated.yaml b/src/ipa/simple/data/uncalibrated.yaml
+index fc90ca526..ede277d1d 100644
 --- a/src/ipa/simple/data/uncalibrated.yaml
 +++ b/src/ipa/simple/data/uncalibrated.yaml
-@@ -16,4 +16,5 @@
+@@ -16,4 +16,5 @@ algorithms:
    #                0, 0, 1]
    - Adjust:
    - Agc:
 +  - Af:
  ...
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 8ccfacb46..7d2a3282f 100644
 --- a/src/ipa/simple/ipa_context.h
 +++ b/src/ipa/simple/ipa_context.h
-@@ -33,6 +33,13 @@
+@@ -33,6 +33,13 @@ struct IPASessionConfiguration {
  	struct {
  		std::optional<uint8_t> level;
  	} black;
@@ -341,7 +422,7 @@
  };
  
  struct IPAActiveState {
-@@ -60,6 +67,9 @@
+@@ -60,6 +67,9 @@ struct IPAActiveState {
  		/* 0..2 range, 1.0 = normal */
  		std::optional<float> contrast;
  		std::optional<float> saturation;
@@ -351,20 +432,22 @@
  	} knobs;
  };
  
-@@ -70,6 +80,10 @@
- 		int32_t exposure;
+@@ -71,6 +81,10 @@ struct IPAFrameContext : public FrameContext {
  		double gain;
  	} sensor;
-+
+ 
 +	struct {
 +		int32_t focus_pos;
 +	} lens;
- 
++
  	RGB<float> gains;
  
+ 	float gamma;
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index 8bffd2a44..7c5c001a5 100644
 --- a/src/ipa/simple/soft_simple.cpp
 +++ b/src/ipa/simple/soft_simple.cpp
-@@ -79,6 +79,7 @@
+@@ -79,6 +79,7 @@ private:
  	SwIspStats *stats_;
  	std::unique_ptr<CameraSensorHelper> camHelper_;
  	ControlInfoMap sensorInfoMap_;
@@ -372,7 +455,7 @@
  
  	/* Local parameter storage */
  	struct IPAContext context_;
-@@ -203,6 +204,7 @@
+@@ -203,6 +204,7 @@ int IPASoftSimple::init(const IPASettings &settings,
  int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
  {
  	sensorInfoMap_ = configInfo.sensorControls;
@@ -380,7 +463,7 @@
  
  	const ControlInfo &exposureInfo = sensorInfoMap_.find(V4L2_CID_EXPOSURE)->second;
  	const ControlInfo &gainInfo = sensorInfoMap_.find(V4L2_CID_ANALOGUE_GAIN)->second;
-@@ -212,6 +214,26 @@
+@@ -212,6 +214,26 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
  	context_.activeState = {};
  	context_.frameContexts.clear();
  
@@ -407,7 +490,7 @@
  	context_.configuration.agc.lineDuration =
  		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
  	context_.configuration.agc.exposureMin = exposureInfo.min().get<int32_t>();
-@@ -337,7 +359,11 @@
+@@ -337,7 +359,11 @@ void IPASoftSimple::processStats(const uint32_t frame,
  	ctrls.set(V4L2_CID_ANALOGUE_GAIN,
  		  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
  
@@ -420,6 +503,8 @@
  }
  
  std::string IPASoftSimple::logPrefix() const
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index c8e1b8296..553e4c6d5 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -22,6 +22,7 @@
@@ -438,7 +523,7 @@
  #include "libcamera/internal/camera_manager.h"
  #include "libcamera/internal/camera_sensor.h"
  #include "libcamera/internal/camera_sensor_properties.h"
-@@ -372,7 +374,8 @@
+@@ -372,7 +374,8 @@ private:
  
  	void ispStatsReady(uint32_t frame, uint32_t bufferId);
  	void metadataReady(uint32_t frame, const ControlList &metadata);
@@ -448,7 +533,7 @@
  };
  
  class SimpleCameraConfiguration : public CameraConfiguration
-@@ -1067,7 +1070,8 @@
+@@ -1067,7 +1070,8 @@ void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata
  	tryCompleteRequest(info->request);
  }
  
@@ -458,7 +543,7 @@
  {
  	delayedCtrls_->push(sensorControls);
  	/*
-@@ -1082,6 +1086,18 @@
+@@ -1082,6 +1086,18 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls)
  		ControlList ctrls(sensorControls);
  		sensor_->setControls(&ctrls);
  	}
@@ -477,7 +562,7 @@
  }
  
  /* Retrieve all source pads connected to a sink pad through active routes. */
-@@ -1631,6 +1647,10 @@
+@@ -1631,6 +1647,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
  	} else {
  		ipa::soft::IPAConfigInfo configInfo;
  		configInfo.sensorControls = data->sensor_->controls();
@@ -488,9 +573,11 @@
  		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo);
  	}
  }
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 74973d9ef..916097d8c 100644
 --- a/src/libcamera/software_isp/software_isp.cpp
 +++ b/src/libcamera/software_isp/software_isp.cpp
-@@ -445,9 +445,9 @@
+@@ -445,9 +445,9 @@ void SoftwareIsp::saveIspParams()
  	debayerParams_ = *sharedParams_;
  }
  
@@ -502,9 +589,11 @@
  }
  
  void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 0d3359422..879dae82f 100644
 --- a/src/libcamera/software_isp/swstats_cpu.cpp
 +++ b/src/libcamera/software_isp/swstats_cpu.cpp
-@@ -178,7 +178,12 @@
+@@ -178,7 +178,12 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
                                            \
  	uint64_t sumR = 0;                \
  	uint64_t sumG = 0;                \
@@ -518,7 +607,7 @@
  
  #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
  	sumR += r;                         \
-@@ -188,14 +193,31 @@
+@@ -188,14 +193,31 @@ static constexpr unsigned int kBlueYMul = 29; /* 0.114 * 256 */
  	yVal = r * kRedYMul;               \
  	yVal += g * kGreenYMul;            \
  	yVal += b * kBlueYMul;             \
@@ -553,7 +642,7 @@
  {
  	const uint8_t *src0 = src[1] + window_.x;
  	const uint8_t *src1 = src[2] + window_.x;
-@@ -220,7 +242,7 @@
+@@ -220,7 +242,7 @@ void SwStatsCpu::statsBGGR8Line0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -562,7 +651,7 @@
  {
  	const uint16_t *src0 = (const uint16_t *)src[1] + window_.x;
  	const uint16_t *src1 = (const uint16_t *)src[2] + window_.x;
-@@ -246,7 +268,7 @@
+@@ -246,7 +268,7 @@ void SwStatsCpu::statsBGGR10Line0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -571,7 +660,7 @@
  {
  	const uint16_t *src0 = (const uint16_t *)src[1] + window_.x;
  	const uint16_t *src1 = (const uint16_t *)src[2] + window_.x;
-@@ -272,7 +294,7 @@
+@@ -272,7 +294,7 @@ void SwStatsCpu::statsBGGR12Line0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -580,7 +669,7 @@
  {
  	const uint8_t *src0 = src[1] + window_.x * 5 / 4;
  	const uint8_t *src1 = src[2] + window_.x * 5 / 4;
-@@ -282,6 +304,7 @@
+@@ -282,6 +304,7 @@ void SwStatsCpu::statsBGGR10PLine0(const uint8_t *src[], SwIspStats &stats)
  		std::swap(src0, src1);
  
  	SWSTATS_START_LINE_STATS(uint8_t)
@@ -588,7 +677,7 @@
  
  	/* x += 5 sample every other 2x2 block */
  	for (unsigned int x = 0; x < widthInBytes; x += 5) {
-@@ -298,7 +321,7 @@
+@@ -298,7 +321,7 @@ void SwStatsCpu::statsBGGR10PLine0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -597,7 +686,7 @@
  {
  	const uint8_t *src0 = src[1] + window_.x * 5 / 4;
  	const uint8_t *src1 = src[2] + window_.x * 5 / 4;
-@@ -308,6 +331,7 @@
+@@ -308,6 +331,7 @@ void SwStatsCpu::statsGBRG10PLine0(const uint8_t *src[], SwIspStats &stats)
  		std::swap(src0, src1);
  
  	SWSTATS_START_LINE_STATS(uint8_t)
@@ -605,7 +694,7 @@
  
  	/* x += 5 sample every other 2x2 block */
  	for (unsigned int x = 0; x < widthInBytes; x += 5) {
-@@ -324,11 +348,12 @@
+@@ -324,11 +348,12 @@ void SwStatsCpu::statsGBRG10PLine0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -619,7 +708,7 @@
  	(void)g2;
  
  	/* One logical RGGB tile occupies a 4x4 physical quad-cell block. */
-@@ -352,13 +377,14 @@
+@@ -352,13 +377,14 @@ void SwStatsCpu::statsQuadRGGB10P(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -635,7 +724,7 @@
  
  	if (swapLines_)
  		std::swap(src0, src1);
-@@ -378,13 +404,14 @@
+@@ -378,13 +404,14 @@ void SwStatsCpu::statsBGGR12PLine0(const uint8_t *src[], SwIspStats &stats)
  	SWSTATS_FINISH_LINE_STATS()
  }
  
@@ -651,7 +740,7 @@
  
  	if (swapLines_)
  		std::swap(src0, src1);
-@@ -421,6 +448,7 @@
+@@ -421,6 +448,7 @@ void SwStatsCpu::startFrame(uint32_t frame)
  	for (auto &s : stats_) {
  		s.sum_ = RGB<uint64_t>({ 0, 0, 0 });
  		s.yHistogram.fill(0);
@@ -659,7 +748,7 @@
  	}
  }
  
-@@ -438,10 +466,12 @@
+@@ -438,10 +466,12 @@ void SwStatsCpu::finishFrame(uint32_t frame, uint32_t bufferId)
  	if (valid) {
  		sharedStats_->sum_ = RGB<uint64_t>({ 0, 0, 0 });
  		sharedStats_->yHistogram.fill(0);
@@ -672,7 +761,7 @@
  		}
  
  		sharedStats_->sum_ >>= sumShift_;
-@@ -630,7 +660,7 @@
+@@ -630,7 +660,7 @@ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
  		/* linePointers[0] is not used by any stats0_ functions */
  		linePointers[1] = src;
  		linePointers[2] = src + stride_;
@@ -681,7 +770,7 @@
  		src += stride_ * 2;
  	}
  }
-@@ -643,7 +673,7 @@
+@@ -643,7 +673,7 @@ void SwStatsCpu::processQuadBayerFrame(MappedFrameBuffer &in)
  	for (unsigned int y = 0; y + 3 < window_.height; y += 8) {
  		for (unsigned int row = 0; row < 4; ++row)
  			rows[row] = src + row * stride_ + window_.x * 5 / 4;
@@ -690,3 +779,6 @@
  		src += stride_ * 8;
  	}
  }
+-- 
+2.55.0
+

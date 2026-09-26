@@ -32,7 +32,7 @@ Signed-off-by: William Floyd <git@notmy.space>
  2 files changed, 333 insertions(+), 60 deletions(-)
 
 diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
-index 26aaa19..6c8ecf4 100644
+index 26aaa19e1..6c8ecf42b 100644
 --- a/src/ipa/simple/algorithms/af.cpp
 +++ b/src/ipa/simple/algorithms/af.cpp
 @@ -70,6 +70,44 @@ static constexpr double kFallbackDefaultDioptres = 1.0;
@@ -436,7 +436,7 @@ index 26aaa19..6c8ecf4 100644
  
  	const int32_t mode =
 diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
-index 54bc3d4..0052a2d 100644
+index 54bc3d409..0052a2d51 100644
 --- a/src/ipa/simple/algorithms/af.h
 +++ b/src/ipa/simple/algorithms/af.h
 @@ -36,11 +36,52 @@ public:
