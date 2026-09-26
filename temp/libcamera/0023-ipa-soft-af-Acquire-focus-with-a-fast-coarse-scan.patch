@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 643f63e09f94171d7612d3ff5f316a539a76d02e Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 09:11:28 +0000
-Subject: [PATCH] ipa: soft: af: Acquire focus with a fast coarse scan
+Subject: [PATCH 23/39] ipa: soft: af: Acquire focus with a fast coarse scan
 
 First focus probed a small step either side of the default position and
 climbed from there. Far from focus the sharpness curve is broad and
@@ -298,6 +298,3 @@ index 0052a2d51..abf27765e 100644
  
  	/* Hill climbing. */
  	double centre_ = 0.0;		/* position being probed around */
--- 
-2.55.0
-

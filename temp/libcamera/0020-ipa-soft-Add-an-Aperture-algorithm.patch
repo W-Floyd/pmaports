@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From a03a87137c1c671d88c318517a1fecc1f4868d3e Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
-Subject: [PATCH] ipa: soft: Add an Aperture algorithm
+Subject: [PATCH 20/39] ipa: soft: Add an Aperture algorithm
 
 Map controls::LensAperture onto the iris actuator, supporting both kinds
 of hardware from one tuning description.
@@ -518,6 +518,3 @@ index 6f870910d..4af6abd2d 100644
 +        offer the real choices instead of a slider.
  
  ...
--- 
-2.55.0
-

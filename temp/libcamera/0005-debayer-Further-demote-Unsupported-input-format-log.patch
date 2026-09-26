@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 77c83feee6956e465ecd0149c42459f169791f10 Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Fri, 28 Aug 2026 18:26:58 +0200
-Subject: [PATCH] debayer: Further demote 'Unsupported input format' log
+Subject: [PATCH 05/39] debayer: Further demote 'Unsupported input format' log
 
 On some platforms such as the PinePhone these logs clutter the output of
 tools and the journal a lot. Let's silence them for normal usage.
@@ -40,6 +40,3 @@ index 09ab5a58c..5c0508239 100644
  		<< "Unsupported input format " << inputFormat;
  
  	return -EINVAL;
--- 
-2.55.0
-

@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From d6b90f0157723323fda2101732994e293a9a073b Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Fri, 4 Sep 2026 00:00:00 +0000
-Subject: [PATCH] ipa: soft: Make the AGC loop parameters tunable
+Subject: [PATCH 10/39] ipa: soft: Make the AGC loop parameters tunable
 
 The soft ISP AGC hardcodes its target, hysteresis, proportional gain and
 maximum per-frame step. The right values are not universal: the loop gain
@@ -147,6 +147,3 @@ index 112d9f5a1..6c6c3891a 100644
  };
  
  } /* namespace ipa::soft::algorithms */
--- 
-2.55.0
-

@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 6bc0036b4474a2d60d8367f9b8b66179818ca754 Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Thu, 23 Jul 2026 09:19:33 +0200
-Subject: [PATCH] software_isp: debayer_egl: Re-add log for failing DMABuf
- import
+Subject: [PATCH 03/39] software_isp: debayer_egl: Re-add log for failing
+ DMABuf import
 
 The log was introduced in commit
 93f0db167a8d ("debayer_egl: Implement dmabuf import for input buffers")
@@ -34,6 +34,3 @@ index 02651fe87..09ab5a58c 100644
  	} else if (!eglImageIn->dmabuf_import_failed_) {
  		egl_.activateBindTexture(*eglImageIn);
  		return eglImageIn;
--- 
-2.55.0
-

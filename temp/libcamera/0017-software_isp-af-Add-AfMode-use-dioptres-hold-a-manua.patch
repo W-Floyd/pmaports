@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cb47ed5770e46ed798f87118142435608503165d Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Tue, 8 Sep 2026 00:00:00 +0000
-Subject: [PATCH] software_isp: af: Add AfMode, use dioptres, hold a manual
- position
+Subject: [PATCH 17/39] software_isp: af: Add AfMode, use dioptres, hold a
+ manual position
 
 The soft ISP autofocus added in 0015 self-triggers: Af::step() treats any
 sharpness change of more than 30% as "focus lost" and restarts a sweep.
@@ -620,6 +620,3 @@ index 916097d8c..196b277ad 100644
  			 ipaControls,
  			 &ccmEnabled_);
  	if (ret) {
--- 
-2.55.0
-

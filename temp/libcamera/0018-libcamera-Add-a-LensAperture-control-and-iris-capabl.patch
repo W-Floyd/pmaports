@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 614f3cd1d7cdeafaf00814c48fe4bde88b4701e5 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:29:50 +0000
-Subject: [PATCH] libcamera: Add a LensAperture control and iris-capable lenses
+Subject: [PATCH 18/39] libcamera: Add a LensAperture control and iris-capable
+ lenses
 
 Cameras with a controllable aperture come in two kinds and libcamera
 could express neither: there was no aperture control at all, and
@@ -357,6 +358,3 @@ index 10eba0331..8530eeeee 100644
  
  		default:
  			LOG(CameraSensor, Warning)
--- 
-2.55.0
-

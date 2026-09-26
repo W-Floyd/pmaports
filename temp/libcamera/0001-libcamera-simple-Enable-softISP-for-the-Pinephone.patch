@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 2f1caa235b3cb150725eab1d88bbff9221c119ac Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Wed, 1 May 2024 18:12:02 +0200
-Subject: [PATCH] libcamera: simple: Enable softISP for the Pinephone
+Subject: [PATCH 01/39] libcamera: simple: Enable softISP for the Pinephone
 
 In theory the PP should be able to use the actual HW ISP, however in
 practice this does not work well yet - especially as the driver for the
@@ -29,6 +29,3 @@ index e26f438d9..24538649c 100644
  };
  
  bool isRaw(const StreamConfiguration &cfg)
--- 
-2.55.0
-

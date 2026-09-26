@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From bde4011835e263a8d98b6d5c365757611db59f3c Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Tue, 8 Sep 2026 13:19:17 +0000
-Subject: [PATCH] libcamera: sensor: Add properties for the S5K5F1
+Subject: [PATCH 14/39] libcamera: sensor: Add properties for the S5K5F1
 
 Without an entry libcamera warns "No static properties available for
 's5k5f1'" and publishes no SensorPhysicalSize.
@@ -33,6 +33,3 @@ index 7cc2d26bd..0fa143453 100644
  		{ "vd55g1", {
  			.unitCellSize = { 2160, 2160 },
  			.testPatternModes = {
--- 
-2.55.0
-

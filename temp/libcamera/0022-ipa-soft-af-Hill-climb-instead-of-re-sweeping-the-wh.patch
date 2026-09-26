@@ -1,8 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 655f98658e8b370106f692468a069030df2cdc67 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 08:42:36 +0000
-Subject: [PATCH] ipa: soft: af: Hill-climb instead of re-sweeping the whole
- range
+Subject: [PATCH 22/39] ipa: soft: af: Hill-climb instead of re-sweeping the
+ whole range
 
 The software ISP's autofocus swept the full range, infinity to the near
 limit in 2% steps and then finer around the best point, for every focus
@@ -493,6 +493,3 @@ index 54bc3d409..0052a2d51 100644
  
  	/*
  	 * Tuning data, kept here rather than in IPAContext::configuration
--- 
-2.55.0
-

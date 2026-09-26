@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b532aad3a6a9fcc505258b9409b6d33c0295713d Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Fri, 4 Sep 2026 00:00:00 +0000
-Subject: [PATCH] ipa: libipa: Add sensor helpers for IMX320 and IMX345
+Subject: [PATCH 09/39] ipa: libipa: Add sensor helpers for IMX320 and IMX345
 
 The Snapdragon Galaxy S9 uses a Sony IMX320 front and IMX345 rear sensor.
 Without a helper the SoftISP cannot convert between gain code and gain, so
@@ -55,6 +55,3 @@ index 9457d62b3..8995a53ba 100644
  class CameraSensorHelperImx415 : public CameraSensorHelper
  {
  public:
--- 
-2.55.0
-

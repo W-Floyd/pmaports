@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 2c1b73bd8503383ee92ac413b066b38b12df531a Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 08:55:58 +0000
-Subject: [PATCH] software_isp: Keep blown highlights out of exposure and AWB
+Subject: [PATCH 16/39] software_isp: Keep blown highlights out of exposure and
+ AWB
 
 Two defects that together made bright scenes come out overexposed with
 a green cast, on the rear camera of samsung-starqltechn.
@@ -378,6 +379,3 @@ index 879dae82f..14500a262 100644
  	}
  
  	sharedStats_->valid = valid;
--- 
-2.55.0
-

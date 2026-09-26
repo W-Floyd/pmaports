@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From f63cc7d776a9b3196d44015cd3d33069cbcab7ec Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 09:14:58 +0000
-Subject: [PATCH] ipa: soft: af: Refocus only once the scene holds still
+Subject: [PATCH 24/39] ipa: soft: af: Refocus only once the scene holds still
 
 Continuous AF treated any sustained sharpness drop as focus lost and
 searched at once. Contrast cannot tell defocus from motion blur or an
@@ -259,6 +259,3 @@ index abf27765e..ffc13eeef 100644
  
  	/*
  	 * Tuning data, kept here rather than in IPAContext::configuration
--- 
-2.55.0
-

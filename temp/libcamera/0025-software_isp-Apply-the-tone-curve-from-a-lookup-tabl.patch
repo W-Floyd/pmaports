@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 4abe9b7ed8ae6575a931c3bda31dbe6b3c6a614e Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 09:58:34 +0000
-Subject: [PATCH] software_isp: Apply the tone curve from a lookup table
+Subject: [PATCH 25/39] software_isp: Apply the tone curve from a lookup table
 
 The software ISP's output transfer function was fixed in the debayers:
 a contrast S-curve then x^gamma, computed from two parameters, per pixel
@@ -577,6 +577,3 @@ index 8e6b4af91..77d2d6785 100644
  
  	Size nativeOutputSize_;
  	Rectangle window_;
--- 
-2.55.0
-

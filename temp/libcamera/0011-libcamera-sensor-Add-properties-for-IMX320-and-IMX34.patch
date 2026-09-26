@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From cfe35359a94dc9839d9d639d2abc4f3fa3dc3ea7 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Fri, 4 Sep 2026 00:00:00 +0000
-Subject: [PATCH] libcamera: sensor: Add properties for IMX320 and IMX345
+Subject: [PATCH 11/39] libcamera: sensor: Add properties for IMX320 and IMX345
 
 Neither sensor is in the properties database, so libcamera warns that it is
 "assuming unverified defaults" and uses a gain delay of one frame. Every
@@ -53,6 +53,3 @@ index 28043150e..7cc2d26bd 100644
  		{ "imx415", {
  			.unitCellSize = { 1450, 1450 },
  			.testPatternModes = {},
--- 
-2.55.0
-

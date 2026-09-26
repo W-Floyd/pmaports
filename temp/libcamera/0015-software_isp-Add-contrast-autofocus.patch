@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 7a07f9abf7402b56c92816f7da6636eed334a173 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Sat, 26 Sep 2026 08:55:58 +0000
-Subject: [PATCH] software_isp: Add contrast autofocus
+Subject: [PATCH 15/39] software_isp: Add contrast autofocus
 
 The simple pipeline handler had no autofocus at all: libcamera's AF
 algorithms live only in the ipu3 and rpi IPAs, so on qcom-camss the
@@ -779,6 +779,3 @@ index 0d3359422..879dae82f 100644
  		src += stride_ * 8;
  	}
  }
--- 
-2.55.0
-

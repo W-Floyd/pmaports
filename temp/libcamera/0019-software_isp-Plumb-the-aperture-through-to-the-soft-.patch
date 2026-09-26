@@ -1,7 +1,8 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 50fd6a70cf56a0c87ec6ec6312ee243d3ea7b788 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Wed, 9 Sep 2026 17:30:06 +0000
-Subject: [PATCH] software_isp: Plumb the aperture through to the soft IPA
+Subject: [PATCH 19/39] software_isp: Plumb the aperture through to the soft
+ IPA
 
 Carry the iris lens's controls to the IPA and its chosen iris position
 back, alongside the existing focus path. As with focus, the ControlInfoMap
@@ -323,6 +324,3 @@ index 196b277ad..503ff45d9 100644
  }
  
  void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)
--- 
-2.55.0
-
