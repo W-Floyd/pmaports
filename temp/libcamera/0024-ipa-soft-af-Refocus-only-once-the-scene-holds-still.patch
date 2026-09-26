@@ -1,0 +1,264 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 09:14:58 +0000
+Subject: [PATCH] ipa: soft: af: Refocus only once the scene holds still
+
+Continuous AF treated any sustained sharpness drop as focus lost and
+searched at once. Contrast cannot tell defocus from motion blur or an
+exposure step, so while framing by hand the lens breathed constantly,
+and the reference ratcheted up to any single sharp frame, making the
+next ordinary frames look like a 20% drop.
+
+Do what contrast continuous-AF implementations generally do: keep a
+scene signature (the normalised luma histogram and exposure x gain), let
+a sustained drop or a changed scene only arm a refocus, and search once
+the signature has held still for ten frames. Sharpness recovering while
+waiting disarms it. For a second after focusing only a big drop counts,
+and the reference follows drift symmetrically and only while the scene
+is still.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/simple/algorithms/af.cpp | 130 +++++++++++++++++++++++++++----
+ src/ipa/simple/algorithms/af.h   |  19 ++++-
+ 2 files changed, 131 insertions(+), 18 deletions(-)
+
+diff --git a/src/ipa/simple/algorithms/af.cpp b/src/ipa/simple/algorithms/af.cpp
+index d86f1a977..5ce90f0ce 100644
+--- a/src/ipa/simple/algorithms/af.cpp
++++ b/src/ipa/simple/algorithms/af.cpp
+@@ -97,6 +97,21 @@ static constexpr double kLostDrop = 0.20;
+ static constexpr double kBigDrop = 0.50;
+ static constexpr unsigned int kLostFrames = 5;
+ 
++/*
++ * Contrast AF cannot tell defocus from motion or an exposure step, so, as
++ * contrast continuous-AF implementations generally do, a drop or a scene
++ * change only arms a refocus, which runs once the scene has held still
++ * (frame-to-frame signature change under kSceneStill) for kStableFrames.
++ * A scene counts as changed from the focused one beyond kSceneChanged.
++ * For kCooldownFrames after focusing only a big drop arms a refocus. The
++ * reference follows slow drift at kReferenceRate a frame.
++ */
++static constexpr double kSceneStill = 0.03;
++static constexpr double kSceneChanged = 0.25;
++static constexpr unsigned int kStableFrames = 10;
++static constexpr unsigned int kCooldownFrames = 30;
++static constexpr double kReferenceRate = 0.05;
++
+ /*
+  * Frames to discard after a move before measuring: requests already in
+  * flight were exposed at the old position. A move larger than
+@@ -197,6 +212,11 @@ int Af::configure(IPAContext &context,
+ 	settle_ = kSettleLarge;
+ 	reference_ = 0.0;
+ 	lostFrames_ = 0;
++	sinceFocus_ = 0;
++	armed_ = false;
++	stableFrames_ = 0;
++	exposure_ = 0.0;
++	hist_.fill(0.0);
+ 	return 0;
+ }
+ 
+@@ -381,6 +401,10 @@ void Af::settle(IPAContext &context, double dioptres, double sharp)
+ 	moveTo(context, dioptres);
+ 	reference_ = sharp;
+ 	lostFrames_ = 0;
++	sinceFocus_ = 0;
++	armed_ = false;
++	focusHist_ = hist_;
++	focusExposure_ = exposure_;
+ 	LOG(IPASoftAutoFocus, Info)
+ 		<< "Focused at " << dioptres << " dioptres (code "
+ 		<< lensCode(dioptres) << "), sharpness " << sharp;
+@@ -490,8 +514,50 @@ void Af::measured(IPAContext &context, double sharp)
+ 	}
+ }
+ 
+-void Af::step(IPAContext &context, uint64_t sharp)
++/*
++ * Track the scene signature: frame-to-frame stability, and the distance
++ * from the scene held when focus was last found. The distance measure is
++ * half the L1 distance between normalised luma histograms (0 identical, 1
++ * disjoint) plus the relative change of exposure x gain, so a pan, a new
++ * subject or an exposure step all register, while sensor noise does not.
++ */
++void Af::updateScene(const IPAContext &context, const SwIspStats *stats)
++{
++	std::array<double, SwIspStats::kYHistogramSize> hist;
++	double total = 0.0;
++	for (unsigned int i = 0; i < hist.size(); i++)
++		total += stats->yHistogram[i];
++	for (unsigned int i = 0; i < hist.size(); i++)
++		hist[i] = total > 0.0 ? stats->yHistogram[i] / total : 0.0;
++
++	const double exposure = context.activeState.agc.exposure *
++				context.activeState.agc.again;
++
++	auto distance = [&](const std::array<double, SwIspStats::kYHistogramSize> &ref,
++			    double refExposure) {
++		double d = 0.0;
++		for (unsigned int i = 0; i < hist.size(); i++)
++			d += std::abs(hist[i] - ref[i]);
++		d /= 2.0;
++		if (refExposure > 0.0)
++			d += std::abs(exposure - refExposure) / refExposure;
++		return d;
++	};
++
++	if (distance(hist_, exposure_) < kSceneStill)
++		stableFrames_++;
++	else
++		stableFrames_ = 0;
++
++	sceneChange_ = distance(focusHist_, focusExposure_);
++	hist_ = hist;
++	exposure_ = exposure;
++}
++
++void Af::step(IPAContext &context, const SwIspStats *stats)
+ {
++	updateScene(context, stats);
++
+ 	/*
+ 	 * In manual mode the position is entirely the application's to choose.
+ 	 * Return before the focus-loss check below, which would otherwise start a
+@@ -505,10 +571,10 @@ void Af::step(IPAContext &context, uint64_t sharp)
+ 		return;
+ 	}
+ 
++	const double s = static_cast<double>(stats->sharpness);
++
+ 	if (state_ == State::Idle) {
+ 		/* The first frames after configure(): acquire focus. */
+-		const double s = static_cast<double>(sharp);
+-
+ 		if (reference_ == 0.0) {
+ 			restart(context);
+ 			return;
+@@ -518,25 +584,55 @@ void Af::step(IPAContext &context, uint64_t sharp)
+ 			return;
+ 		}
+ 
+-		if (s < reference_ * (1.0 - kLostDrop)) {
+-			if (++lostFrames_ >= kLostFrames) {
+-				const bool big = s < reference_ * (1.0 - kBigDrop);
+-				LOG(IPASoftAutoFocus, Info)
+-					<< "Focus lost (sharpness " << s << ", was "
+-					<< reference_ << "), probing "
+-					<< (big ? "wide" : "fine");
+-				startProbe(context, big ? kProbeStepCoarse : kProbeStepFine);
+-			}
++		sinceFocus_++;
++
++		/*
++		 * Arm a refocus on a sustained sharpness drop or on a changed
++		 * scene. Right after focusing, only a big drop counts: the
++		 * reference was measured at a single moment and settles.
++		 */
++		const bool drop = s < reference_ * (1.0 - kLostDrop);
++		const bool big = s < reference_ * (1.0 - kBigDrop);
++		lostFrames_ = drop ? lostFrames_ + 1 : 0;
++
++		if (!armed_ &&
++		    ((lostFrames_ >= kLostFrames && (big || sinceFocus_ > kCooldownFrames)) ||
++		     sceneChange_ > kSceneChanged)) {
++			armed_ = true;
++			armedBig_ = big || sceneChange_ > kSceneChanged;
++			LOG(IPASoftAutoFocus, Debug)
++				<< "Refocus armed (sharpness " << s << ", reference "
++				<< reference_ << ", scene change " << sceneChange_ << ")";
++		}
++
++		/* Sharpness came back while waiting: nothing to do. */
++		if (armed_ && !drop && sceneChange_ <= kSceneChanged) {
++			armed_ = false;
++			lostFrames_ = 0;
++		}
++
++		/* Search only once the scene has held still. */
++		if (armed_ && stableFrames_ >= kStableFrames) {
++			armed_ = false;
++			LOG(IPASoftAutoFocus, Info)
++				<< "Focus lost (sharpness " << s << ", was "
++				<< reference_ << ", scene change " << sceneChange_
++				<< "), probing " << (armedBig_ ? "wide" : "fine");
++			startProbe(context, armedBig_ ? kProbeStepCoarse : kProbeStepFine);
+ 			return;
+ 		}
+ 
+-		/* Track slow drift, and a scene that got sharper. */
+-		lostFrames_ = 0;
+-		reference_ = s > reference_ ? s : 0.9 * reference_ + 0.1 * s;
++		/*
++		 * Follow slow drift, symmetrically and only while the scene is
++		 * still, so neither a single sharp frame nor motion blur moves
++		 * the bar.
++		 */
++		if (!armed_ && stableFrames_ >= kStableFrames)
++			reference_ = (1.0 - kReferenceRate) * reference_ + kReferenceRate * s;
+ 		return;
+ 	}
+ 
+-	acc_ += static_cast<double>(sharp);
++	acc_ += s;
+ 	if (++accCount_ < measureFrames_)
+ 		return;
+ 
+@@ -549,7 +645,7 @@ void Af::process([[maybe_unused]] IPAContext &context,
+ 		 [[maybe_unused]] const SwIspStats *stats,
+ 		 [[maybe_unused]] ControlList &metadata)
+ {
+-	step(context, stats->sharpness);
++	step(context, stats);
+ 	updateFocus(context, frameContext, 0);
+ 
+ 	const int32_t mode =
+diff --git a/src/ipa/simple/algorithms/af.h b/src/ipa/simple/algorithms/af.h
+index abf27765e..ffc13eeef 100644
+--- a/src/ipa/simple/algorithms/af.h
++++ b/src/ipa/simple/algorithms/af.h
+@@ -7,6 +7,7 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <stdint.h>
+ 
+ #include "libipa/pwl.h"
+@@ -52,7 +53,8 @@ private:
+ 	bool isManual(const IPAContext &context) const;
+ 	int32_t lensCode(double dioptres) const;
+ 	void updateFocus(IPAContext &context, IPAFrameContext &frameContext, double focus);
+-	void step(IPAContext &context, uint64_t sharp);
++	void step(IPAContext &context, const SwIspStats *stats);
++	void updateScene(const IPAContext &context, const SwIspStats *stats);
+ 	void restart(IPAContext &context);
+ 	void startScan(IPAContext &context);
+ 	void scanStep(IPAContext &context, double sharp);
+@@ -91,6 +93,21 @@ private:
+ 	/* Idle monitoring. */
+ 	double reference_ = 0.0;
+ 	unsigned int lostFrames_ = 0;
++	unsigned int sinceFocus_ = 0;	/* frames since the last focus */
++	bool armed_ = false;		/* a refocus is due once the scene is stable */
++	bool armedBig_ = false;
++
++	/*
++	 * Scene signature: the luma histogram normalised to sum 1, its mean,
++	 * and exposure x gain. Compared frame to frame for stability, and
++	 * against the signature held when focus was last found.
++	 */
++	std::array<double, SwIspStats::kYHistogramSize> hist_{};
++	std::array<double, SwIspStats::kYHistogramSize> focusHist_{};
++	double exposure_ = 0.0;
++	double focusExposure_ = 0.0;
++	unsigned int stableFrames_ = 0;
++	double sceneChange_ = 0.0;	/* distance from the focused scene */
+ 
+ 	/*
+ 	 * Tuning data, kept here rather than in IPAContext::configuration
+-- 
+2.55.0
+
