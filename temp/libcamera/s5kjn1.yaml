@@ -38,4 +38,6 @@ algorithms:
                 -0.15696, -0.51345,  1.67041 ]
   - Adjust:
   - Agc:
+  # The Moto G Play (2024) module has a GT9764 focus actuator.
+  - Af:
 ...

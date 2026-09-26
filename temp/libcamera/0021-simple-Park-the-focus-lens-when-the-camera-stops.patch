@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 08:27:27 +0000
+Subject: [PATCH] libcamera: simple: Park the focus lens when the camera stops
+
+CameraSensor opens the lens subdevice when the camera is created and
+keeps it open for the camera manager's lifetime, so with a long-lived
+client such as WirePlumber a VCM driver like dw9719 never
+runtime-suspends. Whatever position autofocus last set is held with the
+coil energised until the next capture: on the Moto G Play (2024) the
+lens stayed at code 552 of 1023 after a capture, about half the
+actuator's full-scale current, indefinitely.
+
+Move the lens to its minimum position in stopDevice(), after the
+software ISP (and with it the IPA) has stopped and can no longer move
+it.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/simple/simple.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 553e4c6..91bbcbf 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1768,6 +1768,20 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ 			data->swIsp_->stop();
+ 	}
+ 
++	/*
++	 * Park the focus lens. The lens subdevice stays open for as long as
++	 * the camera manager lives, so a VCM driver never runtime-suspends
++	 * and a lens left mid-travel keeps drawing coil current until the
++	 * next capture. The IPA is stopped by now and cannot move it again.
++	 */
++	CameraLens *focusLens = data->sensor_->focusLens();
++	if (focusLens) {
++		const ControlInfoMap &lensInfo = focusLens->controls();
++		auto it = lensInfo.find(V4L2_CID_FOCUS_ABSOLUTE);
++		if (it != lensInfo.end())
++			focusLens->setFocusPosition(it->second.min().get<int32_t>());
++	}
++
+ 	video->streamOff();
+ 	video->releaseBuffers();
+ 
+-- 
+2.55.0
+
