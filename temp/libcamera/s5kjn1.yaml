@@ -38,6 +38,10 @@ algorithms:
                 -0.15696, -0.51345,  1.67041 ]
   - Adjust:
   - Agc:
-  # The Moto G Play (2024) module has a GT9764 focus actuator.
+  # The Moto G Play (2024) module has a GT9764 focus actuator. Not
+  # calibrated: the map keeps the lens off its end stop (code 0, no coil
+  # current, which lands with a click) by starting infinity at code 40,
+  # stock's own initialCode for this module.
   - Af:
+      map: [ 0.0, 40, 10.0, 1023 ]
 ...

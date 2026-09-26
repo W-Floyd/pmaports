@@ -13,18 +13,60 @@ actuator's full-scale current, indefinitely.
 
 Move the lens to its minimum position in stopDevice(), after the
 software ISP (and with it the IPA) has stopped and can no longer move
-it.
+it. Ramp down from the last position set, 16 codes a millisecond as
+dw9719's own suspend does, rather than jumping: with no coil current at
+the bottom of travel, a lens dropped from mid-travel lands on its end
+stop with an audible click.
 
 Signed-off-by: William Floyd <git@notmy.space>
 ---
- src/libcamera/pipeline/simple/simple.cpp | 14 ++++++++++++++
- 1 file changed, 14 insertions(+)
+ src/libcamera/pipeline/simple/simple.cpp | 40 ++++++++++++++++++++++--
+ 1 file changed, 37 insertions(+), 3 deletions(-)
 
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index 553e4c6..91bbcbf 100644
+index f90bb88..d3dcb80 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
-@@ -1768,6 +1768,20 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <iterator>
+ #include <list>
+ #include <map>
+@@ -17,6 +18,7 @@
+ #include <stdint.h>
+ #include <string.h>
+ #include <string>
++#include <thread>
+ #include <unordered_map>
+ #include <utility>
+ #include <vector>
+@@ -351,6 +353,8 @@ public:
+ 	std::map<PixelFormat, std::vector<const Configuration *>> formats_;
+ 
+ 	std::unique_ptr<DelayedControls> delayedCtrls_;
++	/* The last focus position sent to the lens, for parking it at stop. */
++	std::optional<int32_t> lastFocusPosition_;
+ 
+ 	std::vector<std::unique_ptr<FrameBuffer>> conversionBuffers_;
+ 	struct RequestOutputs {
+@@ -1095,9 +1099,10 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls,
+ 	 * or not a frameStart signal exists.
+ 	 */
+ 	CameraLens *focusLens = sensor_->focusLens();
+-	if (focusLens && lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE))
+-		focusLens->setFocusPosition(
+-			lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>());
++	if (focusLens && lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE)) {
++		lastFocusPosition_ = lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>();
++		focusLens->setFocusPosition(*lastFocusPosition_);
++	}
+ 
+ 	CameraLens *irisLens = sensor_->irisLens();
+ 	if (irisLens && irisControls.contains(V4L2_CID_IRIS_ABSOLUTE))
+@@ -1777,6 +1782,35 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
  			data->swIsp_->stop();
  	}
  
@@ -33,13 +75,28 @@ index 553e4c6..91bbcbf 100644
 +	 * the camera manager lives, so a VCM driver never runtime-suspends
 +	 * and a lens left mid-travel keeps drawing coil current until the
 +	 * next capture. The IPA is stopped by now and cannot move it again.
++	 *
++	 * Ramp down rather than jump: at the bottom of its travel a VCM has
++	 * no coil current, and a lens dropped there from mid-travel lands on
++	 * its end stop with an audible click.
 +	 */
 +	CameraLens *focusLens = data->sensor_->focusLens();
 +	if (focusLens) {
 +		const ControlInfoMap &lensInfo = focusLens->controls();
 +		auto it = lensInfo.find(V4L2_CID_FOCUS_ABSOLUTE);
-+		if (it != lensInfo.end())
-+			focusLens->setFocusPosition(it->second.min().get<int32_t>());
++		if (it != lensInfo.end()) {
++			const int32_t park = it->second.min().get<int32_t>();
++			constexpr int32_t kParkStep = 16;
++			int32_t pos = data->lastFocusPosition_.value_or(park);
++
++			while (pos - kParkStep > park) {
++				pos -= kParkStep;
++				focusLens->setFocusPosition(pos);
++				std::this_thread::sleep_for(std::chrono::milliseconds(1));
++			}
++			focusLens->setFocusPosition(park);
++			data->lastFocusPosition_ = park;
++		}
 +	}
 +
  	video->streamOff();
