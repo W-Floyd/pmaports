@@ -1,0 +1,13 @@
+[Unit]
+# Copy devcoredump %i to /var/log/devcoredump/ before the kernel expires it
+# (five minutes). Started by 90-fogona-devcoredump.rules, not enabled. Named
+# by boot ID, not time: this handset's clock is not set reliably, and the
+# boot ID is what journalctl --list-boots shows.
+Description=Keep devcoredump %i
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/var/log
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'd=/var/log/devcoredump; mkdir -p $$d; b=$$(cat /proc/sys/kernel/random/boot_id); cat /sys/class/devcoredump/%i/data > $$d/$$b-%i.txt'

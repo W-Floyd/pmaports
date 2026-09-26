@@ -1,0 +1,17 @@
+[Unit]
+# This boot's display bring-up record, in /var/log/fogona-display/. Early
+# and with few dependencies, so a boot whose display stalls (and whose later
+# services never start) still leaves one; the script says why a file of its
+# own rather than the journal alone.
+Description=Record this boot's display bring-up
+Documentation=file:/usr/libexec/fogona-display-log
+DefaultDependencies=no
+After=local-fs.target
+RequiresMountsFor=/var/log
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/fogona-display-log
+
+[Install]
+WantedBy=sysinit.target

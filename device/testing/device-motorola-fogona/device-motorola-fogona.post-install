@@ -37,4 +37,7 @@ systemctl enable 81voltd.service >/dev/null 2>&1 || true
 systemctl enable hexagonrpcd-adsp-audiopd.service >/dev/null 2>&1 || true
 systemctl enable fogona-voice-graphs.service >/dev/null 2>&1 || true
 systemctl enable fogona-voice-call-watch.service >/dev/null 2>&1 || true
+
+# Each boot's display bring-up record, for the intermittent display stall.
+systemctl enable fogona-display-log.service >/dev/null 2>&1 || true
 exit 0

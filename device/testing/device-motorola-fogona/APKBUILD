@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=59
+pkgrel=61
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -147,6 +147,10 @@ source="deviceinfo
 	fogona-bt-addr.py
 	fogona-bt-addr@.service
 	fogona-bt-addr.rules
+	fogona-devcoredump.rules
+	fogona-devcoredump@.service
+	fogona-display-log.sh
+	fogona-display-log.service
 	fogona-hexagonfs.sh
 	fogona-hexagonfs.service
 	hexagonrpcd-sensorspd-hexagonfs.conf
@@ -278,6 +282,24 @@ package() {
 	install -Dm644 "$srcdir"/fogona-bt-addr.rules \
 		"$pkgdir"/usr/lib/udev/rules.d/90-fogona-bt-addr.rules
 
+	# Keep devcoredumps (the DPU/DSI register dump msm writes on a display
+	# error) past their five-minute expiry, in /var/log/devcoredump/: the
+	# display stall's only register-level record. udev-activated, like the
+	# Bluetooth address unit above.
+	install -Dm644 "$srcdir"/fogona-devcoredump@.service \
+		"$pkgdir"/usr/lib/systemd/system/fogona-devcoredump@.service
+	install -Dm644 "$srcdir"/fogona-devcoredump.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/90-fogona-devcoredump.rules
+
+	# Each boot's display bring-up record, /var/log/fogona-display/<boot
+	# id>.txt: the panel's read-backs, init retries and the stall's DSI/DPU
+	# errors, readable at once where the journal takes ~15 s a boot.
+	# Enabled by the preset.
+	install -Dm755 "$srcdir"/fogona-display-log.sh \
+		"$pkgdir"/usr/libexec/fogona-display-log
+	install -Dm644 "$srcdir"/fogona-display-log.service \
+		"$pkgdir"/usr/lib/systemd/system/fogona-display-log.service
+
 	# The ADSP sensors (accelerometer, light, proximity via libssc): build
 	# the hexagonfs tree sensorspd serves, and point sensorspd at it. No
 	# enable needed: hexagonrpcd-systemd enables sensorspd, and the drop-in's
@@ -387,6 +409,10 @@ ac7036e32dc24636368ea3653a6abd5d8efb9baad7b0bf50e86b0c44f34671fa2775e04983a7ae35
 c1ef33a0a42656cb366b6556c4a46f30168c128281b4fd59d73a43418d33f55b56304266ff3dc035a614e6a12f21060887bd18bedc13eacddb10b930d354bd9e  fogona-bt-addr.py
 39b4cbf7d36eb17cb7d6880076b25d4ef108f732f926e2c32e0dc576ad47b83553ac7c811c8f976bed018fb9eadf922603246148774e46119501c5b036a467b3  fogona-bt-addr@.service
 90b0764b3038fbfb14f4cb278c14f059539e803e3f9cd62282f05b756c442a3a626bd8bec8d8396d649e9bd1fcc4a5d2092786660f1e3fea5228984602f4b26f  fogona-bt-addr.rules
+e1f60391b19d769aa76fd73a18051faea46b2248481096be814b2e7ae074aa0192a84edcd6529689a17a1d33a73f7bae08f2fff23afe9de96606acdbbf1e900c  fogona-devcoredump.rules
+996fdf1de5e202f850088d641c1f9a1867f69b5ce4ed63908623171ea760636c9cbca7186acb6195910c4d2419b3475176858e04b7d5722e7a43a9f3a9be28b6  fogona-devcoredump@.service
+55d6db917d722ad1bf47c89e4d86d4bce117dec90860d07dedeb97c3b7d9e71e1054f628a01742f05c3f2174febfb50679a69a84058874db89fff5db74cf5f3a  fogona-display-log.sh
+06518865879ad3c02a899be8cee95431bf46da84d10220027670c98fd0788c0b542a7ae96fc0e4a0e286f349844bedfb2f439f6ab0b46a3e341453c24318f7f5  fogona-display-log.service
 97f0f63b1a0d233817017ed71e3a2c89aa2640fc1d7ed393cb1bdb34e7f28a7505473628a5800903cde5ae75ffe933715cfca6e2738fc98658bfaab5d05a62fc  fogona-hexagonfs.sh
 6adc0362d945a67be5466836c33f5bd7b079f2aa7e8fd8041706ddb42f1832ad6fdca48a92a6836e1f9c5597c26ec7c5eaa82dbec65304f1bd5bf6ff170529ba  fogona-hexagonfs.service
 84c4b3976611cb7b2b1a3b171e5eafee4ffd69c7b777ab6c47117f80ea8664dce78b946dcca792a15582729ad4c3b4dfa72783ce51ba20f77586a08358586b62  hexagonrpcd-sensorspd-hexagonfs.conf
@@ -397,7 +423,7 @@ a35a2db082b816bdc6a05a927c6e9a8996da944cd8444b68fb796f6603f0559ecacd27a5366975a4
 008956a0772f17902df0404d650aee3063805abef7ff357643179c7823a83a137a6affa578ec6614e3de3bae3528ef0be0a31f7540d3ec4eea27e093ea152104  fogona-voice-graphs.sh
 85ec68a345169f95d11939eb49fcdf38cbb155f09c11716c54c997528075fe2569147f95bb278d10f88ca95546108c769c728b2fbc136277e302071d3cbcf2b7  fogona-voice-graphs.py
 00bb9c7b6ee2d00e44b1f65c2e5b67421b4b7796a9e72c4108f6967eded7f794c623e2db141550e71da4ac445ac0b10fd2635f2fe2c3b7dbb78900e6a394d4bf  fogona-voice-graphs.service
-4b1a5d36c0c2fd4621fb3dd7fdc9f139a8877ece71fd0fc30dd8eb20790352ab3e8423d4c727a3635046c6ca43e1d2033cc256958df883b51b6f3122e3763301  80-device-motorola-fogona.preset
+b7fc37b0a290cf437201062830f8aa7922dd46f4f124968b3f52faa5192feb945f332530eb6c5b06d6b18ae88cb04094a576d7612c36d6d04219ac40bcac79f8  80-device-motorola-fogona.preset
 0ddecd129284b489552dc9be4240500792ce483e2efa41be6dd24d1dfb1a2e00c3ef7b0543fc456fe4a0792cf63cee3118a38d74a239299a57a0538f1f669977  81-libssc-motorola-fogona.rules
 a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
 564c2bbc25388efd329f66a7a790ae519c745ab9c55983bc6d2d24cb5974c63b05610b1828f4ca5c4ddeb4ae989f1fc81f14350b371048ab79866e0130cf7833  sshd-early.service

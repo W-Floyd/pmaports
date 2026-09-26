@@ -1,0 +1,11 @@
+# Keep every devcoredump past its five-minute expiry.
+#
+# msm writes a full DPU/DSI register dump (/sys/class/devcoredump/devcd<N>)
+# when the display errors, and the kernel deletes it five minutes later.
+# The intermittent display stall (/repo/investigations/
+# display-vblank-boot-stall.md) produces one, and a stalled handset is found
+# long after that, so without a copy the one record of the DSI host's state
+# is gone. Same shape as 90-fogona-bt-addr.rules: udev starts a unit rather
+# than RUN+=, whose short-lived child is not reliable here.
+
+ACTION=="add", SUBSYSTEM=="devcoredump", KERNEL=="devcd[0-9]*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="fogona-devcoredump@%k.service"

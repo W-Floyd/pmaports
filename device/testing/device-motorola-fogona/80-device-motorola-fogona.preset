@@ -18,3 +18,7 @@ enable 81voltd.service
 enable hexagonrpcd-adsp-audiopd.service
 enable fogona-voice-graphs.service
 enable fogona-voice-call-watch.service
+
+# Each boot's display bring-up record (/var/log/fogona-display/), for the
+# intermittent display stall.
+enable fogona-display-log.service
