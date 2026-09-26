@@ -1,0 +1,63 @@
+#!/bin/sh
+# Put the LinuxBoot stage on the boot partition, with the device's own files
+# it cannot carry itself.
+
+# pmbootstrap runs mkinitfs once itself at the end of "pmbootstrap install".
+[ -f /in-pmbootstrap ] && exit 0
+
+# The stage's uinit reads these from linuxboot/ on the boot partition: the
+# touch controller's firmware (from the vendor partition, which
+# msm-firmware-loader mounts), a host key made once so the stage keeps its
+# SSH identity, and the keys allowed to log in (the users' own, to start).
+_dir=/boot/linuxboot
+mkdir -p "$_dir"
+_fw=/run/msm-firmware-loader/mnt/vendor_a/firmware/chipone_firmware.bin
+if [ ! -f "$_dir"/chipone_firmware.bin ] && [ -f "$_fw" ]; then
+	cp "$_fw" "$_dir"/chipone_firmware.bin
+fi
+[ -f "$_dir"/chipone_firmware.bin ] ||
+	echo "==> linuxboot-fogona: no touch firmware yet ($_fw); the stage runs keys-only"
+if [ ! -f "$_dir"/ssh_host_rsa_key ]; then
+	ssh-keygen -q -t rsa -b 3072 -N "" -m PEM -C linuxboot-fogona \
+		-f "$_dir"/ssh_host_rsa_key
+fi
+if [ ! -f "$_dir"/authorized_keys ]; then
+	cat /root/.ssh/authorized_keys /home/*/.ssh/authorized_keys \
+		> "$_dir"/authorized_keys 2>/dev/null || :
+fi
+chmod 600 "$_dir"/ssh_host_rsa_key "$_dir"/authorized_keys
+
+[ -f /usr/share/deviceinfo/deviceinfo ] || exit 0
+command -v mkinitfs > /dev/null 2>&1 || exit 0
+
+# A device package from before the fogona-bootloader split names U-Boot's
+# file as the payload, which is gone once this replaced U-Boot.
+. /usr/share/deviceinfo/deviceinfo
+if [ "$deviceinfo_bootimg_override_payload" != fogona-bootloader.bin ]; then
+	echo "==> linuxboot-fogona: ERROR: deviceinfo's payload is"
+	echo "==> linuxboot-fogona: '$deviceinfo_bootimg_override_payload', not fogona-bootloader.bin;"
+	echo "==> linuxboot-fogona: upgrade device-motorola-fogona, then run mkinitfs."
+	exit 1
+fi
+
+echo "==> linuxboot-fogona: regenerating and flashing the boot image"
+mkinitfs
+
+# boot-deploy does not flash the boot partition while the running system
+# booted through EFI, as it does under U-Boot. The boot image here is the
+# bootloader, not a kernel, so flash it anyway (u-boot-fogona.post-upgrade
+# has the reasoning).
+if [ -e /sys/firmware/efi/efivars ] && [ -f /boot/boot.img ]; then
+	# Same derivation boot-deploy's ab_get_slot() uses.
+	_slot="$(grep -o 'androidboot\.slot_suffix=..' /proc/cmdline | cut -d '=' -f2)" || :
+	_part="/dev/disk/by-partlabel/boot${_slot}"
+
+	if [ -b "$_part" ]; then
+		echo "==> linuxboot-fogona: boot-deploy skipped the flash under EFI, flashing $_part"
+		dd if=/boot/boot.img of="$_part" bs=1M
+		sync
+	else
+		echo "==> linuxboot-fogona: ERROR: $_part not found; flash /boot/boot.img by hand."
+		exit 1
+	fi
+fi
