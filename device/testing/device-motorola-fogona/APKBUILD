@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=65
+pkgrel=66
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -90,7 +90,16 @@ subpackages="$pkgname-audio:audio"
 #                        subpackages carry NO install_if, so -systemd has to be
 #                        listed explicitly or the unit never lands -- and
 #                        nothing enables it either, so the post-install does.
-# systemd-boot           supplies the EFI app boot-deploy's add_systemd_boot()
+# swclock-offset         keeps the system clock across boots. The PM6225 RTC
+#                        counts through reboots but the driver will not set it
+#                        (no allow-set-time, nvmem offset or UEFI offset), so
+#                        without this every boot starts in 1970 until NTP. It
+#                        is what soc-qcom pulls in; soc-qcom itself is not a
+#                        dependency because its bootmac would overwrite the
+#                        factory Bluetooth address fogona-bt-addr sets, and its
+#                        51-qcom.conf WirePlumber rule measured choppy here.
+#                        The base systemd preset enables its units.
+# systemd-boot          supplies the EFI app boot-deploy's add_systemd_boot()
 #                        installs as /boot/EFI/BOOT/BOOTAA64.EFI, plus the
 #                        bootloader-spec entries beside it. Without the package
 #                        boot-deploy logs "systemd-boot EFI app or powervm-boot
@@ -128,6 +137,7 @@ depends="
 	qmi-utils
 	qrtr
 	rmtfs
+	swclock-offset
 	systemd-boot
 	tqftpserv
 	fogona-bootloader
