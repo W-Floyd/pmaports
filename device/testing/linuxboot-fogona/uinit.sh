@@ -33,7 +33,19 @@
 # extlinux.conf, by label or UUID) -- TODO.md, "LinuxBoot".
 record_boot() {
 	mkdir -p /mnt/boot
-	mount -t ext4 /dev/mmcblk0p1 /mnt/boot || return
+	# The card probes asynchronously (~1.1 s in), and the uinit can get
+	# here first -- sooner still with nothing drawn on the console. Without
+	# the partition the mount fails and all of this, the touch firmware
+	# included, is skipped.
+	# Every 50 ms (u-root's sleep takes Go durations), for up to 10 s.
+	for i in $(seq 200); do
+		[ -e /dev/mmcblk0p1 ] && break
+		sleep 50ms
+	done
+	mount -t ext4 /dev/mmcblk0p1 /mnt/boot || {
+		echo "record_boot: cannot mount /dev/mmcblk0p1"
+		return
+	}
 	for i in 1 2 3 4 5; do
 		dmesg | grep -q "bl: settled|Failed to initialize panel" && break
 		sleep 1
