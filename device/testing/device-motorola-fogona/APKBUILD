@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=66
+pkgrel=67
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -98,7 +98,10 @@ subpackages="$pkgname-audio:audio"
 #                        dependency because its bootmac would overwrite the
 #                        factory Bluetooth address fogona-bt-addr sets, and its
 #                        51-qcom.conf WirePlumber rule measured choppy here.
-#                        The base systemd preset enables its units.
+#                        The base systemd preset enables its units. Its boot
+#                        unit reads rtc0 in sysinit, before udev would load
+#                        rtc-pm8xxx (=m), so modules-initfs loads it from the
+#                        initramfs.
 # systemd-boot          supplies the EFI app boot-deploy's add_systemd_boot()
 #                        installs as /boot/EFI/BOOT/BOOTAA64.EFI, plus the
 #                        bootloader-spec entries beside it. Without the package
@@ -146,6 +149,7 @@ _pmb_select="fogona-bootloader"
 makedepends="alsa-utils devicepkg-dev qca-swiss-army-knife"
 source="deviceinfo
 	kernel-cmdline.conf
+	modules-initfs
 	50-fogona-mesa.conf
 	50-fogona-mesa.sh
 	fogona-video.conf
@@ -419,6 +423,7 @@ audio() {
 sha512sums="
 5db2fe3d842193492ab58d66928d25f32326dfcdb2bef3ffae2dd58707c0a1f9e04fec5c2410c64ff9c20c65b5ef90e4f07a1638c5649632978a4ed8b228c938  deviceinfo
 c8f918c29903cfc929fc2025cbd9147124bc8bdcf0b3c446213d279d0774621f98310fafd32f2afcb43ca065c49227122986a67c74828f563e2668d800c6877b  kernel-cmdline.conf
+356c436093e3792dd60c9e291dc69d57b3c8fa0af9befa442d0c2649c8b7f6254d44d1961a0dc6d04f2684aa758813997cd63cb9c0d1d06db245138d1a880f1a  modules-initfs
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.conf
 6032e4387ab21e3c03a13b9cf6eeb5b0c66faf6e2379ed5bc21e9bd2baba748e9b14e42b58a8e7df7f1e93460f79a069da56c2144923c13cb3b8923373d7ee09  50-fogona-mesa.sh
 87b0489ff713379368fd1e649fea21f588710dec6d04b9855e354e18a5aaaa5d0b6d3140e907a1177530924fe629d4383a2f111a6b7463e516843d2cbd8f73a5  fogona-video.conf
