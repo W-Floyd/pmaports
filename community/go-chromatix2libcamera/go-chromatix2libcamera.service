@@ -1,0 +1,19 @@
+[Unit]
+Description=Generate libcamera tuning files from the vendor camera tuning
+Documentation=https://github.com/W-Floyd/go-chromatix2libcamera
+# A device opts in by installing its camera config.
+ConditionPathExists=/etc/go-chromatix2libcamera.json
+# The Chromatix files are on the vendor partition, which msm-firmware-loader
+# mounts on the devices that have one.
+After=msm-firmware-loader.service
+# Before camera users: a lingering user's session (WirePlumber) starts
+# after systemd-user-sessions.
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/go-chromatix2libcamera generate
+
+[Install]
+WantedBy=multi-user.target

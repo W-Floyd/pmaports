@@ -1,0 +1,39 @@
+# Maintainer: William Floyd <git@notmy.space>
+pkgname=go-chromatix2libcamera
+pkgver=0_git20260927
+pkgrel=0
+_commit="b4f1d2faeac35ab252310854bba20e1cb9787e04"
+pkgdesc="Generate libcamera tuning files from Qualcomm CamX Chromatix tuning"
+url="https://github.com/W-Floyd/go-chromatix2libcamera"
+arch="all"
+# TODO: the project has no licence yet
+license="custom"
+makedepends="go"
+subpackages="$pkgname-systemd"
+# The project is not published yet: a git archive of $_commit.
+source="go-chromatix2libcamera-$_commit.tar.gz
+	go-chromatix2libcamera.service
+	"
+builddir="$srcdir/go-chromatix2libcamera-$_commit"
+
+build() {
+	go build -o bin/go-chromatix2libcamera ./cmd/go-chromatix2libcamera
+}
+
+check() {
+	go test ./...
+}
+
+package() {
+	install -Dm755 bin/go-chromatix2libcamera -t "$pkgdir"/usr/bin
+	install -Dm644 README.md -t "$pkgdir"/usr/share/doc/$pkgname
+
+	# Generates the tuning at boot on devices that install a config
+	install -Dm644 "$srcdir"/go-chromatix2libcamera.service \
+		-t "$pkgdir"/usr/lib/systemd/system
+}
+
+sha512sums="
+c291c1ea4651bc16c99561a10820b44b239af20bfe70598798016c95dd7b214f08ad34772f9a3f277c3492478506b56241b5df1aba94fd50edb82b5d9df0dd9c  go-chromatix2libcamera-b4f1d2faeac35ab252310854bba20e1cb9787e04.tar.gz
+016782ecbc6a95cd497d2d5a056b6fbb244258346f241222e859b14f7c39155d6fce678616dcadb2082b31f17972593d67c226aefe32004d9e24cf0152a9e4d5  go-chromatix2libcamera.service
+"
