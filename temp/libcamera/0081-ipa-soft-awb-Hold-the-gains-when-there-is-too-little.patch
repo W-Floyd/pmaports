@@ -1,0 +1,90 @@
+From 2038a0fbb41c7c36d2c9d2f7bf7e1edb3bb26918 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 08:14:13 +0000
+Subject: [PATCH] ipa: soft: awb: Hold the gains when there is too little
+ signal
+
+With the black level exact, a frame of almost nothing, a covered lens
+or a dark room, sums to close to 0 above black in every channel, and
+grey world's ratios are then noise: a lens-down phone came out navy
+under one run and magenta under the next.
+
+Keep the previous gains while the mean green is under 2.5 (8-bit, 1%
+of the range) above black. With a locus, start from its 5000 K point
+rather than from the sensor's own colour, so that a camera opened in
+the dark does not stay green.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/algorithms/awb.cpp | 41 +++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/src/ipa/soft/algorithms/awb.cpp b/src/ipa/soft/algorithms/awb.cpp
+index 26e17fb28..a896a49f3 100644
+--- a/src/ipa/soft/algorithms/awb.cpp
++++ b/src/ipa/soft/algorithms/awb.cpp
+@@ -27,6 +27,15 @@ LOG_DEFINE_CATEGORY(IPASoftAwb)
+ 
+ namespace ipa::soft::algorithms {
+ 
++/*
++ * The least mean green above black, in 8-bit units, that the channel ratios
++ * are measured from: 1% of the range.
++ */
++static constexpr double kMinSignal = 2.5;
++
++/* Where to start on the locus, before any frame has enough signal */
++static constexpr unsigned int kStartCt = 5000;
++
+ /**
+  * \class Awb
+  * \brief Grey world auto white balance
+@@ -137,6 +146,22 @@ int Awb::configure(IPAContext &context,
+ 	auto &gains = context.activeState.awb.gains;
+ 	gains = { { 1.0, 1.0, 1.0 } };
+ 
++	/*
++	 * With a locus, start from its point at kStartCt rather than from the
++	 * sensor's own colour, until a frame shows enough of the scene.
++	 */
++	if (!locus_.empty()) {
++		const LocusPoint *p = &locus_.front();
++		for (const LocusPoint &q : locus_) {
++			if (std::abs(static_cast<int>(q.ct) - static_cast<int>(kStartCt)) <
++			    std::abs(static_cast<int>(p->ct) - static_cast<int>(kStartCt)))
++				p = &q;
++		}
++		gains = { { static_cast<float>(1 / p->ratios[0]), 1.0f,
++			    static_cast<float>(1 / p->ratios[1]) } };
++		context.activeState.awb.temperatureK = p->ct;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -196,6 +221,22 @@ void Awb::process(IPAContext &context,
+ 	 */
+ 	const RGB<uint64_t> sum = stats->sum_.max(offset + minValid) - offset;
+ 
++	/*
++	 * In the dark the samples are mostly noise around black, and with the
++	 * black level exact their sums above it are close to 0: the channel
++	 * ratios are then noise too. Keep the previous gains until the mean
++	 * green is kMinSignal above black.
++	 */
++	const double meanGreen = stats->sumCount
++		? static_cast<double>(stats->sum_.g()) / stats->sumCount - blackLevel
++		: 0.0;
++	if (meanGreen < kMinSignal) {
++		LOG(IPASoftAwb, Debug)
++			<< "Mean green " << meanGreen
++			<< " above black, keeping the previous gains";
++		return;
++	}
++
+ 	/*
+ 	 * Calculate red and blue gains for AWB.
+ 	 * Clamp max gain at 4.0, this also avoids 0 division.
+-- 
+2.55.0
+
