@@ -94,7 +94,6 @@ touch_rebind() {
 	done
 }
 echo "=== fogona LinuxBoot uinit started ==="
-record_boot > /tmp/record_boot.log 2>&1
 
 # Every configfs write goes through put, never echo: gosh's echo writes each
 # argument and the newline with separate write() calls, and configfs takes
@@ -106,17 +105,18 @@ put() {
 	printf '%s\n' "$2" > "$1"
 }
 
-# A function, not `exec > file`: gosh accepts that and then drops every
-# later line of output.
-setup() {
-# Full clocks for the stage's short life: under schedutil the Boot
-# Manager's first frame after an idle spell ran on a big core at ~1 GHz
-# (24 ms against 11 ms at 2.4 GHz). The kexec'd kernel sets its own.
+# Full clocks for the stage's short life, from before the Boot Manager's
+# first frame: under schedutil its first frame after an idle spell ran on a
+# big core at ~1 GHz (24 ms against 11 ms at 2.4 GHz). The kexec'd kernel
+# sets its own.
 for p in /sys/devices/system/cpu/cpufreq/policy*; do
 	put $p/scaling_governor performance
 done
-echo "cpufreq: performance on $(ls /sys/devices/system/cpu/cpufreq)"
+echo "cpufreq: performance on" /sys/devices/system/cpu/cpufreq/policy* >> /tmp/uinit.log
 
+# A function, not `exec > file`: gosh accepts that and then drops every
+# later line of output.
+setup() {
 mount -t configfs configfs /sys/kernel/config
 
 G=/sys/kernel/config/usb_gadget/g1
@@ -144,23 +144,40 @@ ip link set usb0 up
 [ -e /bbin/bootmanager ] ||
 	sshd -port 22 -keys /etc/ssh/authorized_keys -privatekey /etc/ssh/ssh_host_rsa_key > /tmp/sshd.log 2>&1 &
 }
-setup 2>&1 | tee /tmp/uinit.log
 
 # postmarketOS Boot Manager (BOOTMANAGER=1 builds): it shows the entries,
 # runs the same 10 s autoboot (a key press or /tmp/hold stops it) and never
 # returns. Its repo, ~/bootmanager (README.md), has the rest.
+#
+# It starts first, with -wait-ready: its splash is on the panel from here
+# (~1.7 s in) while record_boot and setup run behind it, and stage.ready
+# then lets it scan the card record_boot is done with, start SSH and Remote
+# UI on the network setup brought up, and take record_boot's dev-once (20 s
+# without it, and it goes ahead anyway). Those run in the background and
+# the Boot Manager in the foreground, not the other way round: gosh has no
+# $!, and a bare wait would also wait for unudhcpd, which never exits.
+#
 # Should it ever exit, carry on as a stage without it: sshd and the menu.
 if [ -e /bbin/bootmanager ]; then
 	echo "fogona LinuxBoot: Boot Manager, booting the default entry in 10 s."
 	# What is fogona's: Remote UI on the USB network, the panel (not in
 	# its generated set yet), this stage's logs, and in a dev build the
-	# one-shot request record_boot copied.
+	# one-shot request record_boot copies.
 	BMARGS="-listen 172.16.42.1 -panel /etc/bootmanager/motorola-fogona.json"
 	BMARGS="$BMARGS -logs /tmp/uinit.log,/tmp/record_boot.log"
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
-	bootmanager $BMARGS 2>&1 | tee -a /tmp/uinit.log
+	{
+		record_boot > /tmp/record_boot.log 2>&1
+		setup 2>&1 | tee -a /tmp/uinit.log
+		bootmanager -send stage.ready >> /tmp/uinit.log 2>&1 ||
+			echo "fogona LinuxBoot: stage.ready not delivered" >> /tmp/uinit.log
+	} &
+	bootmanager -wait-ready $BMARGS 2>&1 | tee -a /tmp/uinit.log
 	echo "fogona LinuxBoot: bootmanager exited, falling back"
 	sshd -port 22 -keys /etc/ssh/authorized_keys -privatekey /etc/ssh/ssh_host_rsa_key > /tmp/sshd.log 2>&1 &
+else
+	record_boot > /tmp/record_boot.log 2>&1
+	setup 2>&1 | tee -a /tmp/uinit.log
 fi
 
 echo "fogona LinuxBoot: booting the default entry in 10 s."
