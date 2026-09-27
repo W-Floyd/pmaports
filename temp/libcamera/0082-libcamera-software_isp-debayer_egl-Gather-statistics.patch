@@ -1,0 +1,59 @@
+From 651124585055ef1c2e1b550320500a566b3c288d Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 08:22:15 +0000
+Subject: [PATCH] libcamera: software_isp: debayer_egl: Gather statistics on
+ the whole input
+
+The GPU debayer scales the whole input to the output, cropping only
+quad Bayer input to the output's aspect ratio, but for ordinary Bayer
+input set the statistics window to a centred window of the output's
+size in the input: with a 1920x1080 output of a 4080x3072 sensor, the
+middle 47% x 35% of the image. Exposure and white balance then went
+by the centre alone: a lamp in the middle of a room darkened the whole
+frame, and the next frame, a little to its side, came out twice as
+bright.
+
+Take the whole input as the window for ordinary Bayer input, the part
+of it that is output.
+
+Fixes: 59db91b13 ("libcamera: software_isp: debayer_egl: Gather statistics on the output window")
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 20 +++++++++++---------
+ 1 file changed, 11 insertions(+), 9 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 9cbb460e0..a49fd0505 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -355,16 +355,18 @@ int DebayerEGL::configure(const StreamConfiguration &inputCfg,
+ 	outputSize_ = outputCfg.size;
+ 	nativeOutputSize_ = outSizeRange.max;
+ 
+-	if (quadBayer_) {
++	/*
++	 * The window is the part of the input that is output, for the texture
++	 * coordinates and the statistics alike. The GPU scales the whole input
++	 * to the output (softwareIspTextureCoordinates()), so the window is
++	 * all of it, except for quad Bayer, which crops to the output's aspect
++	 * ratio. A window of the output's size in the input would have the
++	 * statistics describe only its centre.
++	 */
++	if (quadBayer_)
+ 		window_ = quadBayerStatsWindow(inputCfg.size, outputCfg.size);
+-	} else {
+-		window_.x = ((inputCfg.size.width - outputCfg.size.width) / 2) &
+-			    ~(inputConfig_.patternSize.width - 1);
+-		window_.y = ((inputCfg.size.height - outputCfg.size.height) / 2) &
+-			    ~(inputConfig_.patternSize.height - 1);
+-		window_.width = outputCfg.size.width;
+-		window_.height = outputCfg.size.height;
+-	}
++	else
++		window_ = Rectangle(inputCfg.size);
+ 
+ 	/*
+ 	 * The statistics are gathered from the whole input buffer
+-- 
+2.55.0
+
