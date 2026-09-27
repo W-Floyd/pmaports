@@ -1,0 +1,15 @@
+{
+  "vendor": "/run/msm-firmware-loader/mnt/vendor*/lib64/camera",
+  "cameras": [
+    {
+      "sensor": "s5kjn1",
+      "tuned": "com.qti.tuned.mot_fogona_s5kjns.bin",
+      "module": "com.qti.sensormodule.mot_fogona_s5kjns_qtech.bin",
+      "eeprom": "i2c-bus@0/eeprom@50"
+    },
+    {
+      "sensor": "ov08f10",
+      "tuned": "com.qti.tuned.mot_ov08f.bin"
+    }
+  ]
+}

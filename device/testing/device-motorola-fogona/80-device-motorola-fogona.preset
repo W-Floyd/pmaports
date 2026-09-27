@@ -19,6 +19,10 @@ enable hexagonrpcd-adsp-audiopd.service
 enable fogona-voice-graphs.service
 enable fogona-voice-call-watch.service
 
+# The cameras' libcamera tuning, generated from the vendor partition and the
+# rear module's EEPROM (go-chromatix2libcamera.json).
+enable go-chromatix2libcamera.service
+
 # Each boot's display bring-up record (/var/log/fogona-display/), for the
 # intermittent display stall.
 enable fogona-display-log.service
