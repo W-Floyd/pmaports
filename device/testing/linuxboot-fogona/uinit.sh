@@ -109,6 +109,14 @@ put() {
 # A function, not `exec > file`: gosh accepts that and then drops every
 # later line of output.
 setup() {
+# Full clocks for the stage's short life: under schedutil the Boot
+# Manager's first frame after an idle spell ran on a big core at ~1 GHz
+# (24 ms against 11 ms at 2.4 GHz). The kexec'd kernel sets its own.
+for p in /sys/devices/system/cpu/cpufreq/policy*; do
+	put $p/scaling_governor performance
+done
+echo "cpufreq: performance on $(ls /sys/devices/system/cpu/cpufreq)"
+
 mount -t configfs configfs /sys/kernel/config
 
 G=/sys/kernel/config/usb_gadget/g1
