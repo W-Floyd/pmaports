@@ -7,9 +7,13 @@
 # in the stage: ssh in and `touch /tmp/hold` before the countdown ends, then
 # `gosh /etc/fogona-boot.sh` for the menu with a keyboard.
 #
-# Output goes to the console and /tmp/uinit.log. Each boot also leaves a
-# record on the pmOS boot partition, read back from pmOS afterwards (the
-# panel does not always come up): record_boot below.
+# Output goes to /tmp/uinit.log, and to the console only once the Boot
+# Manager is out of the picture (or not in the image): anything written to
+# the console makes fbcon take the panel over (the stage config defers that
+# takeover), and until the Boot Manager draws, the panel should show ABL's
+# splash, not text. Each boot also leaves a record on the pmOS boot
+# partition, read back from pmOS afterwards (the panel does not always come
+# up): record_boot below.
 
 # record_boot appends this boot's panel read-backs ("bl:" lines, from the
 # panel driver) to linuxboot/backlight.log under a boot counter (the stage
@@ -93,7 +97,7 @@ touch_rebind() {
 		echo "touch: rebound $name with the boot partition's firmware"
 	done
 }
-echo "=== fogona LinuxBoot uinit started ==="
+echo "=== fogona LinuxBoot uinit started ===" >> /tmp/uinit.log
 
 # Every configfs write goes through put, never echo: gosh's echo writes each
 # argument and the newline with separate write() calls, and configfs takes
@@ -159,7 +163,7 @@ ip link set usb0 up
 #
 # Should it ever exit, carry on as a stage without it: sshd and the menu.
 if [ -e /bbin/bootmanager ]; then
-	echo "fogona LinuxBoot: Boot Manager, booting the default entry in 10 s."
+	echo "fogona LinuxBoot: Boot Manager, booting the default entry in 10 s." >> /tmp/uinit.log
 	# What is fogona's: Remote UI on the USB network, the panel (not in
 	# its generated set yet), this stage's logs, and in a dev build the
 	# one-shot request record_boot copies.
@@ -168,12 +172,12 @@ if [ -e /bbin/bootmanager ]; then
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
 	{
 		record_boot > /tmp/record_boot.log 2>&1
-		setup 2>&1 | tee -a /tmp/uinit.log
+		setup >> /tmp/uinit.log 2>&1
 		bootmanager -send stage.ready >> /tmp/uinit.log 2>&1 ||
 			echo "fogona LinuxBoot: stage.ready not delivered" >> /tmp/uinit.log
 	} &
-	bootmanager -wait-ready $BMARGS 2>&1 | tee -a /tmp/uinit.log
-	echo "fogona LinuxBoot: bootmanager exited, falling back"
+	bootmanager -wait-ready $BMARGS >> /tmp/uinit.log 2>&1
+	echo "fogona LinuxBoot: bootmanager exited, falling back" | tee -a /tmp/uinit.log
 	sshd -port 22 -keys /etc/ssh/authorized_keys -privatekey /etc/ssh/ssh_host_rsa_key > /tmp/sshd.log 2>&1 &
 else
 	record_boot > /tmp/record_boot.log 2>&1
