@@ -1,0 +1,181 @@
+From ffcd9b66f05f45b0d5ca03160a92848b42ea5025 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 04:41:44 +0000
+Subject: [PATCH] ipa: soft: awb: Take the colour temperature from the sensor's
+ locus
+
+The colour temperature Ccm and Lsc select their tables by comes from
+estimateCCT(), whose RGB to XYZ matrix is a fixed one, not the
+sensor's: fed the white points a phone module's vendor tuning gives
+for its illuminants, it reads Horizon (2300 K) as 2725 K and A
+(2850 K) as 3291 K, the range where lens shading changes most.
+
+Read the sensor's white points as colourGains, the key libipa's
+AwbGrey uses for its colour temperature curve: the gains that make
+each colour temperature's illuminant grey. With them, the colour
+temperature is that of the nearest point on the polyline through
+the white points, in R/G and B/G, interpolated in mired along the
+segment. The gains are grey world as before; without colourGains
+nothing changes.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/algorithms/awb.cpp | 78 ++++++++++++++++++++++++++++++++-
+ src/ipa/soft/algorithms/awb.h   | 17 +++++++
+ 2 files changed, 94 insertions(+), 1 deletion(-)
+
+diff --git a/src/ipa/soft/algorithms/awb.cpp b/src/ipa/soft/algorithms/awb.cpp
+index c6b6c75a5..a878d4b75 100644
+--- a/src/ipa/soft/algorithms/awb.cpp
++++ b/src/ipa/soft/algorithms/awb.cpp
+@@ -7,6 +7,9 @@
+ 
+ #include "awb.h"
+ 
++#include <algorithm>
++#include <cmath>
++#include <limits>
+ #include <numeric>
+ #include <stdint.h>
+ 
+@@ -15,6 +18,7 @@
+ #include <libcamera/control_ids.h>
+ 
+ #include "libipa/colours.h"
++#include "libipa/interpolator.h"
+ #include "soft/ipa_context.h"
+ 
+ namespace libcamera {
+@@ -23,6 +27,76 @@ LOG_DEFINE_CATEGORY(IPASoftAwb)
+ 
+ namespace ipa::soft::algorithms {
+ 
++/**
++ * \class Awb
++ * \brief Grey world auto white balance
++ *
++ * The gains make the image's mean grey. The colour temperature, which Ccm
++ * and Lsc select their tables by, is that of the nearest white point on the
++ * sensor's locus when the tuning gives one, as the gains that make grey
++ * each colour temperature's illuminant (the same key as libipa's AwbGrey):
++ *
++ *   - Awb:
++ *       colourGains:
++ *         - ct: 2850
++ *           gains: [ 1.07, 2.16 ]   # red, blue
++ *         - ct: 6500
++ *           gains: [ 1.74, 1.37 ]
++ *
++ * Without it, the colour temperature is estimateCCT()'s, which assumes
++ * sRGB primaries rather than the sensor's.
++ */
++
++int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	if (!tuningData.contains("colourGains"))
++		return 0;
++
++	Interpolator<Vector<double, 2>> gains;
++	int ret = gains.readYaml(tuningData["colourGains"], "ct", "gains");
++	if (ret < 0)
++		return ret;
++
++	for (const auto &[ct, g] : gains.data()) {
++		if (g[0] <= 0 || g[1] <= 0) {
++			LOG(IPASoftAwb, Error) << "Gains at " << ct << " K must be positive";
++			return -EINVAL;
++		}
++		locus_.push_back({ ct, { { 1.0 / g[0], 1.0 / g[1] } } });
++	}
++
++	return 0;
++}
++
++/*
++ * The colour temperature of the locus point nearest to the R/G, B/G
++ * ratios, interpolated in mired (reciprocal colour temperature, in which
++ * white points are close to evenly spaced) along the nearest segment.
++ */
++unsigned int Awb::estimateCt(const Vector<double, 2> &ratios) const
++{
++	if (locus_.size() == 1)
++		return locus_[0].ct;
++
++	double best = std::numeric_limits<double>::infinity();
++	double mired = 0;
++	for (size_t i = 0; i + 1 < locus_.size(); i++) {
++		const LocusPoint &p = locus_[i];
++		const LocusPoint &q = locus_[i + 1];
++		const Vector<double, 2> d = q.ratios - p.ratios;
++		const Vector<double, 2> v = ratios - p.ratios;
++		double t = std::clamp(v.dot(d) / d.dot(d), 0.0, 1.0);
++		Vector<double, 2> e = v - d * t;
++		double dist = e.dot(e);
++		if (dist < best) {
++			best = dist;
++			mired = (1 - t) * 1e6 / p.ct + t * 1e6 / q.ct;
++		}
++	}
++
++	return std::lround(1e6 / mired);
++}
++
+ int Awb::configure(IPAContext &context,
+ 		   [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
+@@ -100,7 +174,9 @@ void Awb::process(IPAContext &context,
+ 	} };
+ 
+ 	RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
+-	context.activeState.awb.temperatureK = estimateCCT(rgbGains);
++	context.activeState.awb.temperatureK =
++		locus_.empty() ? estimateCCT(rgbGains)
++			       : estimateCt({ { rgbGains.r(), rgbGains.b() } });
+ 	metadata.set(controls::ColourTemperature, context.activeState.awb.temperatureK);
+ 
+ 	LOG(IPASoftAwb, Debug)
+diff --git a/src/ipa/soft/algorithms/awb.h b/src/ipa/soft/algorithms/awb.h
+index ad993f39c..8e4af2a68 100644
+--- a/src/ipa/soft/algorithms/awb.h
++++ b/src/ipa/soft/algorithms/awb.h
+@@ -7,6 +7,10 @@
+ 
+ #pragma once
+ 
++#include <vector>
++
++#include "libcamera/internal/vector.h"
++
+ #include "algorithm.h"
+ 
+ namespace libcamera {
+@@ -19,6 +23,7 @@ public:
+ 	Awb() = default;
+ 	~Awb() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
+ 	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
+ 	void prepare(IPAContext &context,
+ 		     const uint32_t frame,
+@@ -29,6 +34,18 @@ public:
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+ 		     ControlList &metadata) override;
++
++private:
++	/* A white point of the locus: R/G and B/G of grey under it */
++	struct LocusPoint {
++		unsigned int ct;
++		Vector<double, 2> ratios;
++	};
++
++	unsigned int estimateCt(const Vector<double, 2> &ratios) const;
++
++	/* By increasing colour temperature; empty without tuning */
++	std::vector<LocusPoint> locus_;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+-- 
+2.55.0
+
