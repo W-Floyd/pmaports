@@ -1,0 +1,191 @@
+From 900096986b83870e570bcbcbc833263b8ba7ffab Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 06:11:42 +0000
+Subject: [PATCH] ipa: soft: awb: Keep grey world within the band of real
+ illuminants
+
+Grey world makes the mean of the image grey, so a scene that is
+mostly one colour, grass or a painted wall, pulls the gains towards
+its complement and tints the whole image. The sensor's locus says
+where real illuminants lie.
+
+When the tuning has colourGains, move the grey world estimate, in
+R/G and B/G, to within transversePos (towards purple) and
+transverseNeg (towards green) of its nearest point on the locus,
+the keys and defaults AwbBayes uses, and derive the gains from
+that. Estimates beyond the locus's ends are held at the same
+distance from them. Without colourGains nothing changes.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/soft/algorithms/awb.cpp | 90 ++++++++++++++++++++++++---------
+ src/ipa/soft/algorithms/awb.h   | 10 +++-
+ 2 files changed, 76 insertions(+), 24 deletions(-)
+
+diff --git a/src/ipa/soft/algorithms/awb.cpp b/src/ipa/soft/algorithms/awb.cpp
+index a878d4b75..f9e4e5782 100644
+--- a/src/ipa/soft/algorithms/awb.cpp
++++ b/src/ipa/soft/algorithms/awb.cpp
+@@ -31,10 +31,9 @@ namespace ipa::soft::algorithms {
+  * \class Awb
+  * \brief Grey world auto white balance
+  *
+- * The gains make the image's mean grey. The colour temperature, which Ccm
+- * and Lsc select their tables by, is that of the nearest white point on the
+- * sensor's locus when the tuning gives one, as the gains that make grey
+- * each colour temperature's illuminant (the same key as libipa's AwbGrey):
++ * The gains make the image's mean grey. When the tuning gives the sensor's
++ * locus, as the gains that make grey each colour temperature's illuminant
++ * (the same keys as libipa's AwbBayes):
+  *
+  *   - Awb:
+  *       colourGains:
+@@ -42,9 +41,20 @@ namespace ipa::soft::algorithms {
+  *           gains: [ 1.07, 2.16 ]   # red, blue
+  *         - ct: 6500
+  *           gains: [ 1.74, 1.37 ]
++ *       transversePos: 0.017        # optional, default 0.01
++ *       transverseNeg: 0.030        # optional, default 0.01
+  *
+- * Without it, the colour temperature is estimateCCT()'s, which assumes
+- * sRGB primaries rather than the sensor's.
++ * the grey world estimate is kept within the band of real illuminants: its
++ * R/G, B/G may lie off the locus by at most transversePos away from the
++ * origin (towards purple) and transverseNeg towards it (towards green), and
++ * no further along it than its ends. A scene that is mostly one colour
++ * pulls grey world off the locus; the band keeps that from tinting the
++ * image. The colour temperature, which Ccm and Lsc select their tables by,
++ * is that of the nearest point on the locus.
++ *
++ * Without colourGains the gains are grey world's alone and the colour
++ * temperature is estimateCCT()'s, which assumes sRGB primaries rather than
++ * the sensor's.
+  */
+ 
+ int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+@@ -64,37 +74,61 @@ int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 		}
+ 		locus_.push_back({ ct, { { 1.0 / g[0], 1.0 / g[1] } } });
+ 	}
++	if (locus_.size() < 2) {
++		LOG(IPASoftAwb, Error) << "colourGains needs at least two points";
++		return -EINVAL;
++	}
++
++	transversePos_ = tuningData["transversePos"].get<double>(0.01);
++	transverseNeg_ = tuningData["transverseNeg"].get<double>(0.01);
++	if (transversePos_ < 0 || transverseNeg_ < 0) {
++		LOG(IPASoftAwb, Error) << "transversePos/Neg must not be negative";
++		return -EINVAL;
++	}
+ 
+ 	return 0;
+ }
+ 
+ /*
+- * The colour temperature of the locus point nearest to the R/G, B/G
+- * ratios, interpolated in mired (reciprocal colour temperature, in which
+- * white points are close to evenly spaced) along the nearest segment.
++ * Fit R/G, B/G ratios to the locus: the colour temperature of the nearest
++ * point on it, interpolated in mired (reciprocal colour temperature, in
++ * which white points are close to evenly spaced) along the nearest
++ * segment, and the ratios moved to within the transverse band around that
++ * point.
+  */
+-unsigned int Awb::estimateCt(const Vector<double, 2> &ratios) const
++Awb::LocusFit Awb::fitLocus(const Vector<double, 2> &ratios) const
+ {
+-	if (locus_.size() == 1)
+-		return locus_[0].ct;
+-
+ 	double best = std::numeric_limits<double>::infinity();
+-	double mired = 0;
++	LocusFit fit{};
+ 	for (size_t i = 0; i + 1 < locus_.size(); i++) {
+ 		const LocusPoint &p = locus_[i];
+ 		const LocusPoint &q = locus_[i + 1];
+ 		const Vector<double, 2> d = q.ratios - p.ratios;
+ 		const Vector<double, 2> v = ratios - p.ratios;
+ 		double t = std::clamp(v.dot(d) / d.dot(d), 0.0, 1.0);
+-		Vector<double, 2> e = v - d * t;
++		const Vector<double, 2> onLocus = p.ratios + d * t;
++		const Vector<double, 2> e = ratios - onLocus;
+ 		double dist = e.dot(e);
+-		if (dist < best) {
+-			best = dist;
+-			mired = (1 - t) * 1e6 / p.ct + t * 1e6 / q.ct;
+-		}
++		if (dist >= best)
++			continue;
++		best = dist;
++
++		double mired = (1 - t) * 1e6 / p.ct + t * 1e6 / q.ct;
++		fit.ct = std::lround(1e6 / mired);
++
++		/*
++		 * The segment's normal away from the origin: ratios that way
++		 * are short of green, towards purple.
++		 */
++		Vector<double, 2> normal{ { d[1], -d[0] } };
++		if (normal.dot(p.ratios) < 0)
++			normal = -normal;
++		double len = std::sqrt(dist);
++		double limit = e.dot(normal) >= 0 ? transversePos_ : transverseNeg_;
++		fit.ratios = len > limit ? onLocus + e * (limit / len) : ratios;
+ 	}
+ 
+-	return std::lround(1e6 / mired);
++	return fit;
+ }
+ 
+ int Awb::configure(IPAContext &context,
+@@ -174,9 +208,19 @@ void Awb::process(IPAContext &context,
+ 	} };
+ 
+ 	RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
+-	context.activeState.awb.temperatureK =
+-		locus_.empty() ? estimateCCT(rgbGains)
+-			       : estimateCt({ { rgbGains.r(), rgbGains.b() } });
++	if (locus_.empty()) {
++		context.activeState.awb.temperatureK = estimateCCT(rgbGains);
++	} else {
++		const Vector<double, 2> greyWorld{ { rgbGains.r(), rgbGains.b() } };
++		const LocusFit fit = fitLocus(greyWorld);
++		context.activeState.awb.temperatureK = fit.ct;
++		gains = { { static_cast<float>(1 / fit.ratios[0]), 1.0f,
++			    static_cast<float>(1 / fit.ratios[1]) } };
++
++		LOG(IPASoftAwb, Debug)
++			<< "grey world R/G, B/G " << greyWorld << ", on the locus "
++			<< fit.ratios;
++	}
+ 	metadata.set(controls::ColourTemperature, context.activeState.awb.temperatureK);
+ 
+ 	LOG(IPASoftAwb, Debug)
+diff --git a/src/ipa/soft/algorithms/awb.h b/src/ipa/soft/algorithms/awb.h
+index 8e4af2a68..d4218abb1 100644
+--- a/src/ipa/soft/algorithms/awb.h
++++ b/src/ipa/soft/algorithms/awb.h
+@@ -42,10 +42,18 @@ private:
+ 		Vector<double, 2> ratios;
+ 	};
+ 
+-	unsigned int estimateCt(const Vector<double, 2> &ratios) const;
++	struct LocusFit {
++		unsigned int ct;
++		Vector<double, 2> ratios;
++	};
++
++	LocusFit fitLocus(const Vector<double, 2> &ratios) const;
+ 
+ 	/* By increasing colour temperature; empty without tuning */
+ 	std::vector<LocusPoint> locus_;
++	/* How far off the locus, towards purple and towards green */
++	double transversePos_ = 0;
++	double transverseNeg_ = 0;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+-- 
+2.55.0
+
