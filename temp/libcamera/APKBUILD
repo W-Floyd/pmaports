@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=40
+pkgrel=41
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -143,6 +143,7 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0084-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
 	0085-ipa-soft-awb-Let-the-transverse-band-depend-on-the-c.patch
 	0086-ipa-soft-awb-Adjust-the-gains-as-the-tuning-s-gain-a.patch
+	0087-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -337,6 +338,7 @@ c087c78b862d2210b58a179ca18c904c6144033df93c6906394dd32b1922d8ba9af94b471130eb89
 0e913e469c516fd7d0d0fee5d4ea5a7f4d465d3dafc8129b542fb7ec76f6bd44a86cdabf046ad0c0ab6007036659bf5bbf39abfa4b84c8fda59abc0d9e1716bc  0084-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
 11b99ce5a3182004f760492201c4e971974b145fbb422f51ba3bad58cb859526d64613c2990040247f10bb3b9502e54d6f35362285cbf06ddef6f75e20966c88  0085-ipa-soft-awb-Let-the-transverse-band-depend-on-the-c.patch
 01e58380d278dea0d3daf655fa945de547bf6c6f4d0406bb554d002facaf0f29ae4251702a91a9c7049886d882fd51edde0f618c35054df38cb60842fae83b25  0086-ipa-soft-awb-Adjust-the-gains-as-the-tuning-s-gain-a.patch
+cc05b7949e8eba088aa1d39bbe9deba507a4a7ad9d5b9577286f2cfec45cf163d1322e3c656ff34b3b4cfe5bba44ef2c82cc665e391e4cd27c5799f5400c592a  0087-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 578dfd7c239590a85fe8f2092f9e6dd2d45472264f1621aa3a813ddebbd8ce3c663b259684a90bf0e2d074df448073daca78dd788e65064554614502b6b1f350  imx320.yaml
 acba0299c6f9dbb983d7bb8dbe64b98896665b2228ab584876e3cbbb6c58a583851fb8540a7eae1eebc76f37cf9eb4a4afecf434c3803b3d1ea5ec10725d4cbd  imx345.yaml
