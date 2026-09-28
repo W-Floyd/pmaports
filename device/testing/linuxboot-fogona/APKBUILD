@@ -23,7 +23,7 @@
 # or by a one-shot request, tools/linuxboot/dev.sh stage-hold).
 pkgname=linuxboot-fogona
 pkgver=0_git20260927
-pkgrel=6
+pkgrel=7
 pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the Moto G Play (2024)"
 url="https://github.com/W-Floyd/linux"
 arch="aarch64"
@@ -61,8 +61,8 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # (TREES.md), the stage layer over fogona-mainline; u-root is branch
 # fogona-linuxboot, upstream plus the arm64 kexec_load DTB patch; the Boot
 # Manager is its main branch.
-_kernel_commit="eed888c747c6ba6359539e30b2a034e80172854d"
-_uroot_commit="1486aea5482577d0e2038baf65a0d4c22024ec49"
+_kernel_commit="672ba7067c288994a441913b0fd34c9af8c62c70"
+_uroot_commit="015d488be82e48ee31d6b548b23045cd755aacf5"
 _bm_commit="a2ffea63b60c093b05e8e37ebb9422e13381d8dc"
 _uroot_url="https://github.com/W-Floyd/u-root"
 _bm_url="https://github.com/W-Floyd/bootmanager"
@@ -149,8 +149,8 @@ package() {
 }
 
 sha512sums="
-9db47fe4383600180668d85fac64bf270c892dfb6ea2088b8ff367545a770cc0ff88dc5ab3f62fac1c649f161ac306fa258cf170ecb642dc2332a48cd0e8a73e  linux-eed888c747c6ba6359539e30b2a034e80172854d.tar.gz
-d0dbb0db25bd715f4d2a9e2162ebce9c6e00cf4e52695a1f16f3fca007be88d22f6fd11791e7868c2d87947222c3877cff40ac4d6257b3607584f5f5f5bf27a8  u-root-1486aea5482577d0e2038baf65a0d4c22024ec49.tar.gz
+e6907c556d4f070300b7d874311a9f1d67163bb6d5cb650ebb798aa7b1cde064bebe558ef10c56e21b48e3f8a5f98f4fe7bad870876e5f423bce4ec48e96c0a0  linux-672ba7067c288994a441913b0fd34c9af8c62c70.tar.gz
+e1b8a58906ef9bb221282b9bb07be2964f381ff330b7f3b680257c2c4e55cb373b783e4fa65167666a02a0550dc074e1a2b14a648fb9933535f38e7d3b23577c  u-root-015d488be82e48ee31d6b548b23045cd755aacf5.tar.gz
 cfefd81a1883c7515e3e2296f7759baeba29b2dda50581224625025508e0691e46218fa8ae8f28c15a4bf999c50cfd8dd5fe8362a60719574424f216fe591c8d  bootmanager-a2ffea63b60c093b05e8e37ebb9422e13381d8dc.tar.gz
 0e78180534da7f2ea62fa600568980d76e67acecd45b6a732352b9674df82ebdb13e8a59ee3a23638c89f936fbd2f5bab2a9ec9fe74fd6508b0e4c4b3461c010  config-linuxboot-fogona.aarch64
 fb5bb40a954d68cc28a7965d3d085406e218a23b5d4d086f488b55d051e4480d76a102fd9edbdcb8a777c80ebb21ed3f856f9fe3ab2dcbfec3c2a65f35da83ec  uinit.sh
