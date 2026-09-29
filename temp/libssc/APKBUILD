@@ -1,0 +1,53 @@
+# Forked from Alpine to give gyroscope-less devices a compass (fogona: geomag_rv)
+maintainer="William Floyd <git@notmy.space>"
+pkgname=libssc
+pkgver=0.4.4
+pkgrel=1
+pkgdesc="Library to expose Qualcomm Sensor Core sensors"
+url="https://codeberg.org/DylanVanAssche/libssc"
+arch="all"
+license="GPL-3.0-or-later"
+makedepends="
+	eudev-dev
+	glib-dev
+	libgudev-dev
+	linux-headers
+	libqmi-dev
+	meson
+	protobuf-c-dev
+	protobuf-dev
+	python3-dev
+	py3-gobject3
+	py3-protobuf
+	qrtr-libs
+"
+subpackages="$pkgname-dbg $pkgname-dev $pkgname-pyc"
+builddir="$srcdir/$pkgname"
+source="$pkgname-$pkgver.tar.gz::https://codeberg.org/DylanVanAssche/libssc/archive/v$pkgver.tar.gz
+	0001-sensor-compass-fall-back-to-the-geomagnetic-rotation.patch
+	"
+
+# Tests suddenly fail on s390x, disable them for now
+case "$CARCH" in
+	s390x) options="!check";;
+esac
+
+build() {
+	abuild-meson \
+		-Db_lto=true \
+		. output
+	meson compile -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+}
+
+check() {
+	meson test --print-errorlogs -C output
+}
+
+sha512sums="
+9240970f6a70f4900ef2d8fad337dac815ea2602b3b395943326fb086f59d24dcf59b76bdbc6014ebd3c450eaad5393465ca038c165845ffe99bf8e282a5c170  libssc-0.4.4.tar.gz
+a2ac1cc84994f2d540622d9e0f2ba7f83cafc5e4cb597231c2d6a95eb6af2504e3571f8b14ae7f2df66d5a4fc03a02048aed6c73e2cf11da119d133976b59cb5  0001-sensor-compass-fall-back-to-the-geomagnetic-rotation.patch
+"

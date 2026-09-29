@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Tue, 29 Sep 2026 05:33:58 +0000
+Subject: [PATCH] sensor: compass: fall back to the geomagnetic rotation vector
+
+The compass is built on the rotation vector, which fuses accelerometer,
+gyroscope and magnetometer. Devices without a gyroscope have no 'rotv'
+sensor, so the compass was unavailable on them even with a working
+magnetometer. Their SSC still offers 'geomag_rv', the accelerometer and
+magnetometer fusion, which reports the same quaternion. Try it when
+'rotv' is not found.
+---
+ src/libssc-sensor-compass.c | 75 +++++++++++++++++++++++++++++--------
+ 1 file changed, 59 insertions(+), 16 deletions(-)
+
+diff --git a/src/libssc-sensor-compass.c b/src/libssc-sensor-compass.c
+index 332d8ca..97677a3 100644
+--- a/src/libssc-sensor-compass.c
++++ b/src/libssc-sensor-compass.c
+@@ -282,37 +282,80 @@ ssc_sensor_compass_init (SSCSensorCompass *self)
+ {
+ }
+ 
+-SSCSensorCompass *
+-ssc_sensor_compass_new_finish (GAsyncResult *result, GError **error)
++/*
++ * The rotation vector fuses accelerometer, gyroscope and magnetometer, so
++ * devices without a gyroscope have none. Their SSC still offers the
++ * geomagnetic rotation vector (accelerometer and magnetometer only), which
++ * reports the same quaternion, so fall back to it.
++ */
++static const gchar *compass_data_types[] = { "rotv", "geomag_rv", NULL };
++
++static void compass_try_data_type (GTask *task);
++
++static void
++compass_new_ready (GObject *source, GAsyncResult *result, gpointer user_data)
+ {
++	GTask *task = G_TASK (user_data);
+ 	GObject *sensor;
+-	GObject *source;
++	g_autoptr (GError) error = NULL;
+ 
+-	source = g_async_result_get_source_object (result);
+-	sensor = g_async_initable_new_finish (G_ASYNC_INITABLE (source), result, error);
++	sensor = g_async_initable_new_finish (G_ASYNC_INITABLE (source), result, &error);
++	if (sensor) {
++		g_task_return_pointer (task, sensor, g_object_unref);
++		g_object_unref (task);
++		return;
++	}
+ 
+-	if (!sensor) {
+-		g_object_unref (source);
+-		return NULL;
++	if (compass_data_types[GPOINTER_TO_UINT (g_task_get_task_data (task)) + 1] == NULL ||
++	    g_cancellable_is_cancelled (g_task_get_cancellable (task))) {
++		if (error)
++			g_task_return_error (task, g_steal_pointer (&error));
++		else
++			g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
++						 "No compass sensor available");
++		g_object_unref (task);
++		return;
+ 	}
+ 
+-	g_object_unref (source);
+-	return SSC_SENSOR_COMPASS (sensor);
++	g_task_set_task_data (task, GUINT_TO_POINTER (GPOINTER_TO_UINT (g_task_get_task_data (task)) + 1), NULL);
++	compass_try_data_type (task);
+ }
+ 
+-void
+-ssc_sensor_compass_new (GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
++static void
++compass_try_data_type (GTask *task)
+ {
+ 	g_async_initable_new_async (
+ 			SSC_TYPE_SENSOR_COMPASS,
+ 			G_PRIORITY_DEFAULT,
+-			cancellable,
+-			callback,
+-			user_data,
+-			SSC_SENSOR_DATA_TYPE, "rotv",
++			g_task_get_cancellable (task),
++			compass_new_ready,
++			task,
++			SSC_SENSOR_DATA_TYPE, compass_data_types[GPOINTER_TO_UINT (g_task_get_task_data (task))],
+ 			NULL);
+ }
+ 
++SSCSensorCompass *
++ssc_sensor_compass_new_finish (GAsyncResult *result, GError **error)
++{
++	GObject *sensor;
++
++	sensor = g_task_propagate_pointer (G_TASK (result), error);
++	if (!sensor)
++		return NULL;
++
++	return SSC_SENSOR_COMPASS (sensor);
++}
++
++void
++ssc_sensor_compass_new (GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
++{
++	GTask *task;
++
++	task = g_task_new (NULL, cancellable, callback, user_data);
++	g_task_set_task_data (task, GUINT_TO_POINTER (0), NULL);
++	compass_try_data_type (task);
++}
++
+ SSCSensorCompass *
+ ssc_sensor_compass_new_sync (GCancellable *cancellable, GError **error)
+ {
+-- 
+2.55.0
+
