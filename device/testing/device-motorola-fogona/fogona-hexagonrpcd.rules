@@ -1,0 +1,7 @@
+# Start the ADSP's FastRPC servers when their device node appears. The ADSP
+# boots from firmware msm-firmware-loader mounts, a few seconds after
+# multi-user.target has already tried these units, so their
+# ConditionPathExists=/dev/fastrpc-adsp skipped them and nothing retried:
+# no sensors, and no audio PD for call audio.
+
+SUBSYSTEM=="misc", KERNEL=="fastrpc-adsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-adsp-rootpd.service hexagonrpcd-adsp-sensorspd.service hexagonrpcd-adsp-audiopd.service"
