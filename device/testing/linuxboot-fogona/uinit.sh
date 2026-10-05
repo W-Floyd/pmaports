@@ -227,12 +227,16 @@ if [ -e /bbin/bootmanager ]; then
 		#
 		# Before either, the blobs this device needs and its stage cannot
 		# carry (the touch controller's firmware, which the panel's
-		# bring-up waits for), from its own stock partitions, as its
-		# manifest says (bootmanager -firmware). Needs no boot partition, so
-		# works with nothing installed; a file the image embeds or the boot
-		# partition provides below is left alone.
-		[ -e /etc/bootmanager/firmware.json ] &&
-			bootmanager -firmware /etc/bootmanager/firmware.json >> /tmp/uinit.log 2>&1
+		# bring-up waits for), from its own stock partitions: the same
+		# loader pmOS runs (bootmanager msm-firmware-loader) mounts them
+		# read-only and points the kernel's firmware path at them. It needs
+		# no boot partition, so it works with nothing installed. A driver
+		# that asked for its file at probe time, before this, gave up, so
+		# the devices without a driver are probed again (bootmanager
+		# reprobe). A file the image embeds, or the boot partition provides
+		# below, is found first and left alone.
+		bootmanager msm-firmware-loader >> /tmp/uinit.log 2>&1 &&
+			bootmanager reprobe >> /tmp/uinit.log 2>&1
 		setup >> /tmp/uinit.log 2>&1
 		record_boot > /tmp/record_boot.log 2>&1
 		bootmanager -send stage.ready >> /tmp/uinit.log 2>&1 ||

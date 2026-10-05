@@ -23,7 +23,7 @@
 # or by a one-shot request, tools/linuxboot/dev.sh stage-hold).
 pkgname=linuxboot-fogona
 pkgver=0_git20260927
-pkgrel=14
+pkgrel=15
 pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the Moto G Play (2024)"
 url="https://github.com/W-Floyd/linux"
 arch="aarch64"
@@ -70,7 +70,7 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # Manager is its main branch.
 _kernel_commit="85ed2f030b185e4be40c80ce8f9115e215870f70"
 _uroot_commit="015d488be82e48ee31d6b548b23045cd755aacf5"
-_bm_commit="fb7511ba86539ba316b6aaeee39d3d3aa28943c6"
+_bm_commit="2948100d22f857411ab0650fe3a29ed381ca1c6d"
 _uroot_url="https://github.com/W-Floyd/u-root"
 _bm_url="https://github.com/W-Floyd/bootmanager"
 
@@ -82,7 +82,6 @@ source="
 	uinit.sh
 	fogona-boot.sh
 	motorola-fogona.json
-	motorola-fogona-firmware.json
 	"
 builddir="$srcdir/linux-$_kernel_commit"
 
@@ -108,8 +107,7 @@ build() {
 	# on Alpine is a symlink to the loader, so that name is added by hand.
 	mkdir -p "$_out"/files
 	cp -L "$srcdir"/uinit.sh "$srcdir"/fogona-boot.sh \
-		"$srcdir"/motorola-fogona.json \
-		"$srcdir"/motorola-fogona-firmware.json "$_out"/files/
+		"$srcdir"/motorola-fogona.json "$_out"/files/
 	: > "$_out"/files/dev
 
 	# The disk tools behind two optional Boot Manager features, Check and
@@ -144,7 +142,6 @@ build() {
 			-files "/lib/ld-musl-aarch64.so.1:lib/libc.musl-aarch64.so.1" \
 			-files "$_out/bootmanager-ui:bin/bootmanager-ui" \
 			-files "$_out/files/motorola-fogona.json:etc/bootmanager/motorola-fogona.json" \
-			-files "$_out/files/motorola-fogona-firmware.json:etc/bootmanager/firmware.json" \
 			-files "$_out/files/dev:etc/bootmanager/dev" \
 			$_toolfiles \
 			core boot cmds/exp/fdtdump "$_bm"/bootmanager)
@@ -187,10 +184,9 @@ package() {
 sha512sums="
 ceef560a9735839c58516b8db6ee22427a910fd79a2ea52773c948316ebe18a47675c81d7f80bf418009ab436c5db2ae4f8476937bb9cd70ca0d2cb388618341  linux-85ed2f030b185e4be40c80ce8f9115e215870f70.tar.gz
 e1b8a58906ef9bb221282b9bb07be2964f381ff330b7f3b680257c2c4e55cb373b783e4fa65167666a02a0550dc074e1a2b14a648fb9933535f38e7d3b23577c  u-root-015d488be82e48ee31d6b548b23045cd755aacf5.tar.gz
-bca35ba974e5d3c6cd3b7d087a9ca13509d8dc10d32abff7399fe69a37a8c41e10f47667163c578156278f7f968f969b5226c8e3fb0d35f5e977ad8db7fcb5b5  bootmanager-fb7511ba86539ba316b6aaeee39d3d3aa28943c6.tar.gz
+59a9c622df61be9f4c8cbf9e32ab7879d6a3016227f3d27fa8dba01b2bdaa15ff3288d96256b8b4f073c32f47f40696f412010859c394fa4db5cfb6340bdb4bc  bootmanager-2948100d22f857411ab0650fe3a29ed381ca1c6d.tar.gz
 f525c516e997e028bd689a03fef61af28c44a1389abdff103da9213790c5e6ab93184f0ab07bb1fa630e23e6a3113b50dc553d9566babc99542fe8dcb9707676  config-linuxboot-fogona.aarch64
-897e931d56054b9378bf15f3143546af5b077a1cd83617f4f8263d71f14967e328146b3ada970c347740932d6134404a0bed924556ac35e3b48bc4ba816241b3  uinit.sh
+b51658cc70b1e62ca3adb83f1ecb72abedf48effdc7a4e5adb59f5bf0ffec0e6af2afe3006c503d0125f25a9cbc6bf9114dea2545608092a17a6d2f74cb9da1c  uinit.sh
 6a7d824c0fe3e7b55954fb1177d4549da5f5b4756da8f1c73bbd8ed8da8747b90ddb441351bab52f87febeabf5e3be7a4369e18a1194b3d99543c7b57755f3c1  fogona-boot.sh
 e9134b014880d4b7468fd4bb583eaf9cc56a176e8d139d00ce6da2d0fa481ef65cb491f651ab73f3837c3b991b7ca7a8c74fe97a4f5b0ed85138913d3637579e  motorola-fogona.json
-fe505012aaa746462b065b7935d1908dd58d12ae7ad97e71e7ae8137e076d3c93dfbacf471f398fc259e7afb69b5cadf47f672c695baa060ccaf5bf37f1ed004  motorola-fogona-firmware.json
 "
