@@ -1,0 +1,20 @@
+--- a/init_functions_2nd.sh
++++ b/init_functions_2nd.sh
+@@ -37,7 +37,16 @@
+ 	# - https://git.alpinelinux.org/aports/tree/main/eudev/setup-udev
+ 	# - https://git.alpinelinux.org/aports/tree/main/udev-init-scripts/APKBUILD
+ 	udevd -d --resolve-names=never
+-	udevadm trigger --type=devices --action=add
++
++	# A device whose drivers are built in can limit the coldplug to the
++	# subsystems it needs here (deviceinfo_initfs_udev_subsystems, space
++	# separated): a full trigger replays every device, thousands on a handset,
++	# and took seconds, while the block devices alone are about a hundred.
++	local match="" subsystem
++	for subsystem in $deviceinfo_initfs_udev_subsystems; do
++		match="$match --subsystem-match=$subsystem"
++	done
++	udevadm trigger --type=devices --action=add $match
+ 	udevadm settle
+ }
+ 
