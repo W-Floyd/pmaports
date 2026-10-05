@@ -20,37 +20,63 @@
 # has no wall clock), and leaves this boot's dmesg as linuxboot/dmesg.txt.
 # tools/backlight-log.sh reads it back with pmOS's own records.
 #
-# It runs before anything else, mounts the card read-write only for as long
-# as it writes, and unmounts before the boot scan: ext4 refuses a read-only
+# It runs before the boot scan, mounts the partition read-write only for as
+# long as it writes, and unmounts before it: ext4 refuses a read-only
 # mount of a superblock already mounted read-write ("Can't mount, would
 # change RO state") and the reverse, so a read-write mount held past this
 # point hides the boot entries from the scan (it did, 2026-09-26), and one
 # made after the scan fails. It waits up to 5 s for the panel driver's
 # verdict, which on a good boot is already in by the time the uinit runs.
 #
-# TEMPORARY, for the display logging only: mmcblk0p1 is hardcoded, where the
-# stage should log to the boot partition it discovers (the one holding
-# extlinux.conf, by label or UUID) -- TODO.md, "LinuxBoot".
-record_boot() {
-	mkdir -p /mnt/boot
+# Where it writes is found, not assumed: the first file system with a
+# linuxboot directory, at its root (the microSD card's first partition is
+# /boot) or under boot/ (an install on UFS, whose /boot is a directory of the
+# root file system), a card first (bootmanager -find-boot-files). It leaves
+# the location in /tmp/settings-spec for the Boot Manager's -settings, empty
+# when there is none: then there is no touch firmware, SSH key or saved
+# setting, but nothing waits for them. A stage without the Boot Manager has
+# no -find-boot-files and keeps to the card's first partition.
+find_boot_partition() {
+	if [ -e /bbin/bootmanager ]; then
+		# It waits a moment for a card, not for ever: there may be none.
+		found=$(bootmanager -find-boot-files 2>> /tmp/record_boot.log) || return 1
+		BOOTDEV=${found%% *}
+		rest=${found#* }
+		BOOTFS=${rest%% *}
+		BOOTDIR=${rest#* }
+		return 0
+	fi
 	# The card probes asynchronously (~1.1 s in), and the uinit can get
-	# here first -- sooner still with nothing drawn on the console. Without
-	# the partition the mount fails and all of this, the touch firmware
-	# included, is skipped.
+	# here first -- sooner still with nothing drawn on the console.
 	# Every 50 ms (u-root's sleep takes Go durations), for up to 10 s.
 	for i in $(seq 200); do
 		[ -e /dev/mmcblk0p1 ] && break
 		sleep 50ms
 	done
-	mount -t ext4 /dev/mmcblk0p1 /mnt/boot || {
-		echo "record_boot: cannot mount /dev/mmcblk0p1"
+	[ -e /dev/mmcblk0p1 ] || return 1
+	BOOTDEV=mmcblk0p1
+	BOOTFS=ext4
+	BOOTDIR=linuxboot
+	return 0
+}
+
+record_boot() {
+	mkdir -p /mnt/boot
+	: > /tmp/settings-spec
+	find_boot_partition || {
+		echo "record_boot: no partition with a linuxboot directory"
 		return
 	}
+	mount -t $BOOTFS /dev/$BOOTDEV /mnt/boot || {
+		echo "record_boot: cannot mount /dev/$BOOTDEV"
+		return
+	}
+	printf '%s:%s/bootmanager.json\n' $BOOTDEV $BOOTDIR > /tmp/settings-spec
 	for i in 1 2 3 4 5; do
 		dmesg | grep -q "bl: settled|Failed to initialize panel" && break
 		sleep 1
 	done
-	L=/mnt/boot/linuxboot
+	L=/mnt/boot/$BOOTDIR
 	mkdir -p $L
 	n=$(cat $L/boot-count 2>/dev/null)
 	n=$((${n:-0} + 1))
@@ -187,16 +213,19 @@ if [ -e /bbin/bootmanager ]; then
 	# its generated set yet), this stage's logs, and in a dev build the
 	# one-shot request record_boot copies. -settings keeps the entries'
 	# order and default and the autoboot's on/off and countdown on the
-	# card's boot partition, next to record_boot's files (mmcblk0p1
-	# hardcoded, as there: TEMPORARY). The Boot Manager reads it once
-	# stage.ready is sent, after record_boot has let the card go.
+	# boot partition record_boot found, next to its files: @FILE names the
+	# file where record_boot leaves that location (empty: nowhere to keep
+	# them). The Boot Manager reads it once stage.ready is sent, after
+	# record_boot has let the partition go.
 	BMARGS="-listen 172.16.42.1 -panel /etc/bootmanager/motorola-fogona.json"
-	BMARGS="$BMARGS -settings mmcblk0p1:linuxboot/bootmanager.json"
+	BMARGS="$BMARGS -settings @/tmp/settings-spec"
 	BMARGS="$BMARGS -logs /tmp/uinit.log,/tmp/record_boot.log"
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
 	{
-		record_boot > /tmp/record_boot.log 2>&1
+		# The USB network first: it needs nothing from the boot partition,
+		# and with no card record_boot can take a few seconds to find none.
 		setup >> /tmp/uinit.log 2>&1
+		record_boot > /tmp/record_boot.log 2>&1
 		bootmanager -send stage.ready >> /tmp/uinit.log 2>&1 ||
 			echo "fogona LinuxBoot: stage.ready not delivered" >> /tmp/uinit.log
 	} &
