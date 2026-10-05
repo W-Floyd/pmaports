@@ -1,0 +1,22 @@
+[Unit]
+Description=PPD-to-TuneD API Translation Daemon
+# The upstream unit, without its Before=multi-user.target display-manager.target.
+# fogona-tuned-late.service enqueues this start during the boot, and with those
+# lines multi-user.target and the display manager waited for it: it was the
+# tail of the critical path (about 7 s). Nothing at boot needs it, and D-Bus
+# starts it on demand (net.hadess.PowerProfiles).
+#
+# A whole unit in /etc rather than a drop-in because Before= cannot be reset
+# from a drop-in on this systemd, as with sshd-early.service. Compare with the
+# upstream unit when tuned is updated.
+Requires=tuned.service
+After=tuned.service
+
+[Service]
+Type=dbus
+BusName=org.freedesktop.UPower.PowerProfiles
+BusName=net.hadess.PowerProfiles
+ExecStart=/usr/sbin/tuned-ppd -l
+
+[Install]
+WantedBy=graphical.target
