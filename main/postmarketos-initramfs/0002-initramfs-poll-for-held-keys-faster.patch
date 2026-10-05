@@ -1,0 +1,13 @@
+--- a/init_functions.sh
++++ b/init_functions.sh
+@@ -1236,8 +1236,9 @@
+ 		touch /tmp/debug_shell_exited
+ 	} &
+ 
++	# Poll quickly: iskey returns at once, a one second sleep only delays boot
+ 	while ! [ -e /tmp/debug_shell_exited ]; do
+-		sleep 1
++		sleep 0.05
+ 	done
+ }
+ 

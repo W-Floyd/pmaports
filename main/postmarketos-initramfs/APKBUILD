@@ -2,7 +2,7 @@
 maintainer="Casey Connolly <kcxt@postmarketos.org>"
 pkgname=postmarketos-initramfs
 pkgver=3.12.3
-pkgrel=1
+pkgrel=2
 pkgdesc="Base files for the postmarketOS initramfs / initramfs-extra"
 url="https://postmarketos.org"
 provides="postmarketos-ramdisk=$pkgver-r$pkgrel"
@@ -52,9 +52,24 @@ source="
 	mdev.conf
 	tests/01-parse-cmdline-testlib.sh
 	tests/02-find-partition-testlib.sh
+	0001-initramfs-skip-udev-when-the-device-asks.patch
+	0002-initramfs-poll-for-held-keys-faster.patch
 	"
 arch="noarch"
 license="GPL-2.0-or-later"
+
+# fogona: two boot-time patches over upstream 3.12.3-r1. The pkgrel is above
+# upstream's so apk takes this one until upstream moves past it.
+prepare() {
+	# The sources are symlinks into the pmaports tree: patch copies of them.
+	for f in init_functions.sh init_functions_2nd.sh; do
+		cp -L "$srcdir/$f" "$srcdir/$f.tmp"
+		mv "$srcdir/$f.tmp" "$srcdir/$f"
+	done
+	cd "$srcdir"
+	patch -p1 < 0001-initramfs-skip-udev-when-the-device-asks.patch
+	patch -p1 < 0002-initramfs-poll-for-held-keys-faster.patch
+}
 
 build() {
 	mkdir -p "$builddir"
@@ -124,4 +139,6 @@ bd72e8b6345a46ec13516c64d78d4fa1a9a18a8db9ab04aac605f9708629453dc65b6fbccd96b58e
 675e7d5bee39b2df7d322117f8dcaccc274d61beaf4d50ead19bbf2109446d64b1c0aa0c5b4f9846eb6c1c403418f28f6364eff4537ba41120fbfcbc484b7da7  mdev.conf
 776ac842df70a5ac7b20b942abf2afecfed83b59bd5bf775b77c1e8e071e1d9b9120c502410cd2643551589e9523221be0ca7a2734b2c5302fca7d631aa91916  01-parse-cmdline-testlib.sh
 a60b8affe7431d477f7480ca094721930f65a31f920c7eb937384ad708f98a4a4ab2ad68688bf92ff741d3083ce4f14c238ee2e1beae5cefc30b5fd9bfd6aa66  02-find-partition-testlib.sh
+d76d63d8b39da8819eaa4514e7ce80f07dec9d93b2c084ef8a7c4275b6af317f212c45c8a635edfa56398ef8811458472af969734dfce1c04c563d405ddc89fd  0001-initramfs-skip-udev-when-the-device-asks.patch
+49d18aa211438d02bb3b65e6c88a8f8856669aa6c7357730a0fbcec5eaec11f9f9529ed4361533ce06773fa955fa83b77e6f728463f6e3802e9d91d2d6bbe641  0002-initramfs-poll-for-held-keys-faster.patch
 "
