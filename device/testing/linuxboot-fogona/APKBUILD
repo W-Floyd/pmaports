@@ -23,7 +23,7 @@
 # or by a one-shot request, tools/linuxboot/dev.sh stage-hold).
 pkgname=linuxboot-fogona
 pkgver=0_git20260927
-pkgrel=9
+pkgrel=10
 pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the Moto G Play (2024)"
 url="https://github.com/W-Floyd/linux"
 arch="aarch64"
@@ -35,10 +35,16 @@ depends="openssh-keygen"
 makedepends="
 	bash
 	bc
+	binutils
 	bison
 	cargo
 	cpio
+	cryptsetup
+	dosfstools
 	dtc
+	e2fsprogs
+	exfatprogs
+	f2fs-tools
 	file
 	findutils
 	flex
@@ -52,6 +58,7 @@ makedepends="
 	python3
 	rust
 	unudhcpd
+	xfsprogs
 	"
 # net: go and cargo fetch their modules and crates
 options="net !check !strip !tracedeps"
@@ -61,9 +68,9 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # (TREES.md), the stage layer over fogona-mainline; u-root is branch
 # fogona-linuxboot, upstream plus the arm64 kexec_load DTB patch; the Boot
 # Manager is its main branch.
-_kernel_commit="7233cd04e4ce42d93319bc84c985ae6ca21ffdb4"
+_kernel_commit="85ed2f030b185e4be40c80ce8f9115e215870f70"
 _uroot_commit="015d488be82e48ee31d6b548b23045cd755aacf5"
-_bm_commit="17f11f73e9a9ddc75e994d3ae14327511fe6e322"
+_bm_commit="a4314875098733cf97cea3000689d1f74bbfb334"
 _uroot_url="https://github.com/W-Floyd/u-root"
 _bm_url="https://github.com/W-Floyd/bootmanager"
 
@@ -102,6 +109,28 @@ build() {
 	cp -L "$srcdir"/uinit.sh "$srcdir"/fogona-boot.sh \
 		"$srcdir"/motorola-fogona.json "$_out"/files/
 	: > "$_out"/files/dev
+
+	# The disk tools behind two optional Boot Manager features, Check and
+	# Repair (ext4, FAT32, exFAT, f2fs, XFS) and Unlock (LUKS, cryptsetup):
+	# copied, with the shared libraries they link, from this chroot. Alpine
+	# ships them dynamic only, so the stage's musl loader runs them; the
+	# libraries are found and added by u-root itself, as it does for
+	# unudhcpd. The Boot Manager leaves a feature out of its UI when its
+	# tool is missing (hello.fsck, hello.luks).
+	_toolfiles=
+	_pack() { # BINARY DESTDIR
+		local src= d
+		for d in /sbin /usr/sbin /bin /usr/bin; do
+			[ -f "$d/$1" ] && src="$d/$1" && break
+		done
+		[ -n "$src" ] || die "no $1 to pack"
+		_toolfiles="$_toolfiles -files $src:$2/$1"
+	}
+	for _b in e2fsck fsck.fat fsck.exfat fsck.f2fs xfs_repair; do
+		_pack $_b usr/libexec/fsck
+	done
+	_pack cryptsetup usr/libexec/cryptsetup
+
 	(cd "$_uroot" && GOWORK=off go build -o "$_out"/u-root-bin . &&
 		GOWORK="$_out"/go.work GOARCH=arm64 "$_out"/u-root-bin \
 			-o "$_out"/u-root.cpio \
@@ -114,6 +143,7 @@ build() {
 			-files "$_out/bootmanager-ui:bin/bootmanager-ui" \
 			-files "$_out/files/motorola-fogona.json:etc/bootmanager/motorola-fogona.json" \
 			-files "$_out/files/dev:etc/bootmanager/dev" \
+			$_toolfiles \
 			core boot cmds/exp/fdtdump "$_bm"/bootmanager)
 	# A dangling link in the initramfs leaves the stage at a bare shell
 	cpio -itv < "$_out"/u-root.cpio | grep -e ' etc/.* -> /' &&
@@ -129,6 +159,9 @@ build() {
 		'CONFIG_BUILTIN_DTB_NAME="qcom/sm6225-motorola-fogona-linuxboot"' \
 		'CONFIG_TOUCHSCREEN_CHIPONE_ICNL9916=y' \
 		'CONFIG_FRAMEBUFFER_CONSOLE_DEFERRED_TAKEOVER=y' \
+		'CONFIG_I2C_QCOM_GENI=y' 'CONFIG_BATTERY_CW221X=y' \
+		'CONFIG_CHARGER_BQ25890=y' 'CONFIG_DM_CRYPT=y' \
+		'CONFIG_F2FS_FS=y' 'CONFIG_EXFAT_FS=y' 'CONFIG_XFS_FS=y' \
 		"CONFIG_INITRAMFS_SOURCE=\"$_out/u-root.cpio\""; do
 		grep -qxF "$want" .output/.config || die ".config lacks $want"
 	done
@@ -149,11 +182,11 @@ package() {
 }
 
 sha512sums="
-3a856e001cfff47af1cf36109c8b6fcd99808e7a90c3605143a140a24f13049e032f36e52f95e438eee784ba245981e759bc5637e9eea58faf1b87b014ffcfc4  linux-7233cd04e4ce42d93319bc84c985ae6ca21ffdb4.tar.gz
+ceef560a9735839c58516b8db6ee22427a910fd79a2ea52773c948316ebe18a47675c81d7f80bf418009ab436c5db2ae4f8476937bb9cd70ca0d2cb388618341  linux-85ed2f030b185e4be40c80ce8f9115e215870f70.tar.gz
 e1b8a58906ef9bb221282b9bb07be2964f381ff330b7f3b680257c2c4e55cb373b783e4fa65167666a02a0550dc074e1a2b14a648fb9933535f38e7d3b23577c  u-root-015d488be82e48ee31d6b548b23045cd755aacf5.tar.gz
-943a040908b2904e779f1633c518c4ef737b218a3676be5da37661ea04245dd10b67c9edc433803e8e69cdd59edf9ebca3aef9937218403872d482bf1e8a11b6  bootmanager-17f11f73e9a9ddc75e994d3ae14327511fe6e322.tar.gz
-0e78180534da7f2ea62fa600568980d76e67acecd45b6a732352b9674df82ebdb13e8a59ee3a23638c89f936fbd2f5bab2a9ec9fe74fd6508b0e4c4b3461c010  config-linuxboot-fogona.aarch64
-fb5bb40a954d68cc28a7965d3d085406e218a23b5d4d086f488b55d051e4480d76a102fd9edbdcb8a777c80ebb21ed3f856f9fe3ab2dcbfec3c2a65f35da83ec  uinit.sh
+071756d519f2206dd7ed2d19c1803d8f0847eca72063d892b100e9d5e5c2d95c90de99393da983caaceace4e2e0d112585a3cd0164a50a53216aee4ceee3d95c  bootmanager-a4314875098733cf97cea3000689d1f74bbfb334.tar.gz
+f525c516e997e028bd689a03fef61af28c44a1389abdff103da9213790c5e6ab93184f0ab07bb1fa630e23e6a3113b50dc553d9566babc99542fe8dcb9707676  config-linuxboot-fogona.aarch64
+b0e841ca180c87d02b9d2938d3ea04a5acbc659985436a42b508aa56762b91577b6d2979796f50ba15c443c347b791247892f5fa5dc1affedf7552aae653685f  uinit.sh
 6a7d824c0fe3e7b55954fb1177d4549da5f5b4756da8f1c73bbd8ed8da8747b90ddb441351bab52f87febeabf5e3be7a4369e18a1194b3d99543c7b57755f3c1  fogona-boot.sh
 e9134b014880d4b7468fd4bb583eaf9cc56a176e8d139d00ce6da2d0fa481ef65cb491f651ab73f3837c3b991b7ca7a8c74fe97a4f5b0ed85138913d3637579e  motorola-fogona.json
 "

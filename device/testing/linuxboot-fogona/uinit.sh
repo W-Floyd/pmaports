@@ -185,8 +185,13 @@ if [ -e /bbin/bootmanager ]; then
 	echo "fogona LinuxBoot: Boot Manager, booting the default entry in 10 s." >> /tmp/uinit.log
 	# What is fogona's: Remote UI on the USB network, the panel (not in
 	# its generated set yet), this stage's logs, and in a dev build the
-	# one-shot request record_boot copies.
+	# one-shot request record_boot copies. -settings keeps the entries'
+	# order and default and the autoboot's on/off and countdown on the
+	# card's boot partition, next to record_boot's files (mmcblk0p1
+	# hardcoded, as there: TEMPORARY). The Boot Manager reads it once
+	# stage.ready is sent, after record_boot has let the card go.
 	BMARGS="-listen 172.16.42.1 -panel /etc/bootmanager/motorola-fogona.json"
+	BMARGS="$BMARGS -settings mmcblk0p1:linuxboot/bootmanager.json"
 	BMARGS="$BMARGS -logs /tmp/uinit.log,/tmp/record_boot.log"
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
 	{
