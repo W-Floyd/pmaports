@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=76
+pkgrel=77
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -196,6 +196,7 @@ source="deviceinfo
 	fogona-tuned-late.service
 	fogona-tuned-ppd.service
 	fogona-ufs-untag.rules
+	fogona-udev-trigger.conf
 	81-libssc-motorola-fogona.rules
 	fogona-hexagonrpcd.rules
 	rmtfs-writable-efs.conf
@@ -401,6 +402,9 @@ package() {
 		"$pkgdir"/etc/systemd/system/tuned-ppd.service
 	install -Dm644 "$srcdir"/fogona-ufs-untag.rules \
 		"$pkgdir"/usr/lib/udev/rules.d/99-zz-fogona-ufs-untag.rules
+	# The coldplug trigger, narrowed; see the file.
+	install -Dm644 "$srcdir"/fogona-udev-trigger.conf \
+		"$pkgdir"/usr/lib/systemd/system/systemd-udev-trigger.service.d/10-fogona-narrow.conf
 
 	# TEMPORARY, paired with the unfixed panel bring-up stall. sshd is
 	# normally ordered After=network.target, which puts it behind
@@ -498,6 +502,7 @@ a35a2db082b816bdc6a05a927c6e9a8996da944cd8444b68fb796f6603f0559ecacd27a5366975a4
 3cb3c1f285f9eb91513be73888b76dba21242fa1cb3de264d90992070cf509ac875cdf998530e6fa2bb3a61f51f8ca75bb03b1e65fdef748ed311ca7c33c7cbb  fogona-tuned-late.service
 ead1977c961d7b7c971378f433431ac4295ef5e6289827eec046e31d58e0ba0b206bac1df85e93099cf3add252b12fea8ddad5c01ac6f1682f46a664b9941a80  fogona-tuned-ppd.service
 fb91ad6d2c91b388af393699a23cb7377a1dd4cdd86e3fa92c95404fc15d033614d1341cf1b5a69f248076fb47244601a61f0c6adef7fda74bdcdcd3a6e5ba75  fogona-ufs-untag.rules
+573b43f221340d6b84e97a16fd4f8038e95d853769b2c196ed81c3940e3f3ba2c2b4afb4fcdf68662306f40e751f4c43caea2d518c7d16131fd83b8b9a6c84d6  fogona-udev-trigger.conf
 bd7b1010c2b5ac13571883e65f861fe81612710d2ba4363f34558aa1de8508ea08fd945f653c3509aae1602603aa66b2a5b7758e834b130d0247338821a45b7f  81-libssc-motorola-fogona.rules
 a31a03420707d5af440e97696c1a101be198ff8e4e066692c0ae8d07ae9bc3ac1ce13767901a4ee18ee55f235c2f4b70ffa148b4ec3828b5d5ba790f68b3bbf3  fogona-hexagonrpcd.rules
 a890f8a5a7e1265d7b95d53c231a0366cd416e16c8076a3ae6870f891d3f70cafb3abb7bc983c1c5cc9c01796a4e92110a27c24cfb8e6fd8a4e64f4a0b59a7d4  rmtfs-writable-efs.conf
