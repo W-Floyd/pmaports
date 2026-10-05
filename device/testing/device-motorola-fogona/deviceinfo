@@ -84,10 +84,11 @@ deviceinfo_flash_kernel_on_update="true"
 # until that is switched to bootstd, and exists so the two can be compared.
 deviceinfo_generate_extlinux_config="true"
 deviceinfo_rootfs_image_sector_size="4096"
-# The initramfs need not run udev: the display and storage drivers are built
-# in, and its coldplug trigger and settle cost about 5 s of a boot (the
-# postmarketos-initramfs patch that reads this is in this fork's main/).
-deviceinfo_initfs_skip_udev="true"
+# The initramfs only needs udev for the block devices: the display and the
+# rest are built in, and a full coldplug replays ~2500 devices, which cost
+# about 5 s of a boot (the postmarketos-initramfs patch that reads this is in
+# this fork's main/).
+deviceinfo_initfs_udev_subsystems="block"
 deviceinfo_flash_pagesize="4096"
 # Downstream builds BOARD_BOOT_HEADER_VERSION := 4 and this bootloader appears
 # to require it: a v2 image flashes to `boot` without complaint but the
