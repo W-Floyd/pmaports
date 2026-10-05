@@ -26,3 +26,9 @@ enable go-chromatix2libcamera.service
 # Each boot's display bring-up record (/var/log/fogona-display/), for the
 # intermittent display stall.
 enable fogona-display-log.service
+
+# tuned and tuned-ppd are started after the boot by fogona-tuned-late, not by
+# the targets: they were the tail of the critical path.
+enable fogona-tuned-late.service
+disable tuned.service
+disable tuned-ppd.service

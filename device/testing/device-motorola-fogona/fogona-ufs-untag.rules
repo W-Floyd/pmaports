@@ -1,0 +1,9 @@
+# The UFS LUNs (sda-sdf) hold ~100 Android partitions. Each one, with its
+# /dev/disk/by-* symlinks, became its own .device unit (687 dev-disk-* units
+# of 951 in all) that PID 1 had to create and track, and PID 1 is single
+# threaded: it ran at 100% of a core for the whole boot, which is why units
+# started in bursts. Only persist is ordered against
+# (tqftpserv-populate-readwrite); the symlinks themselves stay, for the
+# ConditionPathExists= checks on them. Must sort after 99-systemd.rules, which
+# adds the tag.
+SUBSYSTEM=="block", KERNEL=="sd[a-f]*", ENV{ID_PART_ENTRY_NAME}!="persist", TAG-="systemd"

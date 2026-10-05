@@ -1,0 +1,18 @@
+[Unit]
+Description=Start tuned and tuned-ppd without holding up the boot
+# tuned and tuned-ppd are Python daemons that take 3-9 s to start on this
+# handset and that nothing at boot needs; as WantedBy= of multi-user.target and
+# graphical.target they were the tail of the critical path (about 7 s of the
+# time to graphical.target). Their ordering cannot be fixed from a drop-in,
+# because After= and Before= cannot be reset, so they are disabled and their
+# start jobs are enqueued here instead, outside the boot transaction.
+# net.hadess.PowerProfiles is still on the bus once they are up, and D-Bus
+# starts tuned-ppd on demand if something asks first.
+After=dbus.service polkit.service systemd-sysctl.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start --no-block tuned.service tuned-ppd.service
+
+[Install]
+WantedBy=multi-user.target

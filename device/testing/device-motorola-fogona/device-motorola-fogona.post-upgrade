@@ -40,4 +40,10 @@ systemctl enable fogona-voice-call-watch.service >/dev/null 2>&1 || true
 
 # Each boot's display bring-up record, for the intermittent display stall.
 systemctl enable fogona-display-log.service >/dev/null 2>&1 || true
+
+# tuned and tuned-ppd start after the boot, from fogona-tuned-late. Their own
+# WantedBy= made them the tail of the critical path, and their ordering cannot
+# be fixed from a drop-in. They are installed enabled, so turn that off here.
+systemctl disable tuned.service tuned-ppd.service >/dev/null 2>&1 || true
+systemctl enable fogona-tuned-late.service >/dev/null 2>&1 || true
 exit 0
