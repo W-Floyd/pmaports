@@ -52,7 +52,7 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 #
 # Pin a commit, never a branch: abuild checksums the tarball and a moving
 # branch breaks its own checksum. See /repo/aports/README.md.
-_commit="5b48c35e8878d47526ce6fb04c4c0ef028283850"
+_commit="99097812a028c5fd47cf76326b091e0123f603c1"
 
 source="$pkgname-$_commit.tar.gz::$url/archive/$_commit.tar.gz"
 builddir="$srcdir/u-boot-$_commit"
@@ -107,5 +107,5 @@ open('$pkgdir/usr/share/u-boot/fogona/u-boot-txt0.bin', 'wb').write(bytes(d))
 		"$pkgdir"/usr/share/u-boot/fogona/fogona-bootloader.bin
 }
 sha512sums="
-e3a927d19ef2aefd37e33c69d05cd8915114cfc092f160d0633fc253b8cde6998a28cc3efe24548e6ec1273e08195515f956945fc01a0c6e7aebe740403c7d92  u-boot-fogona-5b48c35e8878d47526ce6fb04c4c0ef028283850.tar.gz
+183c78e204a69ab02b4b814f70e26cecafbe62a6b19630f76db19da5e0dcfe124f51724300735c75b83567ca45a2757a0e6f9d95c0a41baf9a3bc28e050cb5d6  u-boot-fogona-99097812a028c5fd47cf76326b091e0123f603c1.tar.gz
 "
