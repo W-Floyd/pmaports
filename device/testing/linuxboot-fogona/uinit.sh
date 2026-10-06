@@ -214,6 +214,14 @@ if [ -e /bbin/bootmanager ]; then
 	BMARGS="-listen 172.16.42.1 -panel /etc/bootmanager/motorola-fogona.json"
 	BMARGS="$BMARGS -settings @/tmp/settings-spec"
 	BMARGS="$BMARGS -logs /tmp/uinit.log,/tmp/record_boot.log"
+	# The stage is what ABL boots, so the stage coming up is the boot ABL
+	# counts tries for: when the Boot Manager is ready it marks its slot
+	# successful, as Android does once it is up. Without it ABL counts
+	# boot_a's tries down and, after seven, falls to the other slot (stock),
+	# and with no pmOS installed there is no qbootctl.service to do it. A
+	# stage that does not reach ready is never marked, so a bad stage still
+	# falls back.
+	BMARGS="$BMARGS -mark-successful"
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
 	{
 		# The USB network first: it needs nothing from the boot partition,
