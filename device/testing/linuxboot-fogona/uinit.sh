@@ -230,13 +230,13 @@ if [ -e /bbin/bootmanager ]; then
 		# bring-up waits for), from its own stock partitions: the same
 		# loader pmOS runs (bootmanager msm-firmware-loader) mounts them
 		# read-only and points the kernel's firmware path at them. It needs
-		# no boot partition, so it works with nothing installed. A driver
-		# that asked for its file at probe time, before this, gave up, so
-		# the devices without a driver are probed again (bootmanager
-		# reprobe). A file the image embeds, or the boot partition provides
-		# below, is found first and left alone.
-		bootmanager msm-firmware-loader >> /tmp/uinit.log 2>&1 &&
-			bootmanager reprobe >> /tmp/uinit.log 2>&1
+		# no boot partition, so it works with nothing installed. The touch
+		# driver is built in and asked for its file before this ran; it
+		# retries until the file appears (chipone_icnl9916: retry the
+		# firmware load), so nothing here has to re-probe it. A file the
+		# image embeds, or the boot partition provides below, is found
+		# first and left alone.
+		bootmanager msm-firmware-loader >> /tmp/uinit.log 2>&1
 		setup >> /tmp/uinit.log 2>&1
 		record_boot > /tmp/record_boot.log 2>&1
 		bootmanager -send stage.ready >> /tmp/uinit.log 2>&1 ||
