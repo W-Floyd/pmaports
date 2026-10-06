@@ -89,17 +89,11 @@ record_boot() {
 	# A one-shot request from pmOS (tools/linuxboot/dev.sh
 	# stage-hold): stay in the Boot Manager this boot, with the services it
 	# names switched on, for kexec testing. Consumed here, so the next boot
-	# autoboots as usual.
+	# autoboots as usual. A standing hold is the menu's Autoboot setting
+	# (autoboot off in bootmanager.json), not a file that overrides it.
 	if [ -f $L/dev-once ]; then
 		cp $L/dev-once /tmp/dev-once
 		rm $L/dev-once
-		touch /tmp/hold
-	fi
-	# The same request made standing, while a run of tests keeps resetting
-	# the phone: every boot stays in the Boot Manager until the file is
-	# removed.
-	if [ -f $L/dev-hold ]; then
-		cp $L/dev-hold /tmp/dev-once
 		touch /tmp/hold
 	fi
 	device_files $L
