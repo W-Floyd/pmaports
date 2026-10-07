@@ -5,7 +5,7 @@ maintainer="William Floyd <git@notmy.space>"
 pkgname=device-motorola-fogona
 pkgdesc="Motorola Moto G Play (2024)"
 pkgver=0
-pkgrel=81
+pkgrel=82
 url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
@@ -126,6 +126,13 @@ subpackages="$pkgname-audio:audio"
 # rmtfs, tqftpserv       the modem's EFS and firmware servers; without rmtfs the
 #                        modem watchdogs ~40 s in. Their -openrc/-systemd
 #                        subpackages carry install_if, so do not list them.
+# device-motorola-fogona-audio
+#                        the UCM profile and the PipeWire backend. Its
+#                        install_if did not pull it into a pmbootstrap-built
+#                        image (the rootfs is installed from .apk paths), and
+#                        without it the card has no sinks and PulseAudio is
+#                        the backend, which crackles. Listed so it always
+#                        installs.
 # fogona-bootloader      the payload boot-deploy wraps into the boot image:
 #                        linuxboot-fogona (default) or u-boot-fogona, chosen
 #                        at pmbootstrap init (_pmb_select) or by apk add
@@ -139,6 +146,7 @@ depends="
 	alsa-utils
 	android-tools
 	bluez-btmgmt
+	device-motorola-fogona-audio
 	linux-firmware-ath10k
 	make-dynpart-mappings
 	mesa-vulkan-freedreno
