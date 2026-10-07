@@ -23,7 +23,7 @@
 # or by a one-shot request, tools/linuxboot/dev.sh stage-hold).
 pkgname=linuxboot-fogona
 pkgver=0_git20260927
-pkgrel=34
+pkgrel=35
 pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the Moto G Play (2024)"
 url="https://github.com/W-Floyd/linux"
 arch="aarch64"
@@ -70,7 +70,7 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # Manager is its main branch.
 _kernel_commit="4aef74beaa7f91b91d591713e500f623afde99f6"
 _uroot_commit="015d488be82e48ee31d6b548b23045cd755aacf5"
-_bm_commit="0d653fb89f9fb6cea12da5a1cd783c87ce784f19"
+_bm_commit="9dc370a808c53f86f6f6e07ce1e0067a3320f980"
 _uroot_url="https://github.com/W-Floyd/u-root"
 _bm_url="https://github.com/W-Floyd/bootmanager"
 
@@ -188,7 +188,7 @@ package() {
 sha512sums="
 5f403de23803290942a2297b4ff010838a2ba4b36f852130f28f604f2fbc8f455e5febfff05c19469c1615bbe4e9d52c1d88665e5910f43cd3e86e533ab1389c  linux-4aef74beaa7f91b91d591713e500f623afde99f6.tar.gz
 e1b8a58906ef9bb221282b9bb07be2964f381ff330b7f3b680257c2c4e55cb373b783e4fa65167666a02a0550dc074e1a2b14a648fb9933535f38e7d3b23577c  u-root-015d488be82e48ee31d6b548b23045cd755aacf5.tar.gz
-c436e89134c4dec209b6c5085a8c7bb9d50445dbb14d48430f347fc50b26446f47e0ca7b3e4d946e4a9056fabea1e88f65e08b8f6a6c2927f8274d450b7851cd  bootmanager-0d653fb89f9fb6cea12da5a1cd783c87ce784f19.tar.gz
+36d4b0a35eed13e70fda0c3b2d3213ede021b8d0f679308d3f8c32e0c6fcfccc21af5150c9ab12635ca5677b159118803e6cf27f65cae3967f106534a7dcf344  bootmanager-9dc370a808c53f86f6f6e07ce1e0067a3320f980.tar.gz
 f525c516e997e028bd689a03fef61af28c44a1389abdff103da9213790c5e6ab93184f0ab07bb1fa630e23e6a3113b50dc553d9566babc99542fe8dcb9707676  config-linuxboot-fogona.aarch64
 5d32dafb77dbe65ae39bb15a30e9e8366796fbc558aa2ed5d9365e20902594848f4ecdfc41da019ae2034d9cbbb86d82737eda2c21c9412c3ae251d13a3f7b84  uinit.sh
 6a7d824c0fe3e7b55954fb1177d4549da5f5b4756da8f1c73bbd8ed8da8747b90ddb441351bab52f87febeabf5e3be7a4369e18a1194b3d99543c7b57755f3c1  fogona-boot.sh
