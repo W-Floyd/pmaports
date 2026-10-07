@@ -1,0 +1,8 @@
+#!/bin/sh
+# postmarketos-fde-unlocker: the initramfs calls `fde-unlock DEVICE TRIED`
+# in a loop until the root is open (postmarketos-initramfs,
+# unlock_root_partition). The passphrase comes from the Boot Manager's
+# on-screen keyboard on stdout, as unl0kr's does.
+
+CRYPTTAB_SOURCE="$1" CRYPTTAB_TRIED="$2" bootmanager-ui --unlock |
+	cryptsetup --perf-no_read_workqueue --perf-no_write_workqueue open "$1" root -

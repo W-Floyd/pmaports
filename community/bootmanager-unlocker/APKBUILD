@@ -1,0 +1,65 @@
+# The Boot Manager's passphrase screen as the initramfs's FDE unlocker, in
+# place of unl0kr. `bootmanager-ui --unlock` draws the passphrase field and an
+# on-screen keyboard on the framebuffer, reading the touchscreen from
+# /dev/input directly (no udev or libinput), and prints the passphrase for
+# cryptsetup.
+#
+# The source is the bootmanager repo at a pinned commit (only its
+# bootmanager-ui/ crate is built); the Cargo crates are fetched at build time.
+# Still to check on the device: that mkinitfs finds what the binary needs (it
+# is static musl; cryptsetup is the pmOS one).
+pkgname=bootmanager-unlocker
+pkgver=0.1.0
+pkgrel=2
+pkgdesc="Boot Manager passphrase screen for unlocking an encrypted root in the initramfs"
+url="https://github.com/W-Floyd/bootmanager"
+arch="aarch64"
+license="GPL-3.0-or-later"
+depends="cryptsetup"
+makedepends="cargo"
+# Another unlocker (unl0kr) provides this too; only one is installed.
+provides="postmarketos-fde-unlocker=$pkgver-r$pkgrel"
+provider_priority=100
+_bm_commit="d21fe0acd6a0fc5f022016b83374bf716d7a5b21"
+source="
+	bootmanager-$_bm_commit.tar.gz::$url/archive/$_bm_commit.tar.gz
+	fde-unlock
+	bootmanager-unlocker.files
+	"
+# net: cargo fetches the crates
+options="!check net" # tests need a display
+builddir="$srcdir/bootmanager-$_bm_commit/bootmanager-ui"
+_rust_target="$CARCH-alpine-linux-musl"
+
+build() {
+	# pmbootstrap points this at sccache without installing it
+	unset RUSTC_WRAPPER
+	# abuild exports CARGO_PROFILE_RELEASE_OPT_LEVEL=s, which beats the
+	# crate's own opt-level 3; this draws on a CPU-bound software renderer
+	# and is about 1.7x slower at size.
+	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+	# A static binary: nothing to resolve in the initramfs's /lib. The
+	# explicit --target keeps the static flag off build scripts and
+	# proc-macros, which run on the host and cannot be static.
+	RUSTFLAGS="-C target-feature=+crt-static" \
+		cargo build --release --locked --features fbdev --bin bootmanager-ui \
+		--target "$_rust_target"
+}
+
+package() {
+	install -Dm755 target/"$_rust_target"/release/bootmanager-ui "$pkgdir"/usr/bin/bootmanager-ui
+	install -Dm755 "$srcdir"/fde-unlock "$pkgdir"/usr/bin/fde-unlock
+
+	# What mkinitfs copies into the initramfs, and what rebuilds it when
+	# this package changes (as unl0kr does).
+	install -Dm644 "$srcdir"/bootmanager-unlocker.files \
+		"$pkgdir"/usr/share/mkinitfs/files-extra/30-bootmanager-unlocker.files
+	touch "$srcdir"/trigger
+	install -Dm644 "$srcdir"/trigger \
+		"$pkgdir"/usr/share/mkinitfs-triggers/bootmanager-unlocker
+}
+sha512sums="
+50d95ebba896020297b92f5015292aac268e69b04f0b4143783eb24c62e2d4f802a1b19a8d2141e320dfe35a3d1d1ce28efdaadf59393275b8a975a3446ac577  bootmanager-d21fe0acd6a0fc5f022016b83374bf716d7a5b21.tar.gz
+be88d484c261b1bc2f8668b2c22ddc4d500093a5d35ca1c530ee24812da32b2f6f57cc3f5e7cf99bf806d6694b0fe4c5f190293a7437a834018112b98f17b6d6  fde-unlock
+b60b77ecbe9947f7050e95295abc52bad806d82ed0388ea3655557ef0ba2d81c0f5cb79c66391614c263fe733bcbfc6d184ca62ce123b92cd8051a0a6cfa12fe  bootmanager-unlocker.files
+"

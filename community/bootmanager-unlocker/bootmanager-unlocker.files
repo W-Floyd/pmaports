@@ -1,0 +1,3 @@
+/sbin/cryptsetup
+/usr/bin/bootmanager-ui
+/usr/bin/fde-unlock
