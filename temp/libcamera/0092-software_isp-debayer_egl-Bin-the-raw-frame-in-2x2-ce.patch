@@ -1,8 +1,8 @@
-From 840721c86d705c1cd1187d88005641960d505181 Mon Sep 17 00:00:00 2001
+From 2f555aef2fb1a3718ad93e8f3f331216342f8a39 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Wed, 7 Oct 2026 23:18:36 +0000
+Date: Wed, 7 Oct 2026 23:36:21 +0000
 Subject: [PATCH 92/93] software_isp: debayer_egl: Bin the raw frame in 2x2
- cells at 10 bits, and filter them
+ cells and filter them
 
 The packed Bayer shader reads only the byte holding a pixel's 8 high bits
 and ignores the 2 low bits, and an output smaller than the input takes one
@@ -11,35 +11,42 @@ signal is a few tens of counts above black and the tone curve then lifts it
 by up to 16x, the 4-count steps and the unaveraged sensor noise are what
 shows.
 
-For an output at most two thirds of the input's size, bin each 2x2 cell of
-the frame in a first pass at the full 10 bits (bayer_cells_pack.frag: the
-red, the blue and the two greens' sum, packed in an RGBA8 texel), and have
-the main pass sample the cells (CELL_PATH in bayer_1x_packed.frag), with
-the colour processing shared by a function. Where DebayerParams::denoise is
-enabled the main pass first filters the 2x2 nearest cells with a bilateral
-filter over their 3x3 neighbourhoods, whose range kernel follows the
-sensor's noise: a variance of slope * level + floor, in widths set by the
-tuning. On a synthetic scene with the measured sensor noise, a 1920x1440
-output from 4080x3072 has an error against the clean image of 1.8 counts
-(10-bit) in flat areas at 16x gain, against 6.3 now, and no more error on
-sharp edges, thin lines and fine detail.
+For frames where DebayerParams::denoise is enabled, and an output at most
+two thirds of the input's size, work on 2x2 cells of the raw frame instead.
+A first pass bins each cell at the full 10 bits into a half-float texel
+(bayer_cells_bin.frag: the red, the blue and the mean of the greens, from
+six byte fetches), a second filters the cells with a bilateral filter over
+their 3x3 neighbourhoods (bayer_cells_denoise.frag) whose range kernel
+follows the sensor's noise, a variance of slope * level + quad * level^2 +
+floor with widths set by the tuning, and the main pass, a second program of
+bayer_1x_packed.frag (CELL_PATH) with the colour processing shared by a
+function, samples the filtered cells with the hardware's linear filtering.
+It needs half-float render targets (OpenGL ES 3.2, or an extension) and
+falls back to the other path without them.
+
+On a synthetic scene with the measured sensor noise, a 1920x1440 output from
+4080x3072 has an error against the clean image of 1.8 counts (10-bit) in
+flat areas at 16x gain, against 6.3 for the single pixel path, and no more
+error on sharp edges, thin lines and fine detail.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../internal/software_isp/debayer_params.h    |  21 +++
- src/libcamera/shaders/bayer_1x_packed.frag    | 158 +++++++++++++----
- src/libcamera/shaders/bayer_cells_pack.frag   |  61 +++++++
- src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 161 ++++++++++++++++++
- src/libcamera/software_isp/debayer_egl.h      |  31 ++++
- 6 files changed, 402 insertions(+), 31 deletions(-)
- create mode 100644 src/libcamera/shaders/bayer_cells_pack.frag
+ .../internal/software_isp/debayer_params.h    |  23 ++
+ src/libcamera/shaders/bayer_1x_packed.frag    |  91 ++++--
+ src/libcamera/shaders/bayer_cells_bin.frag    |  66 ++++
+ .../shaders/bayer_cells_denoise.frag          |  62 ++++
+ src/libcamera/shaders/meson.build             |   2 +
+ src/libcamera/software_isp/debayer_egl.cpp    | 300 +++++++++++++++++-
+ src/libcamera/software_isp/debayer_egl.h      |  57 ++++
+ 7 files changed, 567 insertions(+), 34 deletions(-)
+ create mode 100644 src/libcamera/shaders/bayer_cells_bin.frag
+ create mode 100644 src/libcamera/shaders/bayer_cells_denoise.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
-index cdeb48faa..bbb03f1ad 100644
+index cdeb48faa..e1e09d711 100644
 --- a/include/libcamera/internal/software_isp/debayer_params.h
 +++ b/include/libcamera/internal/software_isp/debayer_params.h
-@@ -80,6 +80,27 @@ struct DebayerParams {
+@@ -80,6 +80,29 @@ struct DebayerParams {
  	 */
  	std::array<float, 4> chroma = { 1.0f, 1.0f, 1.0f, 1.0f };
  	std::array<float, 4> chromaShear = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -49,7 +56,8 @@ index cdeb48faa..bbb03f1ad 100644
 +	 * data in 2x2 cells (an output at most about two thirds of the
 +	 * input's size): a bilateral filter over the cells whose range kernel
 +	 * follows the sensor's noise. The variance of a signal's noise is
-+	 * slope * level + floor, the level above black in 10-bit counts. The
++	 * slope * level + quad * level^2 + floor, the level above black in
++	 * 10-bit counts. The
 +	 * kernel is exp(-(difference / (width * sigma))^2 / 2), with a width
 +	 * for each of red, green and blue between those of the two levels
 +	 * given, which are in counts above black: a smaller width filters
@@ -58,6 +66,7 @@ index cdeb48faa..bbb03f1ad 100644
 +	struct Denoise {
 +		bool enabled = false;
 +		float slope = 0.0f;
++		float quad = 0.0f;
 +		float floor = 0.3f;
 +		std::array<float, 3> widthLow = { 2.0f, 2.0f, 2.0f };
 +		std::array<float, 3> widthHigh = { 2.0f, 2.0f, 2.0f };
@@ -68,10 +77,10 @@ index cdeb48faa..bbb03f1ad 100644
  
  } /* namespace libcamera */
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index a31b66a1e..6c33b3b2e 100644
+index a31b66a1e..6052762e5 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -141,6 +141,131 @@ vec3 apply_chroma(vec3 rgb)
+@@ -141,6 +141,64 @@ vec3 apply_chroma(vec3 rgb)
  			  y + 1.772 * cb2), 0.0, 1.0);
  }
  
@@ -118,84 +127,17 @@ index a31b66a1e..6c33b3b2e 100644
 +
 +#if defined (CELL_PATH)
 +/*
-+ * The cells path: bayer_cells_pack.frag has binned each 2x2 cell of the
-+ * frame, at the full 10 bits, into one texel of cell_tex (see there for the
-+ * packing). Each output pixel reads the 4x4 cells around its position,
-+ * filters the 2x2 nearest ones with a bilateral filter over their 3x3
-+ * neighbourhoods, and blends those four by the position. The filter takes
-+ * its range kernel from the sensor's noise model, so that differences of a
-+ * few noise deviations are averaged and edges are kept:
-+ *
-+ *   weight = exp(-(difference / (width * sigma))^2 / 2)
-+ *   sigma^2 = slope * level + floor, level above black in 10-bit counts
-+ *
-+ * The two greens of a cell add up, which halves their noise variance.
-+ * Counts of 1020 stand for 1.0, as the 8 high bits' 255 do on the other path.
++ * The cells path: bayer_cells_bin.frag has binned each 2x2 cell of the frame,
++ * at the full 10 bits, into one texel of cell_tex (a half-float texture, in
++ * counts), which bayer_cells_denoise.frag may have filtered, and which the
++ * hardware filtering interpolates here. Counts of 1020 stand for 1.0, as the
++ * 8 high bits' 255 do on the other path.
 + */
 +uniform sampler2D cell_tex;
-+uniform vec2 cell_size;
-+uniform float denoise_on;
-+uniform vec2 noise;		/* slope, floor of the variance model */
-+uniform vec3 width_lo;		/* range kernel width, at and below anchors.x */
-+uniform vec3 width_hi;		/* and at and above anchors.y */
-+uniform vec2 anchors;		/* levels, in counts above black */
-+
-+vec3 unpack_cell(vec2 index)
-+{
-+	vec2 i = clamp(index, vec2(0.0), cell_size - 1.0);
-+	vec4 t = floor(texture2D(cell_tex, (i + 0.5) / cell_size) * 255.0 + 0.5);
-+	float r = t.x + 256.0 * mod(t.y, 4.0);
-+	float g = floor(t.y / 4.0) + 64.0 * mod(t.z, 32.0);
-+	float b = floor(t.z / 32.0) + 8.0 * t.w;
-+	return vec3(r, g * 0.5, b);
-+}
 +
 +void main(void)
 +{
-+	vec2 p = textureOut * cell_size - 0.5;
-+	vec2 first = floor(p);
-+	vec2 frac = p - first;
-+	vec3 black = blacklevel * 1020.0;
-+
-+	vec3 v[16];
-+	for (int y = 0; y < 4; y++)
-+		for (int x = 0; x < 4; x++)
-+			v[y * 4 + x] = unpack_cell(first + vec2(float(x) - 1.0, float(y) - 1.0));
-+
-+	vec3 f[4];
-+	for (int cy = 0; cy < 2; cy++) {
-+		for (int cx = 0; cx < 2; cx++) {
-+			vec3 c = v[(cy + 1) * 4 + cx + 1];
-+			if (denoise_on < 0.5) {
-+				f[cy * 2 + cx] = c;
-+				continue;
-+			}
-+
-+			vec3 level = max(c - black, 0.0);
-+			vec3 sigma = sqrt(noise.x * level + noise.y) * vec3(1.0, 0.70710678, 1.0);
-+			vec3 width = mix(width_lo, width_hi,
-+					 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
-+			vec3 inv = 1.0 / max(width * sigma, 0.001);
-+
-+			vec3 sum = c;
-+			vec3 weights = vec3(1.0);
-+			for (int dy = 0; dy < 3; dy++) {
-+				for (int dx = 0; dx < 3; dx++) {
-+					if (dx == 1 && dy == 1)
-+						continue;
-+					vec3 n = v[(cy + dy) * 4 + cx + dx];
-+					vec3 d = (n - c) * inv;
-+					vec3 w = exp(-0.5 * d * d);
-+					sum += w * n;
-+					weights += w;
-+				}
-+			}
-+			f[cy * 2 + cx] = sum / weights;
-+		}
-+	}
-+
-+	vec3 rgb = mix(mix(f[0], f[1], frac.x), mix(f[2], f[3], frac.x), frac.y);
-+	gl_FragColor = finish(rgb / 1020.0);
++	gl_FragColor = finish(texture2D(cell_tex, textureOut).rgb / 1020.0);
 +}
 +#endif /* CELL_PATH */
 +
@@ -203,7 +145,7 @@ index a31b66a1e..6c33b3b2e 100644
  void main(void)
  {
  	vec3 rgb;
-@@ -312,35 +437,6 @@ void main(void)
+@@ -312,35 +370,6 @@ void main(void)
  			vec3(patterns.y, C, patterns.x) :
  			vec3(patterns.wz, C));
  
@@ -241,27 +183,21 @@ index a31b66a1e..6c33b3b2e 100644
 +	gl_FragColor = finish(rgb);
  }
 +#endif /* !CELL_PATH */
-diff --git a/src/libcamera/shaders/bayer_cells_pack.frag b/src/libcamera/shaders/bayer_cells_pack.frag
+diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
 new file mode 100644
-index 000000000..af9595287
+index 000000000..7145560a0
 --- /dev/null
-+++ b/src/libcamera/shaders/bayer_cells_pack.frag
-@@ -0,0 +1,61 @@
++++ b/src/libcamera/shaders/bayer_cells_bin.frag
+@@ -0,0 +1,66 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
 + *
-+ * bayer_cells_pack.frag - Bins each 2x2 cell of a packed raw Bayer 10-bit
-+ * frame into one texel, at the full 10 bits of each pixel.
-+ *
-+ * The cell's red and blue pixels are kept, and its two greens are added. The
-+ * three values are packed into the four bytes of an RGBA8 texel as 10, 11 and
-+ * 10 bits, for bayer_1x_packed.frag (CELL_PATH) to filter and sample:
-+ *
-+ *   byte 0: red bits 7..0
-+ *   byte 1: red bits 9..8, green bits 5..0 (of the sum of the two greens)
-+ *   byte 2: green bits 10..6, blue bits 2..0
-+ *   byte 3: blue bits 9..3
++ * bayer_cells_bin.frag - Bins each 2x2 cell of a packed raw Bayer 10-bit
++ * frame into one texel of a half-float texture, at the full 10 bits of each
++ * pixel, in counts: the cell's red and blue pixels, and the mean of its two
++ * greens. A cell's four pixels are read with six byte fetches: the 8 high
++ * bits of each, and the low bits' byte of each row.
 + */
 +
 +#ifdef GL_ES
@@ -277,121 +213,222 @@ index 000000000..af9595287
 +uniform vec2 raw_size;
 +uniform vec2 tex_bayer_first_red;
 +
-+/*
-+ * The value of the pixel at integer coordinates p: its 8 high bits are the
-+ * byte at 5 * (x / 4) + x % 4 of the row, and its 2 low bits are in the
-+ * group's fifth byte, 2 bits to a pixel, the first pixel's in the lowest.
-+ */
-+float raw10(vec2 p)
++float byte_at(float x, float y)
 +{
-+	float group = floor(p.x / 4.0);
-+	float i = p.x - group * 4.0;
-+	float v = (p.y + 0.5) / raw_size.y;
-+	float hi = floor(texture2D(tex_y, vec2((group * 5.0 + i + 0.5) / raw_size.x, v)).r * 255.0 + 0.5);
-+	float lo = floor(texture2D(tex_y, vec2((group * 5.0 + 4.0 + 0.5) / raw_size.x, v)).r * 255.0 + 0.5);
-+	return hi * 4.0 + mod(floor(lo / exp2(2.0 * i)), 4.0);
++	return floor(texture2D(tex_y, vec2((x + 0.5) / raw_size.x, (y + 0.5) / raw_size.y)).r * 255.0 + 0.5);
++}
++
++/*
++ * A pixel's 8 high bits are the byte at 5 * (x / 4) + x % 4 of its row, and
++ * its 2 low bits are in the group's fifth byte, 2 bits to a pixel, the first
++ * pixel's in the lowest. A cell starts at an even x, so both its pixels are
++ * in one group, at i and i + 1.
++ */
++vec2 row_pair(float x, float y)
++{
++	float group = floor(x / 4.0);
++	float i = x - group * 4.0;
++	float first = group * 5.0 + i;
++	float low = byte_at(group * 5.0 + 4.0, y);
++	float a = byte_at(first, y) * 4.0 + mod(floor(low / exp2(2.0 * i)), 4.0);
++	float b = byte_at(first + 1.0, y) * 4.0 + mod(floor(low / exp2(2.0 * i + 2.0)), 4.0);
++	return vec2(a, b);
 +}
 +
 +void main(void)
 +{
 +	/* One fragment per cell, whose pixels start at twice its coordinates */
 +	vec2 p = floor(gl_FragCoord.xy) * 2.0;
++	vec2 top = row_pair(p.x, p.y);
++	vec2 bottom = row_pair(p.x, p.y + 1.0);
++
++	/* The pixels in the order (0,0), (1,0), (0,1), (1,1) */
++	vec4 v = vec4(top, bottom);
 +	vec2 red = tex_bayer_first_red;
++	vec4 is_red = vec4((1.0 - red.x) * (1.0 - red.y), red.x * (1.0 - red.y),
++			   (1.0 - red.x) * red.y, red.x * red.y);
++	vec4 is_blue = is_red.wzyx;
 +
-+	float r = raw10(p + red);
-+	float b = raw10(p + vec2(1.0) - red);
-+	float g = raw10(p + vec2(red.x, 1.0 - red.y)) +
-+		  raw10(p + vec2(1.0 - red.x, red.y));
++	float r = dot(v, is_red);
++	float b = dot(v, is_blue);
++	float g = v.x + v.y + v.z + v.w - r - b;
 +
-+	gl_FragColor = vec4(mod(r, 256.0),
-+			    floor(r / 256.0) + 4.0 * mod(g, 64.0),
-+			    floor(g / 64.0) + 32.0 * mod(b, 8.0),
-+			    floor(b / 8.0)) / 255.0;
++	gl_FragColor = vec4(r, g * 0.5, b, 0.0);
++}
+diff --git a/src/libcamera/shaders/bayer_cells_denoise.frag b/src/libcamera/shaders/bayer_cells_denoise.frag
+new file mode 100644
+index 000000000..a709ac8ab
+--- /dev/null
++++ b/src/libcamera/shaders/bayer_cells_denoise.frag
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * bayer_cells_denoise.frag - Filters the 2x2 cells that bayer_cells_bin.frag
++ * made, in counts, with a bilateral filter over each cell's 3x3
++ * neighbourhood. Its range kernel follows the sensor's noise, so that
++ * differences of a few noise deviations are averaged and edges are kept:
++ *
++ *   weight = exp(-(difference / (width * sigma))^2 / 2)
++ *   sigma^2 = slope * level + quad * level^2 + floor, level above black in
++ *             10-bit counts
++ *
++ * A cell's green is the mean of two pixels, which halves its noise variance.
++ */
++
++#ifdef GL_ES
++precision highp float;
++#endif
++
++uniform sampler2D cells;
++uniform vec2 cell_size;
++uniform vec3 blacklevel;	/* from 0 to 1, where 1.0 stands for 1020 counts */
++uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
++uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
++uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
++uniform vec2 anchors;		/* levels, in counts above black */
++
++vec3 fetch(vec2 index)
++{
++	vec2 i = clamp(index, vec2(0.0), cell_size - 1.0);
++	return texture2D(cells, (i + 0.5) / cell_size).rgb;
++}
++
++void main(void)
++{
++	vec2 cell = floor(gl_FragCoord.xy);
++	vec3 c = fetch(cell);
++
++	vec3 level = max(c - blacklevel * 1020.0, 0.0);
++	vec3 sigma = sqrt(noise.x * level + noise.y * level * level + noise.z) *
++		     vec3(1.0, 0.70710678, 1.0);
++	vec3 width = mix(width_lo, width_hi,
++			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
++	vec3 inv = 1.0 / max(width * sigma, 0.001);
++
++	vec3 sum = c;
++	vec3 weights = vec3(1.0);
++	for (int dy = -1; dy <= 1; dy++) {
++		for (int dx = -1; dx <= 1; dx++) {
++			if (dx == 0 && dy == 0)
++				continue;
++			vec3 n = fetch(cell + vec2(float(dx), float(dy)));
++			vec3 d = (n - c) * inv;
++			vec3 w = exp(-0.5 * d * d);
++			sum += w * n;
++			weights += w;
++		}
++	}
++
++	gl_FragColor = vec4(sum / weights, 0.0);
 +}
 diff --git a/src/libcamera/shaders/meson.build b/src/libcamera/shaders/meson.build
-index c409ff9b0..d1a4f7e26 100644
+index c409ff9b0..322aaa270 100644
 --- a/src/libcamera/shaders/meson.build
 +++ b/src/libcamera/shaders/meson.build
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  # for the purposes of inclusion in OpenGL debayering
  shader_files = files([
      'bayer_1x_packed.frag',
-+    'bayer_cells_pack.frag',
++    'bayer_cells_bin.frag',
++    'bayer_cells_denoise.frag',
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
      'identity.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a49fd0505..726081b8e 100644
+index a49fd0505..fd981d51e 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
-@@ -127,6 +127,13 @@ int DebayerEGL::getShaderVariableLocations(void)
+@@ -12,7 +12,9 @@
+ #include <algorithm>
+ #include <assert.h>
+ #include <memory>
++#include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <string>
+ #include <tuple>
+ #include <vector>
+@@ -127,6 +129,7 @@ int DebayerEGL::getShaderVariableLocations(void)
  	lscEnabledUniform_ = glGetUniformLocation(programId_, "lsc_enabled");
  	chromaUniform_ = glGetUniformLocation(programId_, "chroma");
  	chromaShearUniform_ = glGetUniformLocation(programId_, "chroma_shear");
 +	cellTexUniform_ = glGetUniformLocation(programId_, "cell_tex");
-+	cellSizeUniform_ = glGetUniformLocation(programId_, "cell_size");
-+	denoiseOnUniform_ = glGetUniformLocation(programId_, "denoise_on");
-+	noiseUniform_ = glGetUniformLocation(programId_, "noise");
-+	widthLowUniform_ = glGetUniformLocation(programId_, "width_lo");
-+	widthHighUniform_ = glGetUniformLocation(programId_, "width_hi");
-+	anchorsUniform_ = glGetUniformLocation(programId_, "anchors");
  
  	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
  	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
-@@ -155,6 +162,8 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -155,6 +158,9 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  	Span<const unsigned char> vertexShaderData;
  	GLenum err;
  
-+	cellsPath_ = false;
++	cellsEligible_ = false;
++	cellsActive_ = false;
 +
  	/* Target gles 100 glsl requires "#version x" as first directive in shader */
  	egl_.pushEnv(shaderEnv, "#version 100");
  	if (quadBayer_)
-@@ -252,6 +261,18 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -252,6 +258,18 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  			fragmentShaderData = bayer_1x_packed_frag;
  			vertexShaderData = identity_vert;
  			shaderStridePixels_ = width_;
 +
 +			/*
-+			 * An output at most two thirds of the input's size is
-+			 * made from binned 2x2 cells, at the full 10 bits (see
-+			 * cellsPath_). Above that, single pixels are sampled.
++			 * An output at most two thirds of the input's size can
++			 * be made from binned 2x2 cells, at the full 10 bits,
++			 * when the IPA asks for noise reduction (see
++			 * cellsEligible_). Above that, single pixels are
++			 * sampled.
 +			 */
-+			cellsPath_ = !quadBayer_ &&
-+				     outputSize_.width * 3 <= width_ * 2 &&
-+				     outputSize_.height * 3 <= height_ * 2 &&
-+				     !(width_ & 3) && !(height_ & 1);
-+			if (cellsPath_)
-+				egl_.pushEnv(shaderEnv, "#define CELL_PATH");
++			cellsEligible_ = cellsCapable_ && !quadBayer_ &&
++					 outputSize_.width * 3 <= width_ * 2 &&
++					 outputSize_.height * 3 <= height_ * 2 &&
++					 !(width_ & 3) && !(height_ & 1);
  		}
  		break;
  	case libcamera::formats::SBGGR12_CSI2P:
-@@ -294,6 +315,9 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -294,6 +312,13 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  	egl_.dumpShaderSource(vertexShaderId_);
  	egl_.dumpShaderSource(fragmentShaderId_);
  
-+	if (cellsPath_ && initCellsProgram())
-+		return -ENODEV;
++	singleProgramId_ = programId_;
++	if (cellsEligible_ &&
++	    initCellsPrograms(shaderEnv, vertexShaderData, fragmentShaderData)) {
++		LOG(Debayer, Warning) << "No noise reduction: the cells path failed to build";
++		cellsEligible_ = false;
++	}
 +
  	/* Ensure we set the programId_ */
  	egl_.useProgram(programId_);
  	err = glGetError();
-@@ -305,6 +329,123 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -305,6 +330,249 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  	return getShaderVariableLocations();
  }
  
 +/*
-+ * Build the program of the cells path's first pass, which bins each 2x2 cell
-+ * of the raw frame into a texel (bayer_cells_pack.frag).
++ * Whether the context renders to half-float textures, which the cells are:
++ * OpenGL ES 3.2 does, and earlier ones with an extension.
 + */
-+int DebayerEGL::initCellsProgram()
++bool DebayerEGL::halfFloatTargets()
 +{
-+	std::vector<std::string> shaderEnv;
++	const char *version = reinterpret_cast<const char *>(glGetString(GL_VERSION));
++	int major = 0;
++	int minor = 0;
++	if (version && sscanf(version, "OpenGL ES %d.%d", &major, &minor) == 2 &&
++	    (major > 3 || (major == 3 && minor >= 2)))
++		return true;
++
++	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
++	return extensions && (strstr(extensions, "GL_EXT_color_buffer_float") ||
++			      strstr(extensions, "GL_EXT_color_buffer_half_float"));
++}
++
++/* Build one of the cells path's passes, which draws a texel for each cell */
++int DebayerEGL::initCellsProgram(CellsProgram &program, Span<const unsigned char> fragmentShaderData,
++				 const std::vector<std::string> &shaderEnv)
++{
 +	GLuint vertexShaderId = 0;
 +	GLuint fragmentShaderId = 0;
-+
-+	egl_.pushEnv(shaderEnv, "#version 100");
-+	egl_.pushEnv(shaderEnv, "#define RAW10P");
 +
 +	if (egl_.compileVertexShader(vertexShaderId, identity_vert, shaderEnv)) {
 +		LOG(Debayer, Error) << "Compile cells vertex shader fail";
@@ -399,38 +436,109 @@ index a49fd0505..726081b8e 100644
 +	}
 +	utils::scope_exit vShaderGuard([&] { glDeleteShader(vertexShaderId); });
 +
-+	if (egl_.compileFragmentShader(fragmentShaderId, bayer_cells_pack_frag, shaderEnv)) {
++	if (egl_.compileFragmentShader(fragmentShaderId, fragmentShaderData, shaderEnv)) {
 +		LOG(Debayer, Error) << "Compile cells fragment shader fail";
 +		return -ENODEV;
 +	}
 +	utils::scope_exit fShaderGuard([&] { glDeleteShader(fragmentShaderId); });
 +
-+	if (egl_.linkProgram(cellsProgramId_, vertexShaderId, fragmentShaderId)) {
++	if (egl_.linkProgram(program.id, vertexShaderId, fragmentShaderId)) {
 +		LOG(Debayer, Error) << "Linking cells program fail";
 +		return -ENODEV;
 +	}
 +
-+	cellsAttributeVertex_ = glGetAttribLocation(cellsProgramId_, "vertexIn");
-+	cellsAttributeTexture_ = glGetAttribLocation(cellsProgramId_, "textureIn");
-+	cellsUniformTexY_ = glGetUniformLocation(cellsProgramId_, "tex_y");
-+	cellsUniformRawSize_ = glGetUniformLocation(cellsProgramId_, "raw_size");
-+	cellsUniformFirstRed_ = glGetUniformLocation(cellsProgramId_, "tex_bayer_first_red");
-+	cellsUniformProjMatrix_ = glGetUniformLocation(cellsProgramId_, "proj_matrix");
-+	cellsUniformStrideFactor_ = glGetUniformLocation(cellsProgramId_, "stride_factor");
++	program.attributeVertex = glGetAttribLocation(program.id, "vertexIn");
++	program.attributeTexture = glGetAttribLocation(program.id, "textureIn");
++	program.projMatrix = glGetUniformLocation(program.id, "proj_matrix");
++	program.strideFactor = glGetUniformLocation(program.id, "stride_factor");
++	program.input = glGetUniformLocation(program.id, "tex_y");
++	if (program.input < 0)
++		program.input = glGetUniformLocation(program.id, "cells");
++	program.size = glGetUniformLocation(program.id, "raw_size");
++	if (program.size < 0)
++		program.size = glGetUniformLocation(program.id, "cell_size");
++	program.firstRed = glGetUniformLocation(program.id, "tex_bayer_first_red");
++	program.blackLevel = glGetUniformLocation(program.id, "blacklevel");
++	program.noise = glGetUniformLocation(program.id, "noise");
++	program.widthLow = glGetUniformLocation(program.id, "width_lo");
++	program.widthHigh = glGetUniformLocation(program.id, "width_hi");
++	program.anchors = glGetUniformLocation(program.id, "anchors");
++
++	return 0;
++}
++
++/*
++ * Build the cells path's programs: the two passes on the cells, and the main
++ * program of bayer_1x_packed.frag that samples them.
++ */
++int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
++				  Span<const unsigned char> vertexShaderData,
++				  Span<const unsigned char> fragmentShaderData)
++{
++	/* The main program, with the other path's environment */
++	std::vector<std::string> mainEnv = shaderEnv;
++	egl_.pushEnv(mainEnv, "#define CELL_PATH");
++
++	GLuint vertexShaderId = 0;
++	GLuint fragmentShaderId = 0;
++	if (egl_.compileVertexShader(vertexShaderId, vertexShaderData, mainEnv) ||
++	    egl_.compileFragmentShader(fragmentShaderId, fragmentShaderData, mainEnv)) {
++		LOG(Debayer, Error) << "Compile cells main shaders fail";
++		return -ENODEV;
++	}
++	utils::scope_exit vShaderGuard([&] { glDeleteShader(vertexShaderId); });
++	utils::scope_exit fShaderGuard([&] { glDeleteShader(fragmentShaderId); });
++
++	if (egl_.linkProgram(cellsMainProgramId_, vertexShaderId, fragmentShaderId)) {
++		LOG(Debayer, Error) << "Linking cells main program fail";
++		return -ENODEV;
++	}
++
++	/* The passes on the cells */
++	std::vector<std::string> passEnv;
++	egl_.pushEnv(passEnv, "#version 100");
++	egl_.pushEnv(passEnv, "#define RAW10P");
++	if (initCellsProgram(binProgram_, bayer_cells_bin_frag, passEnv) ||
++	    initCellsProgram(denoiseProgram_, bayer_cells_denoise_frag, passEnv))
++		return -ENODEV;
 +
 +	cellsSize_ = Size(width_ / 2, height_ / 2);
 +
-+	LOG(Debayer, Info) << "Binning the raw frame in 2x2 cells (" << cellsSize_
++	LOG(Debayer, Info) << "Noise reduction on 2x2 cells (" << cellsSize_
 +			   << ") for the " << outputSize_ << " output";
 +
 +	return 0;
 +}
 +
 +/*
-+ * Run the cells path's first pass: bin each cell of the input into a texel of
-+ * the cells texture, which stays bound to texture unit 4 for the main pass.
++ * A half-float RGBA texture of the cells' size, bound to a texture unit and
++ * attached to its own framebuffer, to render to or to sample with linear
++ * filtering.
 + */
-+int DebayerEGL::renderCells(eGLImage &eglImageIn)
++std::unique_ptr<eGLImage> DebayerEGL::createCellsTexture(GLenum unit, uint32_t uniformId)
++{
++	auto image = std::make_unique<eGLImage>(GL_RGBA, cellsSize_.width, cellsSize_.height,
++						cellsSize_.width * 8, unit, uniformId);
++
++	egl_.activateBindTexture(*image);
++	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, cellsSize_.width, cellsSize_.height, 0,
++		     GL_RGBA, GL_HALF_FLOAT, nullptr);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++
++	if (egl_.attachTextureToFBO(*image))
++		return nullptr;
++
++	return image;
++}
++
++/*
++ * Draw a texel for each cell with a program of the cells path, into the
++ * framebuffer that is bound.
++ */
++void DebayerEGL::drawCells(CellsProgram &program)
 +{
 +	static const GLfloat vcoordinates[4][2] = {
 +		{ -1.0f, -1.0f },
@@ -438,150 +546,248 @@ index a49fd0505..726081b8e 100644
 +		{ +1.0f, +1.0f },
 +		{ +1.0f, -1.0f },
 +	};
-+	static const GLfloat identity[16] = {
-+		1, 0, 0, 0,
-+		0, 1, 0, 0,
-+		0, 0, 1, 0,
-+		0, 0, 0, 1
-+	};
 +	static const GLfloat texcoordinates[4][2] = {
 +		{ 0.0f, 0.0f },
 +		{ 0.0f, 1.0f },
 +		{ 1.0f, 1.0f },
 +		{ 1.0f, 0.0f },
 +	};
++	static const GLfloat identity[16] = {
++		1, 0, 0, 0,
++		0, 1, 0, 0,
++		0, 0, 1, 0,
++		0, 0, 0, 1
++	};
 +
-+	if (!cells_) {
-+		cells_ = std::make_unique<eGLImage>(GL_RGBA, cellsSize_.width, cellsSize_.height,
-+						    cellsSize_.width * 4, GL_TEXTURE4, 4);
-+		egl_.createOutputTexture2D(*cells_);
-+	}
++	egl_.useProgram(program.id);
 +
-+	if (egl_.attachTextureToFBO(*cells_))
-+		return -ENODEV;
-+
-+	egl_.useProgram(cellsProgramId_);
-+
-+	glEnableVertexAttribArray(cellsAttributeVertex_);
-+	glVertexAttribPointer(cellsAttributeVertex_, 2, GL_FLOAT, GL_TRUE,
++	glEnableVertexAttribArray(program.attributeVertex);
++	glVertexAttribPointer(program.attributeVertex, 2, GL_FLOAT, GL_TRUE,
 +			      2 * sizeof(GLfloat), vcoordinates);
-+	if (cellsAttributeTexture_ >= 0) {
-+		glEnableVertexAttribArray(cellsAttributeTexture_);
-+		glVertexAttribPointer(cellsAttributeTexture_, 2, GL_FLOAT, GL_TRUE,
++	if (program.attributeTexture >= 0) {
++		glEnableVertexAttribArray(program.attributeTexture);
++		glVertexAttribPointer(program.attributeTexture, 2, GL_FLOAT, GL_TRUE,
 +				      2 * sizeof(GLfloat), texcoordinates);
 +	}
-+
-+	/* The frame is a texture of bytes, as many as its stride wide */
-+	glUniform1i(cellsUniformTexY_, eglImageIn.texture_unit_uniform_id_);
-+	glUniform2f(cellsUniformRawSize_, static_cast<GLfloat>(inputConfig_.stride),
-+		    static_cast<GLfloat>(height_));
-+	glUniform2f(cellsUniformFirstRed_, firstRed_x_, firstRed_y_);
-+	if (cellsUniformProjMatrix_ >= 0)
-+		glUniformMatrix4fv(cellsUniformProjMatrix_, 1, GL_FALSE, identity);
-+	if (cellsUniformStrideFactor_ >= 0)
-+		glUniform1f(cellsUniformStrideFactor_, 1.0f);
++	if (program.projMatrix >= 0)
++		glUniformMatrix4fv(program.projMatrix, 1, GL_FALSE, identity);
++	if (program.strideFactor >= 0)
++		glUniform1f(program.strideFactor, 1.0f);
 +
 +	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
 +	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++}
 +
-+	/* The main pass's program, with the cells it reads on unit 4 */
-+	egl_.useProgram(programId_);
++/*
++ * Run the cells path's two passes: bin each cell of the input into a texel of
++ * the cells texture (unit 4), and filter those into the filtered cells (unit
++ * 5), which the main pass samples.
++ */
++int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
++{
++	if (!cells_) {
++		cells_ = createCellsTexture(GL_TEXTURE4, 4);
++		filteredCells_ = createCellsTexture(GL_TEXTURE5, 5);
++		if (!cells_ || !filteredCells_) {
++			LOG(Debayer, Error) << "Half-float render targets fail";
++			cells_.reset();
++			filteredCells_.reset();
++			return -ENODEV;
++		}
++	}
++
++	/* Bin: the frame is a texture of bytes, as many as its stride wide */
++	if (egl_.attachTextureToFBO(*cells_))
++		return -ENODEV;
++	egl_.useProgram(binProgram_.id);
++	glUniform1i(binProgram_.input, eglImageIn.texture_unit_uniform_id_);
++	glUniform2f(binProgram_.size, static_cast<GLfloat>(inputConfig_.stride),
++		    static_cast<GLfloat>(height_));
++	glUniform2f(binProgram_.firstRed, firstRed_x_, firstRed_y_);
++	drawCells(binProgram_);
++
++	/* Filter */
++	const DebayerParams::Denoise &d = params.denoise;
++	if (egl_.attachTextureToFBO(*filteredCells_))
++		return -ENODEV;
 +	egl_.activateBindTexture(*cells_);
++	egl_.useProgram(denoiseProgram_.id);
++	glUniform1i(denoiseProgram_.input, cells_->texture_unit_uniform_id_);
++	glUniform2f(denoiseProgram_.size, cellsSize_.width, cellsSize_.height);
++	glUniform3f(denoiseProgram_.blackLevel, params.blackLevel[0], params.blackLevel[1],
++		    params.blackLevel[2]);
++	glUniform3f(denoiseProgram_.noise, d.slope, d.quad, d.floor);
++	glUniform3f(denoiseProgram_.widthLow, d.widthLow[0], d.widthLow[1], d.widthLow[2]);
++	glUniform3f(denoiseProgram_.widthHigh, d.widthHigh[0], d.widthHigh[1], d.widthHigh[2]);
++	glUniform2f(denoiseProgram_.anchors, d.levelLow, d.levelHigh);
++	drawCells(denoiseProgram_);
++
++	/* The main pass samples the filtered cells */
++	egl_.activateBindTexture(*filteredCells_);
 +
 +	GLenum err = glGetError();
 +	if (err != GL_NO_ERROR) {
-+		LOG(eGL, Error) << "Binning the cells fail " << err;
++		LOG(eGL, Error) << "Filtering the cells fail " << err;
 +		return -ENODEV;
 +	}
 +
 +	return 0;
 +}
 +
++/*
++ * Make the main program the one that samples single pixels, or the one that
++ * samples the cells, and read the locations of its variables if it changed.
++ */
++void DebayerEGL::selectProgram(bool cells)
++{
++	if (cells != cellsActive_) {
++		cellsActive_ = cells;
++		programId_ = cells ? cellsMainProgramId_ : singleProgramId_;
++		getShaderVariableLocations();
++	}
++	egl_.useProgram(programId_);
++}
++
  int DebayerEGL::configure(const StreamConfiguration &inputCfg,
  			  const std::vector<std::reference_wrapper<const StreamConfiguration>> &outputCfgs,
  			  [[maybe_unused]] bool ccmEnabled)
-@@ -584,6 +725,18 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -584,6 +852,9 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  	glUniform4f(chromaShearUniform_, params.chromaShear[0], params.chromaShear[1],
  		    params.chromaShear[2], params.chromaShear[3]);
  
-+	if (cellsPath_) {
-+		const DebayerParams::Denoise &d = params.denoise;
-+
-+		glUniform1i(cellTexUniform_, cells_->texture_unit_uniform_id_);
-+		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
-+		glUniform1f(denoiseOnUniform_, d.enabled ? 1.0f : 0.0f);
-+		glUniform2f(noiseUniform_, d.slope, d.floor);
-+		glUniform3f(widthLowUniform_, d.widthLow[0], d.widthLow[1], d.widthLow[2]);
-+		glUniform3f(widthHighUniform_, d.widthHigh[0], d.widthHigh[1], d.widthHigh[2]);
-+		glUniform2f(anchorsUniform_, d.levelLow, d.levelHigh);
-+	}
++	if (cellsActive_)
++		glUniform1i(cellTexUniform_, filteredCells_->texture_unit_uniform_id_);
 +
  	return;
  }
  
-@@ -687,6 +840,9 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -687,6 +958,18 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	if (!eglImageOut)
  		return -ENOMEM;
  
-+	if (cellsPath_ && renderCells(*eglImageIn))
-+		return -ENODEV;
++	/*
++	 * The cells path, when the IPA asks for noise reduction; if it fails,
++	 * it is not tried again.
++	 */
++	bool cells = cellsEligible_ && params.denoise.enabled;
++	if (cells && renderCells(*eglImageIn, params)) {
++		LOG(Debayer, Error) << "No noise reduction: the cells path failed";
++		cellsEligible_ = false;
++		cells = false;
++	}
++	selectProgram(cells);
 +
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
  
-@@ -783,9 +939,14 @@ void DebayerEGL::stop()
+@@ -771,6 +1054,8 @@ int DebayerEGL::start()
+ 
+ 	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
+ 
++	cellsCapable_ = maxTextureImageUnits >= 6 && halfFloatTargets();
++
+ 	if (initBayerShaders(inputPixelFormat_, outputPixelFormat_))
+ 		return -EINVAL;
+ 
+@@ -783,9 +1068,18 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
+-
+-	if (programId_)
+-		glDeleteProgram(programId_);
 +	cells_.reset();
- 
- 	if (programId_)
- 		glDeleteProgram(programId_);
-+	if (cellsProgramId_) {
-+		glDeleteProgram(cellsProgramId_);
-+		cellsProgramId_ = 0;
++	filteredCells_.reset();
++
++	if (singleProgramId_)
++		glDeleteProgram(singleProgramId_);
++	for (GLuint id : { cellsMainProgramId_, binProgram_.id, denoiseProgram_.id }) {
++		if (id)
++			glDeleteProgram(id);
 +	}
++	singleProgramId_ = cellsMainProgramId_ = binProgram_.id = denoiseProgram_.id = 0;
++	programId_ = 0;
++	cellsActive_ = false;
  }
  
  SizeRange DebayerEGL::sizes(PixelFormat inputFormat, const Size &inputSize)
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 72f971818..62817384c 100644
+index 72f971818..5618da3e7 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
-@@ -124,6 +124,37 @@ private:
+@@ -13,12 +13,14 @@
+ #include <deque>
+ #include <memory>
+ #include <stdint.h>
++#include <string>
+ #include <tuple>
+ #include <vector>
+ 
+ #define GL_GLEXT_PROTOTYPES
+ #define EGL_EGLEXT_PROTOTYPES
+ #include <libcamera/base/object.h>
++#include <libcamera/base/span.h>
+ 
+ #include "libcamera/internal/egl.h"
+ #include "libcamera/internal/mapped_framebuffer.h"
+@@ -124,6 +126,61 @@ private:
  	GLint chromaUniform_;
  	GLint chromaShearUniform_;
  
 +	/*
-+	 * The cells path, for outputs much smaller than the input: a first pass
-+	 * bins each 2x2 cell of the raw frame at its full 10 bits into a texel
-+	 * of an RGBA8 texture on unit 4 (bayer_cells_pack.frag), and the main
-+	 * pass filters and samples those cells (CELL_PATH in
-+	 * bayer_1x_packed.frag), where the other path samples single pixels
-+	 * and keeps only their 8 high bits.
++	 * The cells path, for frames the IPA wants noise reduction on (and an
++	 * output much smaller than the input): a first pass bins each 2x2 cell
++	 * of the raw frame at its full 10 bits into a texel of a half-float
++	 * texture (bayer_cells_bin.frag), a second filters those cells with a
++	 * bilateral filter that follows the sensor's noise
++	 * (bayer_cells_denoise.frag), and the main pass, a second program of
++	 * bayer_1x_packed.frag (CELL_PATH), samples them. The other path
++	 * samples single pixels and keeps only their 8 high bits, which is
++	 * cheaper, as it reads a ninth of the bytes.
 +	 */
-+	int initCellsProgram();
-+	int renderCells(eGLImage &eglImageIn);
-+	bool cellsPath_ = false;
-+	GLuint cellsProgramId_ = 0;
-+	GLint cellsAttributeVertex_;
-+	GLint cellsAttributeTexture_;
-+	GLint cellsUniformTexY_;
-+	GLint cellsUniformRawSize_;
-+	GLint cellsUniformFirstRed_;
-+	GLint cellsUniformProjMatrix_;
-+	GLint cellsUniformStrideFactor_;
++	struct CellsProgram {
++		GLuint id = 0;
++		GLint attributeVertex;
++		GLint attributeTexture;
++		GLint projMatrix;
++		GLint strideFactor;
++		GLint input;
++		GLint size;
++		GLint firstRed;
++		GLint blackLevel;
++		GLint noise;
++		GLint widthLow;
++		GLint widthHigh;
++		GLint anchors;
++	};
++
++	bool halfFloatTargets();
++	int initCellsPrograms(const std::vector<std::string> &shaderEnv,
++			      Span<const unsigned char> vertexShaderData,
++			      Span<const unsigned char> fragmentShaderData);
++	int initCellsProgram(CellsProgram &program, Span<const unsigned char> fragmentShaderData,
++			     const std::vector<std::string> &shaderEnv);
++	std::unique_ptr<eGLImage> createCellsTexture(GLenum unit, uint32_t uniformId);
++	void drawCells(CellsProgram &program);
++	int renderCells(eGLImage &eglImageIn, const DebayerParams &params);
++	void selectProgram(bool cells);
++
++	/* Whether the context has half-float render targets, and the frame fits */
++	bool cellsCapable_ = false;
++	bool cellsEligible_ = false;
++	/* Whether the current program is the main one of the cells path */
++	bool cellsActive_ = false;
++	GLuint singleProgramId_ = 0;
++	GLuint cellsMainProgramId_ = 0;
++	CellsProgram binProgram_;
++	CellsProgram denoiseProgram_;
++	/* The binned cells on unit 4, and the filtered ones on unit 5 */
 +	std::unique_ptr<eGLImage> cells_;
++	std::unique_ptr<eGLImage> filteredCells_;
 +	Size cellsSize_;
 +
-+	/* The main program's uniforms for the cells path */
++	/* The main program's sampler for the cells */
 +	GLint cellTexUniform_;
-+	GLint cellSizeUniform_;
-+	GLint denoiseOnUniform_;
-+	GLint noiseUniform_;
-+	GLint widthLowUniform_;
-+	GLint widthHighUniform_;
-+	GLint anchorsUniform_;
 +
  	Size nativeOutputSize_;
  	Rectangle window_;

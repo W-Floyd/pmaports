@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=47
+pkgrel=48
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -150,7 +150,6 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0091-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
 	0092-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
 	0093-ipa-soft-Add-a-noise-reduction-algorithm.patch
-	0094-software_isp-Take-a-bend-in-the-noise-model.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -350,9 +349,8 @@ cc05b7949e8eba088aa1d39bbe9deba507a4a7ad9d5b9577286f2cfec45cf163d1322e3c656ff34b
 ae872a2bc19eec6aa6879e30dca5c64a67e4c49ef6b93ad47f0f05daf961f1aa8fb47a28d3e1bf0590523864883f155f917f56b990ff15ee5a88268f56438ad2  0089-ipa-soft-agc-Add-manual-exposure-time-and-gain.patch
 d1a9f3e4c26336a4d62e75b5852adbe0bef4f38ac1b872c2c23277c4b0342d4e52d582e84b17246f2ef011b253fa1bc80db08fa7e41230548a84946c3feec0e3  0090-ipa-soft-Select-the-colour-correction-by-lux-index.patch
 259bab56fe7c16f99ae9ba969a9e81efc09ea4080b90c12a5109f950935e1c2e2e24a1148120065780bd88bbd0ebf985f1f98619f5aba460baaaf2cd57706911  0091-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
-a770e96676ab543813e7e2d3604ee35bb0929dab046eb72161585906b0a87c72414e99ee8b63a061f1338d5b83e75d08be2cf97f363d3e88e80dace76c346e12  0092-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
-93882b6ec493d5c99761735aa12d2276d27c0d064d5f68a4de2fe7748156f6f537a958f21851faafd0792836bae1f134924cf174916d7de275e690461a2c3c58  0093-ipa-soft-Add-a-noise-reduction-algorithm.patch
-763267392d5ec1f9d4e6a5b3150032e14f5ab761cecd5afe77c86bc8b2b6df85f41a798149d211d70ed5503679da591036328cd281d278d058ad866653285118  0094-software_isp-Take-a-bend-in-the-noise-model.patch
+53f2e2e32d4366306cc3d71dc8bb9bf16395a3b57fb2ffa22afb69a18fe19bc48322e38cf1b79e75e82cc93d1ffcfb05987f79d9654956587a1cc8208aeeeef7  0092-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
+4f7d5e000ea995db3158990f2deb369e89da935aadddd9a2452dfb04b2d060fbe584fe78e23dbabbd61c37467531857c93ec8a057b85bb79b052aae56b537993  0093-ipa-soft-Add-a-noise-reduction-algorithm.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 578dfd7c239590a85fe8f2092f9e6dd2d45472264f1621aa3a813ddebbd8ce3c663b259684a90bf0e2d074df448073daca78dd788e65064554614502b6b1f350  imx320.yaml
 acba0299c6f9dbb983d7bb8dbe64b98896665b2228ab584876e3cbbb6c58a583851fb8540a7eae1eebc76f37cf9eb4a4afecf434c3803b3d1ea5ec10725d4cbd  imx345.yaml

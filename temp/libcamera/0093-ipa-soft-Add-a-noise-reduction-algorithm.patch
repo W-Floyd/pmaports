@@ -1,31 +1,34 @@
-From 9be7a87be18eecb383f44d1d84cb98ac561efd5f Mon Sep 17 00:00:00 2001
+From ef88a97253159105256b2b6d312e58608bde5bb9 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Wed, 7 Oct 2026 23:18:36 +0000
+Date: Wed, 7 Oct 2026 23:36:21 +0000
 Subject: [PATCH 93/93] ipa: soft: Add a noise reduction algorithm
 
 Denoise sets the GPU debayer's noise filter for each frame from the vendor
 tuning's adaptive Bayer filter, by the frame's gain: the noise model (the
-variance of the 12-bit signal is the region's noise times its level over 64,
-which on this sensor measures within 15% of its raw frames) and the filter
+variance of the 12-bit signal is the region's noise times its bin plus its
+noiseQuad times the bin squared, the bin being the level over 64, which on
+the rear sensor measures within 15% of its raw frames) and the filter
 strengths for red/blue and green between the anchors' levels, as the kernel
 width, the inverse of the strength (smaller is stronger). The regions blend
-across the gaps between their gain ranges.
+across the gaps between their gain ranges. It switches the filter on from a
+gain of 3 and off below 2, as the cells path costs the GPU more than the
+single pixel one, and the noise is small at low gain.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- src/ipa/soft/algorithms/denoise.cpp | 124 ++++++++++++++++++++++++++++
- src/ipa/soft/algorithms/denoise.h   |  49 +++++++++++
+ src/ipa/soft/algorithms/denoise.cpp | 148 ++++++++++++++++++++++++++++
+ src/ipa/soft/algorithms/denoise.h   |  53 ++++++++++
  src/ipa/soft/algorithms/meson.build |   1 +
- 3 files changed, 174 insertions(+)
+ 3 files changed, 202 insertions(+)
  create mode 100644 src/ipa/soft/algorithms/denoise.cpp
  create mode 100644 src/ipa/soft/algorithms/denoise.h
 
 diff --git a/src/ipa/soft/algorithms/denoise.cpp b/src/ipa/soft/algorithms/denoise.cpp
 new file mode 100644
-index 000000000..fa1f2d785
+index 000000000..e4e0dfd62
 --- /dev/null
 +++ b/src/ipa/soft/algorithms/denoise.cpp
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,148 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
@@ -52,6 +55,14 @@ index 000000000..fa1f2d785
 +static constexpr double kMinWidth = 1.0;
 +static constexpr double kMaxWidth = 4.0;
 +
++/*
++ * The noise reduction costs the GPU three to eight times what sampling single
++ * pixels does, and the noise is small below a gain of a few: it is on from the
++ * first gain, and off again below the second.
++ */
++static constexpr double kEnableGain = 3.0;
++static constexpr double kDisableGain = 2.0;
++
 +/* The variance of the read noise, in 10-bit counts squared, by gain */
 +static constexpr double kReadNoiseBase = 0.3;
 +static constexpr double kReadNoisePerGain = 0.05;
@@ -70,7 +81,9 @@ index 000000000..fa1f2d785
 + *       regions:
 + *         - gain: [ 1, 1.1 ]
 + *           noise: 19                # the variance of the 12-bit signal
-+ *                                    # is noise * level / 64
++ *                                    # is noise * bin + noiseQuad * bin^2,
++ *                                    # the bin being the level / 64
++ *           noiseQuad: 0             # optional
 + *           strengthLo: [ 0.5, 0.5 ]   # R/B, Gr/Gb, at and below anchors[0]
 + *           strengthHi: [ 0.9, 0.9 ]   # at and above anchors[1]
 + *           anchors: [ 64, 160 ]       # levels above black, in 10-bit counts
@@ -86,7 +99,8 @@ index 000000000..fa1f2d785
 +		auto hi = node["strengthHi"].get<std::vector<double>>();
 +		auto anchors = node["anchors"].get<std::vector<double>>();
 +		auto noise = node["noise"].get<double>();
-+		if (!gain || gain->size() != 2 || !lo || lo->size() != 2 || !hi || hi->size() != 2 ||
++		const double quad = node["noiseQuad"].get<double>(0.0);
++		if (!gain|| gain->size() != 2 || !lo || lo->size() != 2 || !hi || hi->size() != 2 ||
 +		    !anchors || anchors->size() != 2 || !noise || *noise <= 0.0 ||
 +		    (*lo)[0] <= 0.0 || (*lo)[1] <= 0.0 || (*hi)[0] <= 0.0 || (*hi)[1] <= 0.0) {
 +			LOG(IPASoftDenoise, Error) << "Invalid noise reduction region";
@@ -94,7 +108,7 @@ index 000000000..fa1f2d785
 +		}
 +
 +		ranges_.push_back({ (*gain)[0], (*gain)[1] });
-+		regions_.push_back({ *noise,
++		regions_.push_back({ *noise, quad,
 +				     { (*lo)[0], (*lo)[1] },
 +				     { (*hi)[0], (*hi)[1] },
 +				     (*anchors)[0], (*anchors)[1] });
@@ -119,6 +133,15 @@ index 000000000..fa1f2d785
 +	const double gain = frameContext.sensor.known ? frameContext.sensor.gain
 +						      : context.activeState.agc.again;
 +
++	if (gain >= kEnableGain)
++		active_ = true;
++	else if (gain < kDisableGain)
++		active_ = false;
++
++	params->denoise.enabled = active_;
++	if (!active_)
++		return;
++
 +	const auto b = ipa::soft::luxBlend(ranges_, gain);
 +	const Region &lo = regions_[b.lo];
 +	const Region &hi = regions_[b.hi];
@@ -135,9 +158,13 @@ index 000000000..fa1f2d785
 +	};
 +
 +	DebayerParams::Denoise &d = params->denoise;
-+	d.enabled = true;
-+	/* The variance of the 12-bit signal over 64 bins, as 10-bit counts */
++	/*
++	 * The variance of the 12-bit signal at a bin of 64 counts, as 10-bit
++	 * counts: the level is a quarter of the 12-bit one, the variance a
++	 * sixteenth, so k * L / 16 / 16 and c * (L / 16)^2 / 16.
++	 */
 +	d.slope = mix(lo.noise, hi.noise) / 256.0;
++	d.quad = mix(lo.noiseQuad, hi.noiseQuad) / 4096.0;
 +	d.floor = kReadNoiseBase + kReadNoisePerGain * gain;
 +	d.widthLow = widths(lo.strengthLo, hi.strengthLo);
 +	d.widthHigh = widths(lo.strengthHi, hi.strengthHi);
@@ -152,10 +179,10 @@ index 000000000..fa1f2d785
 +} /* namespace libcamera */
 diff --git a/src/ipa/soft/algorithms/denoise.h b/src/ipa/soft/algorithms/denoise.h
 new file mode 100644
-index 000000000..73beba949
+index 000000000..778da72f8
 --- /dev/null
 +++ b/src/ipa/soft/algorithms/denoise.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,53 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
@@ -191,6 +218,7 @@ index 000000000..73beba949
 +	/* The adaptive Bayer filter's tuning at one gain region */
 +	struct Region {
 +		double noise;
++		double noiseQuad;
 +		std::array<double, 2> strengthLo;
 +		std::array<double, 2> strengthHi;
 +		double anchorLo;
@@ -200,6 +228,9 @@ index 000000000..73beba949
 +	/* The gain regions' ranges, for blending across the gaps */
 +	std::vector<ipa::soft::LuxRange> ranges_;
 +	std::vector<Region> regions_;
++
++	/* Whether the noise reduction is on, with a hysteresis in the gain */
++	bool active_ = false;
 +};
 +
 +} /* namespace ipa::soft::algorithms */
