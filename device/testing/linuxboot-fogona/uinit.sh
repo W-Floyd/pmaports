@@ -235,6 +235,11 @@ if [ -e /bbin/bootmanager ]; then
 	# stage that does not reach ready is never marked, so a bad stage still
 	# falls back.
 	BMARGS="$BMARGS -mark-successful"
+	# The touch controller's firmware goes into every Linux entry's
+	# initramfs: a booted system reads the device's partitions (where it
+	# comes from) only once its root is open, and an encrypted root's
+	# passphrase screen, in the initramfs, has to be tappable before that.
+	BMARGS="$BMARGS -initrd-firmware chipone_firmware.bin"
 	[ -e /etc/bootmanager/dev ] && BMARGS="$BMARGS -dev-once /tmp/dev-once"
 	{
 		# The USB network first: it needs nothing from the boot partition,
