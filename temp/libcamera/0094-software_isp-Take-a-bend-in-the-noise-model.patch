@@ -1,0 +1,151 @@
+From 7b5feeb78f52830dfbde5e85da4a1b74d47d9336 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 7 Oct 2026 23:25:52 +0000
+Subject: [PATCH] software_isp: Take a bend in the noise model
+
+The noise table of the front camera's highest gains grows slightly faster
+than the signal (its variance per bin rises 36% from the first bin to the
+32nd), which a variance of slope * level under-filters. Add a quadratic
+term: slope * level + quad * level^2 + floor.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/debayer_params.h       |  4 +++-
+ src/ipa/soft/algorithms/denoise.cpp              | 16 ++++++++++++----
+ src/ipa/soft/algorithms/denoise.h                |  1 +
+ src/libcamera/shaders/bayer_1x_packed.frag       |  8 +++++---
+ src/libcamera/software_isp/debayer_egl.cpp       |  2 +-
+ 5 files changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index bbb03f1ad..e1e09d711 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -86,7 +86,8 @@ struct DebayerParams {
+ 	 * data in 2x2 cells (an output at most about two thirds of the
+ 	 * input's size): a bilateral filter over the cells whose range kernel
+ 	 * follows the sensor's noise. The variance of a signal's noise is
+-	 * slope * level + floor, the level above black in 10-bit counts. The
++	 * slope * level + quad * level^2 + floor, the level above black in
++	 * 10-bit counts. The
+ 	 * kernel is exp(-(difference / (width * sigma))^2 / 2), with a width
+ 	 * for each of red, green and blue between those of the two levels
+ 	 * given, which are in counts above black: a smaller width filters
+@@ -95,6 +96,7 @@ struct DebayerParams {
+ 	struct Denoise {
+ 		bool enabled = false;
+ 		float slope = 0.0f;
++		float quad = 0.0f;
+ 		float floor = 0.3f;
+ 		std::array<float, 3> widthLow = { 2.0f, 2.0f, 2.0f };
+ 		std::array<float, 3> widthHigh = { 2.0f, 2.0f, 2.0f };
+diff --git a/src/ipa/soft/algorithms/denoise.cpp b/src/ipa/soft/algorithms/denoise.cpp
+index fa1f2d785..567f80bc0 100644
+--- a/src/ipa/soft/algorithms/denoise.cpp
++++ b/src/ipa/soft/algorithms/denoise.cpp
+@@ -42,7 +42,9 @@ static constexpr double kReadNoisePerGain = 0.05;
+  *       regions:
+  *         - gain: [ 1, 1.1 ]
+  *           noise: 19                # the variance of the 12-bit signal
+- *                                    # is noise * level / 64
++ *                                    # is noise * bin + noiseQuad * bin^2,
++ *                                    # the bin being the level / 64
++ *           noiseQuad: 0             # optional
+  *           strengthLo: [ 0.5, 0.5 ]   # R/B, Gr/Gb, at and below anchors[0]
+  *           strengthHi: [ 0.9, 0.9 ]   # at and above anchors[1]
+  *           anchors: [ 64, 160 ]       # levels above black, in 10-bit counts
+@@ -58,7 +60,8 @@ int Denoise::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningD
+ 		auto hi = node["strengthHi"].get<std::vector<double>>();
+ 		auto anchors = node["anchors"].get<std::vector<double>>();
+ 		auto noise = node["noise"].get<double>();
+-		if (!gain || gain->size() != 2 || !lo || lo->size() != 2 || !hi || hi->size() != 2 ||
++		const double quad = node["noiseQuad"].get<double>(0.0);
++		if (!gain|| gain->size() != 2 || !lo || lo->size() != 2 || !hi || hi->size() != 2 ||
+ 		    !anchors || anchors->size() != 2 || !noise || *noise <= 0.0 ||
+ 		    (*lo)[0] <= 0.0 || (*lo)[1] <= 0.0 || (*hi)[0] <= 0.0 || (*hi)[1] <= 0.0) {
+ 			LOG(IPASoftDenoise, Error) << "Invalid noise reduction region";
+@@ -66,7 +69,7 @@ int Denoise::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningD
+ 		}
+ 
+ 		ranges_.push_back({ (*gain)[0], (*gain)[1] });
+-		regions_.push_back({ *noise,
++		regions_.push_back({ *noise, quad,
+ 				     { (*lo)[0], (*lo)[1] },
+ 				     { (*hi)[0], (*hi)[1] },
+ 				     (*anchors)[0], (*anchors)[1] });
+@@ -108,8 +111,13 @@ void Denoise::prepare(IPAContext &context,
+ 
+ 	DebayerParams::Denoise &d = params->denoise;
+ 	d.enabled = true;
+-	/* The variance of the 12-bit signal over 64 bins, as 10-bit counts */
++	/*
++	 * The variance of the 12-bit signal at a bin of 64 counts, as 10-bit
++	 * counts: the level is a quarter of the 12-bit one, the variance a
++	 * sixteenth, so k * L / 16 / 16 and c * (L / 16)^2 / 16.
++	 */
+ 	d.slope = mix(lo.noise, hi.noise) / 256.0;
++	d.quad = mix(lo.noiseQuad, hi.noiseQuad) / 4096.0;
+ 	d.floor = kReadNoiseBase + kReadNoisePerGain * gain;
+ 	d.widthLow = widths(lo.strengthLo, hi.strengthLo);
+ 	d.widthHigh = widths(lo.strengthHi, hi.strengthHi);
+diff --git a/src/ipa/soft/algorithms/denoise.h b/src/ipa/soft/algorithms/denoise.h
+index 73beba949..7a0783ad4 100644
+--- a/src/ipa/soft/algorithms/denoise.h
++++ b/src/ipa/soft/algorithms/denoise.h
+@@ -33,6 +33,7 @@ private:
+ 	/* The adaptive Bayer filter's tuning at one gain region */
+ 	struct Region {
+ 		double noise;
++		double noiseQuad;
+ 		std::array<double, 2> strengthLo;
+ 		std::array<double, 2> strengthHi;
+ 		double anchorLo;
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index 6c33b3b2e..643e0dbf4 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -193,7 +193,8 @@ vec4 finish(vec3 rgb)
+  * few noise deviations are averaged and edges are kept:
+  *
+  *   weight = exp(-(difference / (width * sigma))^2 / 2)
+- *   sigma^2 = slope * level + floor, level above black in 10-bit counts
++ *   sigma^2 = slope * level + quad * level^2 + floor, level above black in
++ *   10-bit counts
+  *
+  * The two greens of a cell add up, which halves their noise variance.
+  * Counts of 1020 stand for 1.0, as the 8 high bits' 255 do on the other path.
+@@ -201,7 +202,7 @@ vec4 finish(vec3 rgb)
+ uniform sampler2D cell_tex;
+ uniform vec2 cell_size;
+ uniform float denoise_on;
+-uniform vec2 noise;		/* slope, floor of the variance model */
++uniform vec3 noise;		/* slope, quadratic term and floor of the variance model */
+ uniform vec3 width_lo;		/* range kernel width, at and below anchors.x */
+ uniform vec3 width_hi;		/* and at and above anchors.y */
+ uniform vec2 anchors;		/* levels, in counts above black */
+@@ -238,7 +239,8 @@ void main(void)
+ 			}
+ 
+ 			vec3 level = max(c - black, 0.0);
+-			vec3 sigma = sqrt(noise.x * level + noise.y) * vec3(1.0, 0.70710678, 1.0);
++			vec3 sigma = sqrt(noise.x * level + noise.y * level * level + noise.z) *
++				     vec3(1.0, 0.70710678, 1.0);
+ 			vec3 width = mix(width_lo, width_hi,
+ 					 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
+ 			vec3 inv = 1.0 / max(width * sigma, 0.001);
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 726081b8e..a82d05019 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -731,7 +731,7 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 		glUniform1i(cellTexUniform_, cells_->texture_unit_uniform_id_);
+ 		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
+ 		glUniform1f(denoiseOnUniform_, d.enabled ? 1.0f : 0.0f);
+-		glUniform2f(noiseUniform_, d.slope, d.floor);
++		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
+ 		glUniform3f(widthLowUniform_, d.widthLow[0], d.widthLow[1], d.widthLow[2]);
+ 		glUniform3f(widthHighUniform_, d.widthHigh[0], d.widthHigh[1], d.widthHigh[2]);
+ 		glUniform2f(anchorsUniform_, d.levelLow, d.levelHigh);
+-- 
+2.55.0
+
