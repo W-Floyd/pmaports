@@ -27,6 +27,25 @@ if [ ! -f "$_dir"/authorized_keys ]; then
 fi
 chmod 600 "$_dir"/ssh_host_rsa_key "$_dir"/authorized_keys
 
+# The same keys again, where the stage can read them with no boot partition:
+# an encrypted root (and its linuxboot/) is closed when the stage starts. They
+# go in the tail of boot_a, after the image, in the Boot Manager's rawkeys.go
+# format: "BMKEYS01", the keys, a NUL, 4 MiB from the end. The image is
+# written over the start only, so this survives a flash of it.
+_raw=/dev/disk/by-partlabel/boot_a
+if [ -b "$_raw" ] && [ -s "$_dir"/authorized_keys ]; then
+	_size=$(blockdev --getsize64 "$_raw")
+	if [ "$_size" -ge 16777216 ]; then
+		{
+			printf 'BMKEYS01\n'
+			head -c 61440 "$_dir"/authorized_keys
+			printf '\n\0'
+		} | dd of="$_raw" bs=4096 seek=$(((_size - 4194304) / 4096)) \
+			conv=notrunc 2>/dev/null && sync ||
+			echo "==> linuxboot-fogona: could not keep the SSH keys in boot_a; an encrypted install's stage has no SSH"
+	fi
+fi
+
 [ -f /usr/share/deviceinfo/deviceinfo ] || exit 0
 command -v mkinitfs > /dev/null 2>&1 || exit 0
 

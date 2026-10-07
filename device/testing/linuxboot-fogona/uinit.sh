@@ -70,6 +70,7 @@ record_boot() {
 		# partition the stage can read before it is unlocked): the free
 		# tail of the stage's own partition, which has no file system.
 		[ -e /bbin/bootmanager ] && echo "raw:boot_a" > /tmp/settings-spec
+		ssh_fallback
 		return
 	}
 	mount -t $BOOTFS /dev/$BOOTDEV /mnt/boot || {
@@ -104,6 +105,16 @@ record_boot() {
 	device_files $L
 	sync
 	umount /mnt/boot
+	ssh_fallback
+}
+
+# What sshd still lacks once the boot partition has given what it had: the
+# authorized keys kept in the tail of boot_a (an encrypted root's linuxboot/
+# is closed at this point), and a host key made for this boot. The Boot
+# Manager's -ssh-fallback does both, and only for what is missing.
+ssh_fallback() {
+	[ -e /bbin/bootmanager ] || return 0
+	bootmanager -ssh-fallback boot_a || :
 }
 
 # The device's own files, which a packaged stage (linuxboot-fogona) cannot
