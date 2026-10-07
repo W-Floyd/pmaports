@@ -12,7 +12,7 @@ pkgver=1.2
 # modem is refused /readwrite/datablock/id_00, mot_rfs/imei_sv and friends,
 # its USIM application never leaves 'detected', and ModemManager reports
 # sim-missing.
-pkgrel=4
+pkgrel=5
 pkgdesc="Trivial File Transfer Protocol server over AF_QIPCRTR"
 url="https://github.com/linux-msm/tqftpserv"
 arch="all"
@@ -55,6 +55,14 @@ systemd() {
 	# without it an upgrade leaves the unit disabled and the modem unfixed.
 	install="$subpkgname.post-install $subpkgname.post-upgrade"
 	default_systemd
+
+	# Enabled by the package itself: pmbootstrap runs post-install where
+	# systemctl cannot enable anything, and a fresh image shipped with the
+	# unit disabled, so the modem came up without its readwrite files
+	# (sim-missing).
+	mkdir -p "$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../tqftpserv-populate-readwrite.service \
+		"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/tqftpserv-populate-readwrite.service
 }
 
 sha512sums="
