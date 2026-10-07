@@ -59,7 +59,7 @@ maintainer="William Floyd <git@notmy.space>"
 _flavor="motorola-fogona"
 pkgname=linux-$_flavor
 pkgver=7.3_rc2
-pkgrel=1
+pkgrel=2
 pkgdesc="Mainline kernel for the Motorola Moto G Play (2024) (fogona, SM6225)"
 arch="aarch64"
 _carch="arm64"
@@ -171,5 +171,5 @@ package() {
 # `--src` builds, which bypass source fetching and checksums.
 sha512sums="
 99098297bea9444696ef3b3bd2cf49783856f5e05dbd6462b10a82f86466bf041c804a00ef5e3f8cb0054aab9febd355a1a87de26a5c3069a961572a7ec27f8c  linux-motorola-fogona-67ca7b4bc609d433a10e9fb71bf9f0d8571f2992.tar.gz
-25c8d327a1d1d84e13cc589e4b4afe456b95967ba47ee9ab5cf733c018d8218ee9c3ab187d3c21ef9e04df892aeb05cd23afa1310556f2c1e0aa9675b796cc04  config-motorola-fogona.aarch64
+a22acf2633ba7629cb99a756892e04c2ca302c82e3e86c99c1f923d8dad616e0a01483965da92024bb17637c9eabc3263dd9fd5461f3a0da08559b3f9e4c41e2  config-motorola-fogona.aarch64
 "
