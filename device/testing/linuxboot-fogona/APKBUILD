@@ -23,7 +23,7 @@
 # or by a one-shot request, tools/linuxboot/dev.sh stage-hold).
 pkgname=linuxboot-fogona
 pkgver=0_git20260927
-pkgrel=30
+pkgrel=31
 pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the Moto G Play (2024)"
 url="https://github.com/W-Floyd/linux"
 arch="aarch64"
@@ -70,7 +70,7 @@ install="$pkgname.post-install $pkgname.post-upgrade"
 # Manager is its main branch.
 _kernel_commit="4aef74beaa7f91b91d591713e500f623afde99f6"
 _uroot_commit="015d488be82e48ee31d6b548b23045cd755aacf5"
-_bm_commit="7dd9aaea26d22ccf9928337ad3d6a661439eb634"
+_bm_commit="cc971dbee608749fc7c68920004b19d49b78cfcd"
 _uroot_url="https://github.com/W-Floyd/u-root"
 _bm_url="https://github.com/W-Floyd/bootmanager"
 
@@ -188,9 +188,9 @@ package() {
 sha512sums="
 5f403de23803290942a2297b4ff010838a2ba4b36f852130f28f604f2fbc8f455e5febfff05c19469c1615bbe4e9d52c1d88665e5910f43cd3e86e533ab1389c  linux-4aef74beaa7f91b91d591713e500f623afde99f6.tar.gz
 e1b8a58906ef9bb221282b9bb07be2964f381ff330b7f3b680257c2c4e55cb373b783e4fa65167666a02a0550dc074e1a2b14a648fb9933535f38e7d3b23577c  u-root-015d488be82e48ee31d6b548b23045cd755aacf5.tar.gz
-db21c84074fbf96ffeff37b1f0c728170a5ca8650ada96c4c0c37b3dc422b8a98ba6a1a1000eae6838698a94a1e7adb8f5d7e741ed497e7b5d81cb7f8555bd4c  bootmanager-7dd9aaea26d22ccf9928337ad3d6a661439eb634.tar.gz
+7a5537533515a324030b4aa6911bf8fbbd6ffbd99901da956526167cda0751a626f38247a8630ba691e4b19d2a441058ab56be47083bc046b9aa224fa53a853d  bootmanager-cc971dbee608749fc7c68920004b19d49b78cfcd.tar.gz
 f525c516e997e028bd689a03fef61af28c44a1389abdff103da9213790c5e6ab93184f0ab07bb1fa630e23e6a3113b50dc553d9566babc99542fe8dcb9707676  config-linuxboot-fogona.aarch64
-ccc5dc73897ce548b5823533dbe5a1467e97b46943210ba247c1fc47460d7a0d8e47d47c5b656477b760bc366d823a90a00214f2f9901f9a20e4240cd41ec441  uinit.sh
+40a4053a0e43771893938485f9de539cf4a888792feb22d53bfda89921fde0cd6123d3fc2206414ac9a019c8ca06e482a15bba2d6eb02d3287980bdd13fc3793  uinit.sh
 6a7d824c0fe3e7b55954fb1177d4549da5f5b4756da8f1c73bbd8ed8da8747b90ddb441351bab52f87febeabf5e3be7a4369e18a1194b3d99543c7b57755f3c1  fogona-boot.sh
 e9134b014880d4b7468fd4bb583eaf9cc56a176e8d139d00ce6da2d0fa481ef65cb491f651ab73f3837c3b991b7ca7a8c74fe97a4f5b0ed85138913d3637579e  motorola-fogona.json
 "

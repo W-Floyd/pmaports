@@ -34,7 +34,8 @@
 # root file system), a card first (bootmanager -find-boot-files). It leaves
 # the location in /tmp/settings-spec for the Boot Manager's -settings, empty
 # when there is none: then there is no touch firmware, SSH key or saved
-# setting, but nothing waits for them. A stage without the Boot Manager has
+# setting, but nothing waits for them (the settings then go to the tail of
+# boot_a, `raw:boot_a`: the Boot Manager's rawrecord.go). A stage without the Boot Manager has
 # no -find-boot-files and keeps to the card's first partition.
 find_boot_partition() {
 	if [ -e /bbin/bootmanager ]; then
@@ -65,6 +66,10 @@ record_boot() {
 	: > /tmp/settings-spec
 	find_boot_partition || {
 		echo "record_boot: no partition with a linuxboot directory"
+		# Settings still need a place (an encrypted install has no boot
+		# partition the stage can read before it is unlocked): the free
+		# tail of the stage's own partition, which has no file system.
+		[ -e /bbin/bootmanager ] && echo "raw:boot_a" > /tmp/settings-spec
 		return
 	}
 	mount -t $BOOTFS /dev/$BOOTDEV /mnt/boot || {
