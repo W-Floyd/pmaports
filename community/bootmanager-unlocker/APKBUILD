@@ -10,7 +10,7 @@
 # is static musl; cryptsetup is the pmOS one).
 pkgname=bootmanager-unlocker
 pkgver=0.1.0
-pkgrel=4
+pkgrel=5
 pkgdesc="Boot Manager passphrase screen for unlocking an encrypted root in the initramfs"
 url="https://github.com/W-Floyd/bootmanager"
 arch="aarch64"
@@ -20,7 +20,7 @@ makedepends="cargo"
 # Another unlocker (unl0kr) provides this too; only one is installed.
 provides="postmarketos-fde-unlocker=$pkgver-r$pkgrel"
 provider_priority=100
-_bm_commit="5df220f9ae3a6d26d651fdb05ceef0b46cd1caad"
+_bm_commit="41cb1fb34765dade95d57762824110477322b8d1"
 source="
 	bootmanager-$_bm_commit.tar.gz::$url/archive/$_bm_commit.tar.gz
 	fde-unlock
@@ -59,7 +59,7 @@ package() {
 		"$pkgdir"/usr/share/mkinitfs-triggers/bootmanager-unlocker
 }
 sha512sums="
-0762cc2dd292ea80ef8a6221eb98029135c6f393789e49cda8c98013aafd3bbf10d44ef9c357d8a7994f8247a176dd03b663ae3d173a35b27343de90324916e3  bootmanager-5df220f9ae3a6d26d651fdb05ceef0b46cd1caad.tar.gz
-01a6fd7f464d06ba2fbe18f51a5d4ba719e45c989ae93ca231f06e5fa4da44116580f5df01fd05b3beee47c7c41e8ef8a218191a9836bf5550837147972c7209  fde-unlock
+fb797c285277767c2bbad4bcc4029c3e22906c048703af71103dec281542dfacddb1d85dc47288a3eac21c2ea7832ab2a1cf03d7abcc73fd407bcb8540bfc8f8  bootmanager-41cb1fb34765dade95d57762824110477322b8d1.tar.gz
+1bfda6c1f5435623e0a8bff326d40547f5a898f83ed1d6cfd4994ca539565561fb21c2ac6e70da22a88936a716d44b3e8213a3ca20ad823c814b5c54c5dba519  fde-unlock
 b60b77ecbe9947f7050e95295abc52bad806d82ed0388ea3655557ef0ba2d81c0f5cb79c66391614c263fe733bcbfc6d184ca62ce123b92cd8051a0a6cfa12fe  bootmanager-unlocker.files
 "

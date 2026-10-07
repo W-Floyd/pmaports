@@ -4,26 +4,9 @@
 # unlock_root_partition). The passphrase comes from the Boot Manager's
 # on-screen keyboard on stdout, as unl0kr's does.
 #
-# When the Boot Manager stage that kexec'd this system already unlocked the
-# volume (it needs it open to read the boot entries), it appends the
-# passphrase to the initramfs as /bman-unlock.key. That is tried first, once,
-# and the file is deleted whether it opens the root or not: a key that does
-# not work must not be tried again, and none should outlive the unlock.
+# (A key file named by cryptkey= on the command line is tried before this is
+# ever called, by the initramfs itself: that is how a Boot Manager stage that
+# unlocked the volume already passes the passphrase on.)
 
-KEY=/bman-unlock.key
-OPTS="--perf-no_read_workqueue --perf-no_write_workqueue"
-
-if [ -e "$KEY" ]; then
-	if [ -z "$2" ] || [ "$2" = 0 ]; then
-		# shellcheck disable=SC2086
-		if cryptsetup $OPTS open --key-file "$KEY" "$1" root; then
-			rm -f "$KEY"
-			exit 0
-		fi
-	fi
-	rm -f "$KEY"
-fi
-
-# shellcheck disable=SC2086
 CRYPTTAB_SOURCE="$1" CRYPTTAB_TRIED="$2" bootmanager-ui --unlock |
-	cryptsetup $OPTS open "$1" root -
+	cryptsetup --perf-no_read_workqueue --perf-no_write_workqueue open "$1" root -
