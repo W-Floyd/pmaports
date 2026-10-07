@@ -1,8 +1,8 @@
 # Maintainer: William Floyd <git@notmy.space>
 pkgname=go-chromatix2libcamera
 pkgver=0_git20260927
-pkgrel=7
-_commit="61eacd8d9781d810cc175705f3f0315c37bb57db"
+pkgrel=8
+_commit="17e3c717aab101a8c8d75af5f786faa580239c31"
 pkgdesc="Generate libcamera tuning files from Qualcomm CamX Chromatix tuning"
 url="https://github.com/W-Floyd/go-chromatix2libcamera"
 arch="all"
@@ -34,6 +34,6 @@ package() {
 }
 
 sha512sums="
-4ec1161d44ef325fabfc71416510b8a20b1de67e5d3749f7b43c1cf21df3dd96e421c5c1dcab940e4cf594f45a5bddc8ceca6299b42824198b536d7cec55eacf  go-chromatix2libcamera-61eacd8d9781d810cc175705f3f0315c37bb57db.tar.gz
+a05198444667e033a68c1e4ccde9781c87e685ba573d87a5e06134c7d9a8cedaad1e9df528de4f32f6017d2036da56c769b28dc10409c84710105d5ae6323de0  go-chromatix2libcamera-17e3c717aab101a8c8d75af5f786faa580239c31.tar.gz
 016782ecbc6a95cd497d2d5a056b6fbb244258346f241222e859b14f7c39155d6fce678616dcadb2082b31f17972593d67c226aefe32004d9e24cf0152a9e4d5  go-chromatix2libcamera.service
 "
