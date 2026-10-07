@@ -9,6 +9,11 @@ enable fogona-wlan-bdf.service
 enable fogona-modem-efs.service
 enable fogona-ssreq-stub.service
 
+# The modem's read-write files, copied from persist (tqftpserv): without
+# them its SIM application never comes up (sim-missing). The package's own
+# post-install enable is undone by the preset policy.
+enable tqftpserv-populate-readwrite.service
+
 # The modem's DIAG channel, and the IMS data service VoLTE calls need.
 enable diag-router.service
 enable 81voltd.service
