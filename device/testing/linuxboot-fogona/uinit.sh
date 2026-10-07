@@ -157,7 +157,8 @@ for p in /sys/devices/system/cpu/cpufreq/policy*; do
 done
 echo "cpufreq: performance on" /sys/devices/system/cpu/cpufreq/policy* >> /tmp/uinit.log
 
-# No device coredumps. The display driver leaves one early in every boot (a
+# STOPGAP for a kernel bug (TODO.md, "The display crash dump's free oopses"):
+# no device coredumps. The display driver leaves one early in every boot (a
 # snapshot of the display state after a first error), the kernel frees it five
 # minutes later, and that free oopses (a NULL dereference in
 # msm_disp_state_free -> drm_atomic_commit_default_clear, in a kworker). The
