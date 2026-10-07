@@ -10,7 +10,7 @@
 # is static musl; cryptsetup is the pmOS one).
 pkgname=bootmanager-unlocker
 pkgver=0.1.0
-pkgrel=5
+pkgrel=6
 pkgdesc="Boot Manager passphrase screen for unlocking an encrypted root in the initramfs"
 url="https://github.com/W-Floyd/bootmanager"
 arch="aarch64"
@@ -20,11 +20,12 @@ makedepends="cargo"
 # Another unlocker (unl0kr) provides this too; only one is installed.
 provides="postmarketos-fde-unlocker=$pkgver-r$pkgrel"
 provider_priority=100
-_bm_commit="41cb1fb34765dade95d57762824110477322b8d1"
+_bm_commit="f254eb51c4488d1a21eb0a16665eb0dc0d27377f"
 source="
 	bootmanager-$_bm_commit.tar.gz::$url/archive/$_bm_commit.tar.gz
 	fde-unlock
 	bootmanager-unlocker.files
+	greetd-release-console.conf
 	"
 # net: cargo fetches the crates
 options="!check net" # tests need a display
@@ -50,6 +51,11 @@ package() {
 	install -Dm755 target/"$_rust_target"/release/bootmanager-ui "$pkgdir"/usr/bin/bootmanager-ui
 	install -Dm755 "$srcdir"/fde-unlock "$pkgdir"/usr/bin/fde-unlock
 
+	# The unlocker leaves the console in graphics mode (its last frame stays
+	# up); greetd's switch to VT 7 needs it back first.
+	install -Dm644 "$srcdir"/greetd-release-console.conf \
+		"$pkgdir"/usr/lib/systemd/system/greetd.service.d/20-bootmanager-unlocker.conf
+
 	# What mkinitfs copies into the initramfs, and what rebuilds it when
 	# this package changes (as unl0kr does).
 	install -Dm644 "$srcdir"/bootmanager-unlocker.files \
@@ -59,7 +65,8 @@ package() {
 		"$pkgdir"/usr/share/mkinitfs-triggers/bootmanager-unlocker
 }
 sha512sums="
-fb797c285277767c2bbad4bcc4029c3e22906c048703af71103dec281542dfacddb1d85dc47288a3eac21c2ea7832ab2a1cf03d7abcc73fd407bcb8540bfc8f8  bootmanager-41cb1fb34765dade95d57762824110477322b8d1.tar.gz
+735d6642bbef70e738c0febc49a2f7a7d2e696fd27cc4c848f75c3b1fa707dbf5cc0492e44cdfe795c3ecc8a6f8bf2a32bb6e88f0f04f21c2b2d9032a9b9dc3e  bootmanager-f254eb51c4488d1a21eb0a16665eb0dc0d27377f.tar.gz
 1bfda6c1f5435623e0a8bff326d40547f5a898f83ed1d6cfd4994ca539565561fb21c2ac6e70da22a88936a716d44b3e8213a3ca20ad823c814b5c54c5dba519  fde-unlock
 b60b77ecbe9947f7050e95295abc52bad806d82ed0388ea3655557ef0ba2d81c0f5cb79c66391614c263fe733bcbfc6d184ca62ce123b92cd8051a0a6cfa12fe  bootmanager-unlocker.files
+63e422f1c6fb2f0242a3749f533d01b6f0d8c280450b0f21e671dc701c46470238403eebaba10aac85859b7464db12449a3a050ae84243c97a96d305e5c27b34  greetd-release-console.conf
 "
