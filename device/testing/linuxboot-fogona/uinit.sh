@@ -157,6 +157,18 @@ for p in /sys/devices/system/cpu/cpufreq/policy*; do
 done
 echo "cpufreq: performance on" /sys/devices/system/cpu/cpufreq/policy* >> /tmp/uinit.log
 
+# No device coredumps. The display driver leaves one early in every boot (a
+# snapshot of the display state after a first error), the kernel frees it five
+# minutes later, and that free oopses (a NULL dereference in
+# msm_disp_state_free -> drm_atomic_commit_default_clear, in a kworker). The
+# dead worker leaves its CPU's work queue stuck, and from then on anything
+# that waits on work from every CPU never returns: lru_add_drain_all, which
+# an ext4 unmount calls. A boot handover after the stage has been up more
+# than five minutes then hung on its unmounts (a black screen, the USB
+# network answering ping and nothing else), and so did a fastboot flash.
+# Disabled, a dump is freed the moment it is made, while its state is valid.
+put /sys/class/devcoredump/disabled 1 2>> /tmp/uinit.log
+
 # A function, not `exec > file`: gosh accepts that and then drops every
 # later line of output.
 setup() {
