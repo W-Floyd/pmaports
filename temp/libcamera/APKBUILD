@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=80
+pkgrel=82
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -170,6 +170,7 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0110-software_isp-Weigh-the-temporal-filter-once-for-the-.patch
 	0111-software_isp-Weigh-the-spatial-filter-s-taps-once-fo.patch
 	0112-software_isp-debayer_egl-Time-the-GPU-passes.patch
+	0113-software_isp-HDR-from-frames-of-alternating-exposure.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -390,6 +391,7 @@ c04e3ccfcc4fe1e5271057b7027a119b9336c53de1c9eb6503b28b2d1ce772800c69c8f520e8d532
 d59ac82ea8ad926cadcb5f5e5023a13926fc81f0206c73239bd858c3dd74e624655868674785ced5449d1d2db09c8eaccb977263b38d53cbdb4a3fcfdae30dbe  0110-software_isp-Weigh-the-temporal-filter-once-for-the-.patch
 53194fdcdc7cd699a5be1207eeac416a16bae28741afc06d70c7c4c12d6b781c8b15e99632a6c668d74e8d243a14f222ecd67198b464e3d60e13f3203a45dc6b  0111-software_isp-Weigh-the-spatial-filter-s-taps-once-fo.patch
 4a9ad7dc8be002df2cb00088a1e3c336161bcff0b4b038ff7e72274a888b51472ebe84de2ed8f437e688413a42464eb799421101487a74c7a2db8f073bf38600  0112-software_isp-debayer_egl-Time-the-GPU-passes.patch
+85cd188df79252d23ec18c4545489743ee0b7c8c3331c4a20edf670518edc38271f2444e0b134c87182dbd9933beee1523b7b41d71e46b286578277d20237417  0113-software_isp-HDR-from-frames-of-alternating-exposure.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 578dfd7c239590a85fe8f2092f9e6dd2d45472264f1621aa3a813ddebbd8ce3c663b259684a90bf0e2d074df448073daca78dd788e65064554614502b6b1f350  imx320.yaml
 acba0299c6f9dbb983d7bb8dbe64b98896665b2228ab584876e3cbbb6c58a583851fb8540a7eae1eebc76f37cf9eb4a4afecf434c3803b3d1ea5ec10725d4cbd  imx345.yaml
