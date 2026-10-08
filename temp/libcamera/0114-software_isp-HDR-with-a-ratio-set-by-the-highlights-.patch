@@ -1,4 +1,4 @@
-From bb872424772ff9c5cbae6dc05cb99296cece9dd6 Mon Sep 17 00:00:00 2001
+From 567d8bfa1b8418de3724cd50b40c39c056c906ef Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -18,13 +18,17 @@ stayed below 1.6 for 30 frames.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../internal/software_isp/debayer_params.h    |   8 +
- src/ipa/soft/algorithms/agc.cpp               | 103 ++++++++---
- src/ipa/soft/algorithms/agc.h                 |  11 +-
- src/libcamera/shaders/bayer_1x_packed.frag    |  33 ++++
- src/libcamera/shaders/bayer_cells_bin.frag    |   8 +-
- src/libcamera/software_isp/debayer_egl.cpp    | 173 +++++++++++-------
- src/libcamera/software_isp/debayer_egl.h      |  27 +--
- 7 files changed, 256 insertions(+), 107 deletions(-)
+ src/ipa/soft/algorithms/agc.cpp               | 164 +++++++++---
+ src/ipa/soft/algorithms/agc.h                 |  16 +-
+ src/ipa/soft/ipa_context.h                    |  11 +
+ src/ipa/soft/soft_simple.cpp                  |  41 ++-
+ src/libcamera/pipeline/camss/camss.cpp        |  10 +-
+ src/libcamera/shaders/bayer_1x_packed.frag    |  89 +++++--
+ src/libcamera/shaders/bayer_cells_bin.frag    |  41 +--
+ src/libcamera/shaders/identity.vert           |  15 ++
+ src/libcamera/software_isp/debayer_egl.cpp    | 234 +++++++++++++-----
+ src/libcamera/software_isp/debayer_egl.h      |  34 +--
+ 11 files changed, 497 insertions(+), 166 deletions(-)
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
 index d57221bde..b4f162fc9 100644
@@ -46,10 +50,10 @@ index d57221bde..b4f162fc9 100644
  
  	/*
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..97123c1ac 100644
+index ae99e98a8..8d37b19f8 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
-@@ -103,9 +103,11 @@ static constexpr double kMeanAcquire = 0.6;
+@@ -103,11 +103,22 @@ static constexpr double kMeanAcquire = 0.6;
   * off by kHdrRatioStep, as the merged frames' exposures need not be steady
   * but should not change every frame.
   */
@@ -58,12 +62,55 @@ index ae99e98a8..97123c1ac 100644
 +static constexpr double kHdrOn = 2.0;
 +static constexpr double kHdrOff = 1.6;
  static constexpr double kHdrRatioStep = 0.15;
+-/* The frames the DRC gain must stay below kHdrOff for, before HDR stops */
 +/* The most HDR holds the short exposure below the long one by */
 +static constexpr double kHdrMax = 8.0;
- /* The frames the DRC gain must stay below kHdrOff for, before HDR stops */
++/*
++ * The fractions of clipped pixels over which the ratio wanted grows, by
++ * kHdrGrow a time, and over which it is held
++ */
++static constexpr double kHdrClipHigh = 0.004;
++static constexpr double kHdrClipLow = 0.0005;
++static constexpr double kHdrGrow = 1.5;
++/* The frames the ratio wanted must stay below kHdrOff for, before HDR stops */
  static constexpr unsigned int kHdrHold = 30;
++/* The frames after it stops before it can start again */
++static constexpr unsigned int kHdrCooldown = 60;
  
-@@ -399,12 +401,13 @@ static constexpr double kDrcMatch = 0.02;
+ Agc::Agc()
+ 	: exposureOptimal_(kExposureOptimal),
+@@ -217,6 +228,8 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+ 	 */
+ 	hdrOn_ = tuningData["hdrOn"].get<double>(kHdrOn);
+ 	hdrOff_ = std::min(tuningData["hdrOff"].get<double>(kHdrOff), hdrOn_);
++	/* hdrForce: a ratio to hold HDR at in any scene, for testing; 0 for none */
++	hdrForce_ = tuningData["hdrForce"].get<double>(0.0);
+ 	auto byGain = tuningData["exposureByGain"].get<std::vector<double>>();
+ 	if (byGain && byGain->size() >= 4 && byGain->size() % 2 == 0) {
+ 		for (unsigned int i = 0; i < byGain->size(); i += 2)
+@@ -308,6 +321,21 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+ 
+ namespace {
+ 
++/*
++ * The fraction of the pixels in the histogram's top two bins, the levels 248
++ * and over of 256, which a clipped highlight lands in however bright it is.
++ */
++double clippedFraction(const SwIspStats *stats)
++{
++	const auto &hist = stats->yHistogram;
++	double total = 0.0;
++
++	for (uint32_t bin : hist)
++		total += bin;
++
++	return total > 0.0 ? (hist[hist.size() - 1] + hist[hist.size() - 2]) / total : 0.0;
++}
++
+ /*
+  * The mean level of the pixels ranked between the fractions start and end
+  * of the pixels from the bright end of the histogram, as a fraction of the
+@@ -399,12 +427,13 @@ static constexpr double kDrcMatch = 0.02;
  void Agc::trackDrc(IPAContext &context, const IPAFrameContext &frameContext)
  {
  	/*
@@ -81,7 +128,7 @@ index ae99e98a8..97123c1ac 100644
  		return;
  	}
  
-@@ -584,13 +587,41 @@ void Agc::selectTargets(double lux)
+@@ -584,13 +613,51 @@ void Agc::selectTargets(double lux)
  double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
  {
  	const double black = context.activeState.blc.level;
@@ -102,9 +149,19 @@ index ae99e98a8..97123c1ac 100644
 +	 * kHdrMax times (the DRC alone, by what the vendor's tone mapping
 +	 * covers).
 +	 */
++	/*
++	 * The mean of the brightest pixels does not see a window that clips at
++	 * full scale, whatever its brightness, so the ratio is also raised
++	 * while a few pixels clip in the frame, and held while a few more
++	 * than none do.
++	 */
++	const double clipped = clippedFraction(stats);
 +	double wantHdr = std::clamp(scene / hist_->satRef, 1.0, kHdrMax);
-+	if (*sat >= kClipped)
-+		wantHdr = std::clamp(std::max(wantHdr, applied * kClippedStep), 1.0, kHdrMax);
++	if (clipped > kHdrClipHigh)
++		wantHdr = std::max(wantHdr, std::max(applied, hdrWanted_) * kHdrGrow);
++	else if (clipped > kHdrClipLow)
++		wantHdr = std::max(wantHdr, hdrWanted_);
++	wantHdr = std::clamp(wantHdr, 1.0, kHdrMax);
 +	hdrWanted_ = hist_->filter * hdrWanted_ + (1.0 - hist_->filter) * wantHdr;
 +
 +	if (hdr.active) {
@@ -125,10 +182,15 @@ index ae99e98a8..97123c1ac 100644
  	double want = std::clamp(scene / hist_->satRef, 1.0, hist_->maxDrc);
  
  	/*
-@@ -867,19 +898,22 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
+@@ -867,19 +934,27 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
  		return;
  	}
  
++	if (hdrForce_ > 1.0)
++		hdrWanted_ = std::min(hdrForce_, kHdrMax);
++	if (hdrCooldown_)
++		hdrCooldown_--;
++
 +	const int32_t limit = cfg.exposureMax + (agc.vblank - cfg.vblankBase);
 +
  	/*
@@ -155,7 +217,7 @@ index ae99e98a8..97123c1ac 100644
  		exposureLong = std::clamp<int32_t>(std::lround(product / cfg.againMin),
  						   cfg.exposureMin, limit);
  		gainLong = product / exposureLong;
-@@ -887,36 +921,52 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
+@@ -887,41 +962,63 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
  		return gainLong >= cfg.againMin && gainLong <= cfg.againMax &&
  		       exposureLong / ratio >= cfg.exposureMin;
  	};
@@ -168,7 +230,7 @@ index ae99e98a8..97123c1ac 100644
  
  	if (!hdr.active) {
 -		if (drcDecided_ >= hdrOn_ && split(drcDecided_)) {
-+		if (hdrWanted_ >= hdrOn_ && split(hdrWanted_)) {
++		if (hdrWanted_ >= hdrOn_ && !hdrCooldown_ && split(hdrWanted_)) {
 +			/* The short frames are held below the plain exposure by the ratio, not the DRC gain */
  			hdr.active = true;
  			hdr.longNext = false;
@@ -189,6 +251,7 @@ index ae99e98a8..97123c1ac 100644
 +		/* The ratio wanted has to stay low for a while, or HDR flaps on and off */
  		hdr.active = false;
  		hdrBelow_ = 0;
++		hdrCooldown_ = kHdrCooldown;
 +		drcDecided_ = std::clamp(hdrWanted_, 1.0, hist_->maxDrc);
 +		decide(plain / drcDecided_);
  		LOG(IPASoftExposure, Info) << "HDR off";
@@ -211,14 +274,30 @@ index ae99e98a8..97123c1ac 100644
  	if (!hdr.active)
  		return;
  
++	/*
++	 * The frames are asked for these by computeParams(), one of them on
++	 * each frame as it arrives: this runs when the statistics are done,
++	 * which is late for the frames after the one the CPU computes them on,
++	 * and the exposures asked for then miss their frames and repeat.
++	 */
  	split(hdr.ratio);
- 	hdr.longNext = !hdr.longNext;
+-	hdr.longNext = !hdr.longNext;
 -	hdr.reference = productShort;
+-	frameContext.sensor.gain = gainLong;
+-	frameContext.sensor.exposure = hdr.longNext
+-					       ? exposureLong
+-					       : std::clamp<int32_t>(std::lround(exposureLong / hdr.ratio),
+-								     cfg.exposureMin, exposureLong);
 +	hdr.reference = agc.exposure * agc.again;
- 	frameContext.sensor.gain = gainLong;
- 	frameContext.sensor.exposure = hdr.longNext
- 					       ? exposureLong
-@@ -934,6 +984,7 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
++	hdr.plan.longExposure = exposureLong;
++	hdr.plan.shortExposure = std::clamp<int32_t>(std::lround(exposureLong / hdr.ratio),
++						     cfg.exposureMin, exposureLong);
++	hdr.plan.gain = gainLong;
++	(void)frameContext;
+ }
+ 
+ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
+@@ -934,6 +1031,7 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
  	params->hdr.product = product;
  	/* Without HDR a frame is its own reference: cells in the units they were taken in */
  	params->hdr.reference = params->hdr.enabled ? hdr.reference : product;
@@ -226,7 +305,7 @@ index ae99e98a8..97123c1ac 100644
  }
  
  /*
-@@ -988,6 +1039,8 @@ void Agc::process(IPAContext &context,
+@@ -988,6 +1086,8 @@ void Agc::process(IPAContext &context,
  		context.activeState.agc.darkBoost = 1.0;
  		drcDecided_ = 1.0;
  		darkDecided_ = 1.0;
@@ -236,16 +315,17 @@ index ae99e98a8..97123c1ac 100644
  
  	/* The DRC gain the tone curve must use from now on */
 diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
-index 0484b88eb..9be0a45de 100644
+index 0484b88eb..69c0b9aa4 100644
 --- a/src/ipa/soft/algorithms/agc.h
 +++ b/src/ipa/soft/algorithms/agc.h
-@@ -96,9 +96,14 @@ private:
+@@ -96,11 +96,19 @@ private:
  	};
  	std::optional<LuxTuning> lux_;
  
 -	/* The DRC gains HDR starts and stops at */
 -	double hdrOn_ = 1.25;
 -	double hdrOff_ = 1.12;
+-	/* How many frames the DRC gain has been below hdrOff_ */
 +	/*
 +	 * The ratio HDR would need, from how bright the brightest pixels would
 +	 * be at the long exposure (filtered, as the DRC gain is), and when it
@@ -254,14 +334,128 @@ index 0484b88eb..9be0a45de 100644
 +	double hdrWanted_ = 1.0;
 +	double hdrOn_ = 2.0;
 +	double hdrOff_ = 1.6;
- 	/* How many frames the DRC gain has been below hdrOff_ */
++	/* How many frames the ratio wanted has been below hdrOff_, and the frames until HDR may restart */
  	unsigned int hdrBelow_ = 0;
++	unsigned int hdrCooldown_ = 0;
++	/* A ratio to hold HDR at in any scene, for testing; 0 for none */
++	double hdrForce_ = 0.0;
  
+ 	/* The longest exposure time (us) to lengthen the frame for, 0 for none */
+ 	double maxExposureUs_ = 0.0;
+diff --git a/src/ipa/soft/ipa_context.h b/src/ipa/soft/ipa_context.h
+index 678a8f817..499bddaaa 100644
+--- a/src/ipa/soft/ipa_context.h
++++ b/src/ipa/soft/ipa_context.h
+@@ -79,6 +79,17 @@ struct IPAActiveState {
+ 			bool longNext;
+ 			double ratio;
+ 			double reference;
++			/*
++			 * The exposures and gain the frames are asked for, set
++			 * by the loop and used by computeParams(), which asks
++			 * for one of them on every frame as it arrives, on
++			 * time, rather than when the statistics are done.
++			 */
++			struct {
++				int32_t shortExposure;
++				int32_t longExposure;
++				double gain;
++			} plan;
+ 		} hdr;
+ 		bool valid;
+ 		/*
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index 0b23a62aa..53067fb60 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -427,6 +427,30 @@ void IPASoftSimple::computeParams(const uint32_t frame, const ControlList &senso
+ 		algo->prepare(context_, frame, frameContext, params_);
+ 	params_->combinedMatrix = context_.activeState.combinedMatrix;
+ 
++	/*
++	 * HDR from frames of alternating exposure asks for the exposure of the
++	 * next frame here, once for each frame as it arrives, so that the
++	 * alternation holds: from processStats(), which waits for the
++	 * statistics, the replies bunch up after the frame the CPU computes
++	 * them on, and some frames get the exposure of the last.
++	 */
++	auto &hdr = context_.activeState.agc.hdr;
++	if (hdr.active) {
++		hdr.longNext = !hdr.longNext;
++		ControlList ctrls(sensorInfoMap_);
++		ctrls.set(V4L2_CID_EXPOSURE, hdr.longNext ? hdr.plan.longExposure
++							  : hdr.plan.shortExposure);
++		ctrls.set(V4L2_CID_ANALOGUE_GAIN,
++			  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(hdr.plan.gain)
++							  : hdr.plan.gain));
++		if (context_.configuration.agc.exposureCap)
++			ctrls.set(V4L2_CID_VBLANK, context_.activeState.agc.vblank);
++		LOG(IPASoft, Debug)
++			<< "HDR asks for the " << (hdr.longNext ? "long" : "short") << " exposure: "
++			<< ctrls.get(V4L2_CID_EXPOSURE).get<int32_t>() << " x " << hdr.plan.gain;
++		setSensorControls.emit(ctrls, ControlList(lensInfoMap_), ControlList(irisInfoMap_));
++	}
++
+ 	paramsComputed.emit(frame);
+ }
+ 
+@@ -455,13 +479,16 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 
+ 	ControlList ctrls(sensorInfoMap_);
+ 
+-	auto &againNew = frameContext.sensor.gain;
+-	ctrls.set(V4L2_CID_EXPOSURE, frameContext.sensor.exposure);
+-	ctrls.set(V4L2_CID_ANALOGUE_GAIN,
+-		  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
+-	/* The frame length, for exposures longer than the sensor's default frame allows */
+-	if (context_.configuration.agc.exposureCap)
+-		ctrls.set(V4L2_CID_VBLANK, context_.activeState.agc.vblank);
++	/* With HDR the exposures are asked for by computeParams() (the sensor's controls stay empty here) */
++	if (!context_.activeState.agc.hdr.active) {
++		auto &againNew = frameContext.sensor.gain;
++		ctrls.set(V4L2_CID_EXPOSURE, frameContext.sensor.exposure);
++		ctrls.set(V4L2_CID_ANALOGUE_GAIN,
++			  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
++		/* The frame length, for exposures longer than the sensor's default frame allows */
++		if (context_.configuration.agc.exposureCap)
++			ctrls.set(V4L2_CID_VBLANK, context_.activeState.agc.vblank);
++	}
+ 
+ 	ControlList lensCtrls(lensInfoMap_);
+ 	if (lensInfoMap_.count(V4L2_CID_FOCUS_ABSOLUTE))
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index 398e89d30..d661a29e9 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -737,7 +737,13 @@ void CamssCameraData::setSensorControls(const ControlList &sensorControls,
+ 					const ControlList &lensControls,
+ 					const ControlList &irisControls)
+ {
+-	delayedCtrls_->push(sensorControls);
++	/*
++	 * Nothing to push when the IPA sends none, as the lens's and the
++	 * iris's alone: a push is a frame's worth of controls, and an empty
++	 * one would move the exposures to the wrong frames.
++	 */
++	if (!sensorControls.empty())
++		delayedCtrls_->push(sensorControls);
+ 
+ 	/*
+ 	 * The focus lens and the iris are separate sub-devices, not subject to
+@@ -762,7 +768,7 @@ void CamssCameraData::setSensorControls(const ControlList &sensorControls,
+ 	 * but it also bypasses delayedCtrls_, creating AGC regulation issues.
+ 	 * Both problems should be fixed.
+ 	 */
+-	if (!csi_->supportsFrameStart()) {
++	if (!csi_->supportsFrameStart() && !sensorControls.empty()) {
+ 		ControlList ctrls(sensorControls);
+ 		csi_->sensor()->setControls(&ctrls);
+ 	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..c6887b840 100644
+index 046cb626f..3bb34669b 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -235,6 +235,33 @@ vec4 finish(vec3 rgb)
+@@ -235,8 +235,40 @@ vec4 finish(vec3 rgb)
   */
  uniform sampler2D sharpen_lut;
  uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
@@ -278,24 +472,89 @@ index 046cb626f..c6887b840 100644
 +#if defined(HDR)
 +uniform vec2 hdr_map;
 +
++/* The luma of a pixel (scaled by the ratio already), compressed */
++float hdr_compress(float y)
++{
++	float knee = hdr_map.y;
++	if (y <= knee)
++		return y;
++	float room = 1.0 - knee;
++	return knee + room * (1.0 - exp(-(y - knee) / room));
++}
++
 +vec3 hdr_tonemap(vec3 linear)
 +{
 +	vec3 p = linear * hdr_map.x;
 +	float y = dot(p, vec3(0.299, 0.587, 0.114));
-+	float knee = hdr_map.y;
-+	if (y > knee) {
-+		float room = 1.0 - knee;
-+		float compressed = knee + room * (1.0 - exp(-(y - knee) / room));
-+		p *= compressed / y;
-+	}
-+	return p;
++	return y > hdr_map.y ? p * (hdr_compress(y) / y) : p;
 +}
 +#endif
 +
  uniform sampler2D cell_tex;
- uniform vec2 cell_size;
+-uniform vec2 cell_size;
++varying vec4 tap_lo;		/* the coordinates of the taps at (-1.5, -1.5), (1.5, -1.5) */
++varying vec4 tap_hi;		/* and at (-1.5, 1.5), (1.5, 1.5) cells from the pixel's */
  uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
-@@ -276,6 +303,9 @@ void main(void)
+ uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
+ uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
+@@ -244,7 +276,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
+ 
+ void main(void)
+ {
+-	vec2 texel = 1.0 / cell_size;
+ 	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
+ 
+ 	vec3 level = max(c - blacklevel * 1020.0, 0.0);
+@@ -252,30 +283,40 @@ void main(void)
+ 		     vec3(1.0, 0.70710678, 1.0);
+ 	vec3 width = mix(width_lo, width_hi,
+ 			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
+-	vec3 inv = 1.0 / max(width * sigma, 0.001);
++	mediump vec3 inv = 1.0 / max(width * sigma, 0.001);
+ 
+ 	vec3 sum = c;
+ 	float weights = 1.0;
+-	vec3 ring = vec3(0.0);
+-	for (int dy = 0; dy < 2; dy++) {
+-		for (int dx = 0; dx < 2; dx++) {
+-			vec2 offset = vec2(dx == 0 ? -1.5 : 1.5, dy == 0 ? -1.5 : 1.5) * texel;
+-			vec3 n = texture2D(cell_tex, textureOut + offset).rgb * 1023.0;
+-			/*
+-			 * One weight for the tap, from the three channels'
+-			 * differences together (their mean square), so that
+-			 * the channels are not averaged by different amounts.
+-			 */
+-			vec3 d = (n - c) * inv;
+-			float w = exp(-(1.0 / 6.0) * dot(d, d));
+-			sum += w * n;
+-			weights += w;
+-			ring += n;
+-		}
+-	}
++	/*
++	 * The taps' coordinates come from the vertex shader: a fetch at
++	 * coordinates computed here waits for them, which costs more than
++	 * the fetch.
++	 */
++	vec3 n0 = texture2D(cell_tex, tap_lo.xy).rgb * 1023.0;
++	vec3 n1 = texture2D(cell_tex, tap_lo.zw).rgb * 1023.0;
++	vec3 n2 = texture2D(cell_tex, tap_hi.xy).rgb * 1023.0;
++	vec3 n3 = texture2D(cell_tex, tap_hi.zw).rgb * 1023.0;
++	vec3 ring = n0 + n1 + n2 + n3;
++
++	/*
++	 * One weight for each tap, from the three channels' differences
++	 * together (their mean square), so that the channels are not averaged
++	 * by different amounts.
++	 */
++	mediump vec3 d0 = (n0 - c) * inv;
++	mediump vec3 d1 = (n1 - c) * inv;
++	mediump vec3 d2 = (n2 - c) * inv;
++	mediump vec3 d3 = (n3 - c) * inv;
++	mediump vec4 w = exp(-(1.0 / 6.0) * vec4(dot(d0, d0), dot(d1, d1), dot(d2, d2), dot(d3, d3)));
++	sum += w.x * n0 + w.y * n1 + w.z * n2 + w.w * n3;
++	weights += w.x + w.y + w.z + w.w;
++	const float ring_norm = 0.25;
  
  	vec3 shading = lens_shading(textureOut);
  	vec3 lin = linear_stage(sum / weights / 1020.0, shading);
@@ -305,18 +564,23 @@ index 046cb626f..c6887b840 100644
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -286,6 +316,9 @@ void main(void)
+@@ -285,8 +326,12 @@ void main(void)
+ 		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
- 		vec3 linLow = linear_stage(ring * (0.25 / 1020.0), shading);
+-		vec3 linLow = linear_stage(ring * (0.25 / 1020.0), shading);
+-		float detail = tone_value(dot(lin, luma)) - tone_value(dot(linLow, luma));
++		vec3 linLow = linear_stage(ring * (ring_norm / 1020.0), shading);
++		float lumaLow = dot(linLow, luma);
 +#if defined(HDR)
-+		linLow = hdr_tonemap(linLow);
++		lumaLow = hdr_compress(lumaLow * hdr_map.x);
 +#endif
- 		float detail = tone_value(dot(lin, luma)) - tone_value(dot(linLow, luma));
++		float detail = tone_value(dot(lin, luma)) - tone_value(lumaLow);
  		float y = dot(rgb, luma);
  
+ 		vec4 levels = texture2D(sharpen_lut,
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..f977aa6bd 100644
+index 680b00bda..f94612714 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -329,6 +593,43 @@ index 680b00bda..f977aa6bd 100644
   * brought to the units of the short exposure (merge.x, its scale; 1 for the
   * short frames), and blended with the estimate the previous frames made, in
   * the units of their reference (merge.y brings it to this one's), by their
+@@ -58,9 +59,9 @@ uniform vec4 merge;
+ out vec4 fragColor;
+ 
+ /* A byte gathered, from 0 to 255 */
+-vec4 bytes(vec4 v)
++ivec4 bytes(vec4 v)
+ {
+-	return floor(v * 255.0 + 0.5);
++	return ivec4(v * 255.0 + 0.5);
+ }
+ 
+ void main(void)
+@@ -83,17 +84,17 @@ void main(void)
+ 	 * A gather at the corner shared by four texels returns them as
+ 	 * (x, y + 1), (x + 1, y + 1), (x + 1, y), (x, y) in its components.
+ 	 */
+-	vec4 hi = bytes(textureGather(tex_y, vec2(first + 1.0, p.y + 1.0) / raw_size, 0));
+-	vec4 lo = bytes(textureGather(tex_y, vec2(low + 1.0, p.y + 1.0) / raw_size, 0));
++	ivec4 hi = bytes(textureGather(tex_y, vec2(first + 1.0, p.y + 1.0) / raw_size, 0));
++	ivec4 lo = bytes(textureGather(tex_y, vec2(low + 1.0, p.y + 1.0) / raw_size, 0));
+ 
+ 	/* The low bits of the cell's pixels in the top row, then the bottom row */
+-	float shift = exp2(2.0 * i);
+-	vec2 top_low = vec2(mod(floor(lo.w / shift), 4.0), mod(floor(lo.w / (shift * 4.0)), 4.0));
+-	vec2 bottom_low = vec2(mod(floor(lo.x / shift), 4.0), mod(floor(lo.x / (shift * 4.0)), 4.0));
++	int shift = 2 * int(i);
++	ivec2 top_low = ivec2(lo.w >> shift, lo.w >> (shift + 2)) & 3;
++	ivec2 bottom_low = ivec2(lo.x >> shift, lo.x >> (shift + 2)) & 3;
+ 
+ 	/* The pixels in the order (0,0), (1,0), (0,1), (1,1) */
+-	vec4 v = vec4(hi.w * 4.0 + top_low.x, hi.z * 4.0 + top_low.y,
+-		      hi.x * 4.0 + bottom_low.x, hi.y * 4.0 + bottom_low.y);
++	vec4 v = vec4(ivec4(hi.w * 4 + top_low.x, hi.z * 4 + top_low.y,
++			    hi.x * 4 + bottom_low.x, hi.y * 4 + bottom_low.y));
+ 
+ 	vec2 red = tex_bayer_first_red;
+ 	vec4 is_red = vec4((1.0 - red.x) * (1.0 - red.y), red.x * (1.0 - red.y),
 @@ -106,6 +107,7 @@ void main(void)
  
  	vec3 cell = vec3(r, g * 0.5, b);
@@ -337,7 +638,27 @@ index 680b00bda..f977aa6bd 100644
  	if (merge.z > 0.0) {
  		vec3 cur = black + (cell - black) * merge.x;
  		if (merge.w > 0.0) {
-@@ -143,7 +145,9 @@ void main(void)
+@@ -132,18 +134,23 @@ void main(void)
+ 					half_green * 0.6;
+ 
+ 			/* One gate for the three channels, from the one that differs most */
+-			vec3 d = abs(cur - prev) / sqrt(var_cur + var_prev);
+-			float m = max(max(d.x, d.y), d.z) / max(temporal.y, 0.001);
++			var_cur = max(var_cur, 1e-3);
++			var_prev = max(var_prev, 1e-3);
++			vec3 diff = cur - prev;
++			vec3 d2 = diff * diff / (var_cur + var_prev);
++			float m2 = max(max(d2.x, d2.y), d2.z) / max(temporal.y * temporal.y, 1e-6);
+ 			/* Where the cell fades out its difference from the estimate is no sign of motion */
+-			float gate = mix(1.0, exp(-0.5 * m * m), fresh);
++			float gate = mix(1.0, exp(-0.5 * m2), fresh);
+ 
+-			vec3 w_cur = fresh / max(var_cur, 1e-3);
+-			vec3 w_prev = gate / max(var_prev, 1e-3);
+-			cell = (w_cur * cur + w_prev * prev) / (w_cur + w_prev);
++			/* The inverse-variance mean, as the estimate plus a share of the difference */
++			vec3 share = fresh * var_prev;
++			cell = prev + diff * share / max(share + gate * var_cur, 1e-6);
  		} else {
  			cell = cur;
  		}
@@ -348,8 +669,36 @@ index 680b00bda..f977aa6bd 100644
  		vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
  		/* The exposure may have changed since: the previous cell in this frame's units */
  		prev = black + (prev - black) * merge.y;
+diff --git a/src/libcamera/shaders/identity.vert b/src/libcamera/shaders/identity.vert
+index 907e8741f..532b92614 100644
+--- a/src/libcamera/shaders/identity.vert
++++ b/src/libcamera/shaders/identity.vert
+@@ -12,8 +12,23 @@ varying vec2 textureOut;
+ uniform mat4 proj_matrix;
+ uniform float stride_factor;
+ 
++#if defined(CELL_PATH)
++/*
++ * The cells path's taps, 1.5 cells from the pixel on the diagonals, whose
++ * coordinates the fragment shader would otherwise compute, and wait for.
++ */
++uniform vec2 cell_size;
++varying vec4 tap_lo;
++varying vec4 tap_hi;
++#endif
++
+ void main(void)
+ {
+ 	gl_Position = proj_matrix * vertexIn;
+ 	textureOut = vec2(textureIn.x * stride_factor, textureIn.y);
++#if defined(CELL_PATH)
++	vec2 reach = 1.5 / cell_size;
++	tap_lo = textureOut.xyxy + vec4(-reach.x, -reach.y, reach.x, -reach.y);
++	tap_hi = textureOut.xyxy + vec4(-reach.x, reach.y, reach.x, reach.y);
++#endif
+ }
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..48c3dfc70 100644
+index a3dfae76e..786caf2a4 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -137,6 +137,7 @@ int DebayerEGL::getShaderVariableLocations(void)
@@ -360,7 +709,15 @@ index a3dfae76e..48c3dfc70 100644
  
  	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
  	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
-@@ -360,62 +361,82 @@ bool DebayerEGL::cellsSupported()
+@@ -198,6 +199,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+ 	for (const std::string &define : lscDefines)
+ 		egl_.pushEnv(shaderEnv, define.c_str());
+ 
++
+ 	/*
+ 	 * Tell shaders how to re-order output taking account of how the pixels
+ 	 * are actually stored by EGL.
+@@ -360,62 +362,82 @@ bool DebayerEGL::cellsSupported()
  	       (major > 3 || (major == 3 && minor >= 2));
  }
  
@@ -483,7 +840,7 @@ index a3dfae76e..48c3dfc70 100644
  
  	cellsSize_ = Size(width_ / 2, height_ / 2);
  
-@@ -426,18 +447,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+@@ -426,18 +448,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
  }
  
  /*
@@ -506,15 +863,15 @@ index a3dfae76e..48c3dfc70 100644
 -	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, cellsSize_.width, cellsSize_.height, 0,
 -		     GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, nullptr);
 +	if (half)
-+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, cellsSize_.width, cellsSize_.height, 0,
-+			     GL_RGBA, GL_HALF_FLOAT, nullptr);
++		glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, cellsSize_.width, cellsSize_.height, 0,
++			     GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, nullptr);
 +	else
 +		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, cellsSize_.width, cellsSize_.height, 0,
 +			     GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, nullptr);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-@@ -465,9 +492,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -465,9 +493,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  
  	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
  	static const uint32_t unitIds[2] = { 4, 6 };
@@ -535,7 +892,7 @@ index a3dfae76e..48c3dfc70 100644
  			if (!cells_[i]) {
  				LOG(Debayer, Error) << "Render targets of the cells fail";
  				return -ENODEV;
-@@ -487,22 +524,23 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -487,22 +525,23 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  		return -ENODEV;
  	egl_.activateBindTexture(*cells_[previous]);
  
@@ -569,16 +926,85 @@ index a3dfae76e..48c3dfc70 100644
  		    params.blackLevel[2] * 1020.0f);
  
  	/*
-@@ -513,7 +551,7 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -511,21 +550,73 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 	 * frame's reference, which the exposure's changes moved.
+ 	 */
  	const DebayerParams::Hdr &h = params.hdr;
- 	const float scale = h.product > 0.0f ? h.reference / h.product : 1.0f;
- 	const float prevScale = cellsHistory_ && prevReference_ > 0.0f ? h.reference / prevReference_ : 1.0f;
+-	const float scale = h.product > 0.0f ? h.reference / h.product : 1.0f;
+-	const float prevScale = cellsHistory_ && prevReference_ > 0.0f ? h.reference / prevReference_ : 1.0f;
 -	glUniform4f(binUniformMerge_, scale, prevScale, h.enabled ? 1.0f : 0.0f,
++	/*
++	 * With HDR, the two frames of the last pair (this and the previous, a
++	 * short and a long exposure) are what the units and the tone mapping
++	 * follow, from what the sensor really used for them: the short one's
++	 * exposure times gain is the reference, and the ratio between them is
++	 * the tone mapping's. The IPA's ratio is what the pair is checked
++	 * against, as its changes and the sensor's delays make the frames' real
++	 * exposures differ from what it asked for.
++	 */
++	float reference = h.product;
++	hdrToneRatio_ = 1.0f;
++	if (h.enabled && cellsHistory_ && prevProduct_ > 0.0f && h.product > 0.0f) {
++		const float lo = std::min(h.product, prevProduct_);
++		const float pair = std::max(h.product, prevProduct_) / lo;
++		if (pair > 1.0f && std::abs(pair / h.ratio - 1.0f) < 0.35f) {
++			reference = lo;
++			hdrToneRatio_ = pair;
++		}
++	}
++
++	if (h.enabled)
++		LOG(Debayer, Debug) << "HDR frame product " << h.product << ", previous " << prevProduct_
++				    << ", IPA ratio " << h.ratio << ", pair ratio " << hdrToneRatio_
++				    << ", history " << cellsHistory_;
++
++	const float scale = h.product > 0.0f ? reference / h.product : 1.0f;
++	const float prevScale = cellsHistory_ && prevReference_ > 0.0f ? reference / prevReference_ : 1.0f;
 +	glUniform4f(bin.merge, scale, prevScale, h.enabled ? 1.0f : 0.0f,
  		    cellsHistory_ ? 1.0f : 0.0f);
  
  	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
-@@ -540,11 +578,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
++
++	/*
++	 * Only the cells the output shows are binned. The main pass draws the
++	 * input's viewport (the whole input) into the output's framebuffer, from
++	 * its corner, scaled to cover the output (the projection, as in
++	 * setShaderVariableValues()), so that it shows the texture's part up to
++	 * this fraction of each axis, which a different aspect ratio crops. A few
++	 * cells more are kept for the filters' taps.
++	 */
++	int binWidth = cellsSize_.width;
++	int binHeight = cellsSize_.height;
++	if (!quadBayer_ && nativeOutputSize_.width && nativeOutputSize_.height) {
++		const float scale = std::max(static_cast<float>(outputSize_.width) / nativeOutputSize_.width,
++					     static_cast<float>(outputSize_.height) / nativeOutputSize_.height);
++		const float fx = std::min(1.0f, static_cast<float>(outputSize_.width) / width_) / scale;
++		const float fy = std::min(1.0f, static_cast<float>(outputSize_.height) / height_) / scale;
++		constexpr int margin = 4;
++		binWidth = std::min<int>(cellsSize_.width, std::ceil(fx * cellsSize_.width) + margin);
++		binHeight = std::min<int>(cellsSize_.height, std::ceil(fy * cellsSize_.height) + margin);
++	}
++	/* The target's old contents are not needed: no copy of them into the tile memory */
++	static const GLenum discard[1] = { GL_COLOR_ATTACHMENT0 };
++	glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, discard);
++	glEnable(GL_SCISSOR_TEST);
++	glScissor(0, 0, binWidth, binHeight);
+ 	timerBegin(TimerBin);
+ 	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
+ 	timerEnd(TimerBin);
++	glDisable(GL_SCISSOR_TEST);
+ 
+ 	/* The main pass's program samples the cells just written */
+ 	egl_.activateBindTexture(*cells_[next]);
+ 	cellsCurrent_ = next;
+ 	cellsHistory_ = true;
+-	prevReference_ = h.reference;
++	prevReference_ = reference;
++	prevProduct_ = h.product;
+ 
+ 	GLenum err = glGetError();
+ 	if (err != GL_NO_ERROR) {
+@@ -540,11 +631,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
   * Make the main program the one that samples single pixels, or the one that
   * samples the cells, and read the locations of its variables if it changed.
   */
@@ -595,18 +1021,20 @@ index a3dfae76e..48c3dfc70 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -868,6 +908,10 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -867,7 +960,11 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
- 		glUniform4f(sharpenUniform_, s.scale, s.clampLow, s.clampHigh, s.enabled ? 1.0f : 0.0f);
+-		glUniform4f(sharpenUniform_, s.scale, s.clampLow, s.clampHigh, s.enabled ? 1.0f : 0.0f);
++		glUniform4f(sharpenUniform_, s.scale, s.clampLow, s.clampHigh, (s.enabled && !params.hdr.enabled) ? 1.0f : 0.0f);
 +
 +		/* The HDR tone mapping: the ratio, and where the compression of the highlights starts */
 +		static constexpr float kHdrKnee = 0.55f;
-+		glUniform2f(hdrMapUniform_, params.hdr.enabled ? params.hdr.ratio : 1.0f, kHdrKnee);
++		glUniform2f(hdrMapUniform_, params.hdr.enabled ? hdrToneRatio_ : 1.0f, kHdrKnee);
  	}
  
  	return;
-@@ -988,7 +1032,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1085,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -615,7 +1043,7 @@ index a3dfae76e..48c3dfc70 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1217,11 +1261,12 @@ void DebayerEGL::stop()
+@@ -1217,11 +1314,12 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
@@ -631,7 +1059,7 @@ index a3dfae76e..48c3dfc70 100644
  	cellsActive_ = false;
  }
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 89ccf9129..e9cca9743 100644
+index 89ccf9129..8b16ef91c 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -145,9 +145,9 @@ private:
@@ -646,7 +1074,7 @@ index 89ccf9129..e9cca9743 100644
  
  	/* Whether the context has what the cells path needs, and the frame fits */
  	bool cellsCapable_ = false;
-@@ -155,18 +155,16 @@ private:
+@@ -155,20 +155,23 @@ private:
  	/* Whether the current program is the main one of the cells path */
  	bool cellsActive_ = false;
  	GLuint singleProgramId_ = 0;
@@ -663,6 +1091,7 @@ index 89ccf9129..e9cca9743 100644
 -	GLint binUniformTemporal_;
 -	GLint binUniformBlack_;
 -	GLint binUniformMerge_;
+-	/* The reference (see DebayerParams::Hdr) of the frame the history holds */
 +	GLuint cellsMainHdrProgramId_ = 0;
 +	/* The binning pass, and the one that merges frames for HDR, with their variables */
 +	struct BinProgram {
@@ -671,10 +1100,17 @@ index 89ccf9129..e9cca9743 100644
 +	};
 +	int buildBinProgram(BinProgram &bin, bool hdr);
 +	BinProgram bin_[2];
- 	/* The reference (see DebayerParams::Hdr) of the frame the history holds */
++	/*
++	 * The reference (see DebayerParams::Hdr) and the exposure times gain of
++	 * the frame the history holds, and the ratio of the tone mapping now
++	 */
  	float prevReference_ = 0.0f;
++	float prevProduct_ = 0.0f;
++	float hdrToneRatio_ = 1.0f;
  	/*
-@@ -178,6 +176,8 @@ private:
+ 	 * The binned cells, on texture units 4 and 6 in turn: each frame's
+ 	 * pass writes the one the last frame's did not, which it also reads for
+@@ -178,6 +181,8 @@ private:
  	std::array<std::unique_ptr<eGLImage>, 2> cells_;
  	unsigned int cellsCurrent_ = 0;
  	bool cellsHistory_ = false;
@@ -683,7 +1119,7 @@ index 89ccf9129..e9cca9743 100644
  	Size cellsSize_;
  
  	/*
-@@ -236,6 +236,7 @@ private:
+@@ -236,6 +241,7 @@ private:
  	std::array<uint8_t, DebayerParams::kSharpenLevels * 4> sharpenLutData_;
  	GLint sharpenLutUniform_;
  	GLint sharpenUniform_;
