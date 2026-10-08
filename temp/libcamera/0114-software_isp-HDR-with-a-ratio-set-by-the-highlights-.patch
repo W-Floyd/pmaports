@@ -1,4 +1,4 @@
-From cdb9140dd40935f2dfd969ab0372204b032dfed8 Mon Sep 17 00:00:00 2001
+From a22cd991e9e2519d7dea366cac0ad42a2763f33d Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -21,19 +21,19 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  .../internal/software_isp/swisp_stats.h       |  10 +
  .../internal/software_isp/swstats_cpu.h       |   2 +-
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
- src/ipa/soft/algorithms/agc.cpp               | 192 ++++++++---
- src/ipa/soft/algorithms/agc.h                 |  16 +-
- src/ipa/soft/ipa_context.h                    |  20 ++
+ src/ipa/soft/algorithms/agc.cpp               | 227 ++++++++++--
+ src/ipa/soft/algorithms/agc.h                 |  18 +-
+ src/ipa/soft/ipa_context.h                    |  20 +
  src/ipa/soft/soft_simple.cpp                  | 103 +++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 129 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  91 +++--
- src/libcamera/shaders/bayer_cells_ratio.frag  |  75 +++++
+ src/libcamera/shaders/bayer_cells_ratio.frag  |  75 ++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
- src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 16 files changed, 844 insertions(+), 178 deletions(-)
+ src/libcamera/software_isp/debayer_egl.cpp    | 342 ++++++++++++++----
+ src/libcamera/software_isp/debayer_egl.h      |  50 ++-
+ 16 files changed, 926 insertions(+), 179 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -105,7 +105,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..b6c0d0042 100644
+index ae99e98a8..cc77a4dc3 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -99,15 +99,28 @@ static constexpr double kMeanAcquire = 0.6;
@@ -282,7 +282,7 @@ index ae99e98a8..b6c0d0042 100644
  		exposureLong = std::clamp<int32_t>(std::lround(product / cfg.againMin),
  						   cfg.exposureMin, limit);
  		gainLong = product / exposureLong;
-@@ -887,41 +964,68 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
+@@ -887,44 +964,71 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
  		return gainLong >= cfg.againMin && gainLong <= cfg.againMax &&
  		       exposureLong / ratio >= cfg.exposureMin;
  	};
@@ -366,16 +366,26 @@ index ae99e98a8..b6c0d0042 100644
 +	(void)frameContext;
  }
  
- void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
-@@ -934,6 +1038,7 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
+-void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
++void Agc::prepare(IPAContext &context, const uint32_t frame,
+ 		  IPAFrameContext &frameContext, DebayerParams *params)
+ {
+ 	const auto &hdr = context.activeState.agc.hdr;
+@@ -934,6 +1038,13 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
  	params->hdr.product = product;
  	/* Without HDR a frame is its own reference: cells in the units they were taken in */
  	params->hdr.reference = params->hdr.enabled ? hdr.reference : product;
 +	params->hdr.ratio = params->hdr.enabled ? hdr.ratio : 1.0;
++
++	if (hdr.active)
++		LOG(IPASoftExposure, Debug)
++			<< "HDR frame " << frame << ": " << (params->hdr.enabled ? "on" : "OFF")
++			<< ", known " << frameContext.sensor.known << ", product " << product
++			<< ", reference " << hdr.reference << ", ratio " << hdr.ratio;
  }
  
  /*
-@@ -959,7 +1064,7 @@ void Agc::applyManual(IPAContext &context, IPAFrameContext &frameContext) const
+@@ -959,7 +1070,7 @@ void Agc::applyManual(IPAContext &context, IPAFrameContext &frameContext) const
  }
  
  void Agc::process(IPAContext &context,
@@ -384,7 +394,7 @@ index ae99e98a8..b6c0d0042 100644
  		  IPAFrameContext &frameContext,
  		  const SwIspStats *stats,
  		  ControlList &metadata)
-@@ -988,6 +1093,10 @@ void Agc::process(IPAContext &context,
+@@ -988,6 +1099,10 @@ void Agc::process(IPAContext &context,
  		context.activeState.agc.darkBoost = 1.0;
  		drcDecided_ = 1.0;
  		darkDecided_ = 1.0;
@@ -395,7 +405,7 @@ index ae99e98a8..b6c0d0042 100644
  	}
  
  	/* The DRC gain the tone curve must use from now on */
-@@ -1005,8 +1114,15 @@ void Agc::process(IPAContext &context,
+@@ -1005,8 +1120,15 @@ void Agc::process(IPAContext &context,
  			       frameContext.sensor.exposure * frameContext.sensor.gain >
  				       context.activeState.agc.exposure * context.activeState.agc.again *
  					       std::sqrt(hdrState.ratio);
@@ -412,11 +422,45 @@ index ae99e98a8..b6c0d0042 100644
  
  	if (!stats->valid || longFrame) {
  		/*
+@@ -1071,6 +1193,33 @@ void Agc::process(IPAContext &context,
+ 	}
+ 	double meanY = yCount ? static_cast<double>(ySum) / yCount : 0.0;
+ 
++	/*
++	 * With HDR, the frame the statistics are of may not be the one it was
++	 * taken for (the exposure asked for can miss its frame, and the frame is
++	 * then a long one read as a short one), which the mean shows as far
++	 * from what the last one's and the exposures predict. The loop would
++	 * follow it, and the picture swing for several frames: such a frame is
++	 * skipped once, and a scene that really changed is followed by the next.
++	 */
++	if (hdrState.active && context.activeState.agc.lastProduct > 0.0) {
++		const double blackNow = context.activeState.blc.level;
++		const double meanNow = std::max((meanY - blackNow) / (kYMax - blackNow), 1e-3);
++		const double predicted = context.activeState.agc.lastMean *
++					 (frameContext.sensor.exposure * frameContext.sensor.gain) /
++					 context.activeState.agc.lastProduct;
++		const double off = meanNow / predicted;
++		if ((off > 2.5 || off < 0.4) && !outlierSkipped_) {
++			LOG(IPASoftExposure, Debug)
++				<< "Statistics skipped: the mean is " << off << " times the predicted";
++			outlierSkipped_ = true;
++			frameContext.sensor.exposure = context.activeState.agc.exposure;
++			frameContext.sensor.gain = context.activeState.agc.again;
++			applyManual(context, frameContext);
++			return;
++		}
++	}
++	outlierSkipped_ = false;
++
+ 	selectTargets(context.activeState.agc.luxIndex);
+ 
+ 	double target = 0.0;
 diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
-index 0484b88eb..69c0b9aa4 100644
+index 0484b88eb..1d3251e1e 100644
 --- a/src/ipa/soft/algorithms/agc.h
 +++ b/src/ipa/soft/algorithms/agc.h
-@@ -96,11 +96,19 @@ private:
+@@ -96,11 +96,21 @@ private:
  	};
  	std::optional<LuxTuning> lux_;
  
@@ -434,6 +478,8 @@ index 0484b88eb..69c0b9aa4 100644
 +	double hdrOff_ = 1.6;
 +	/* How many frames the ratio wanted has been below hdrOff_, and the frames until HDR may restart */
  	unsigned int hdrBelow_ = 0;
++	/* The statistics of the last frame were skipped as far from what was predicted */
++	bool outlierSkipped_ = false;
 +	unsigned int hdrCooldown_ = 0;
 +	/* A ratio to hold HDR at in any scene, for testing; 0 for none */
 +	double hdrForce_ = 0.0;
@@ -663,10 +709,10 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..d60ed2cf7 100644
+index 046cb626f..9886de247 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -235,8 +235,62 @@ vec4 finish(vec3 rgb)
+@@ -235,8 +235,75 @@ vec4 finish(vec3 rgb)
   */
  uniform sampler2D sharpen_lut;
  uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
@@ -705,21 +751,34 @@ index 046cb626f..d60ed2cf7 100644
 +	return knee + room * min(log(1.0 + hdr_map.z * u) / hdr_map.z, 1.0);
 +}
 +
-+vec3 hdr_tonemap(vec3 linear)
++/*
++ * A local tone map: the brightness of the pixel's surroundings (base, the
++ * cells blurred by the texture's coarse level, through the same colour
++ * stages) is what is compressed, and the pixel keeps its own detail on top of
++ * it, its ratio to the base. A bright window then is brought down as a whole,
++ * and its trees keep their contrast, where compressing each pixel by its own
++ * brightness flattens them to the shoulder's top.
++ */
++uniform sampler2D cell_base;
++
++vec3 hdr_tonemap(vec3 linear, vec3 base)
 +{
 +	vec3 p = linear * hdr_map.x;
-+	float y = dot(p, vec3(0.299, 0.587, 0.114));
-+	if (y <= hdr_map.y)
++	float yb = max(dot(base * hdr_map.x, vec3(0.299, 0.587, 0.114)), 1e-4);
++	if (yb <= hdr_map.y)
 +		return p;
 +
++	float compressed = hdr_compress(yb);
++	vec3 q = p * (compressed / yb);
++
 +	/*
-+	 * What is brighter than the long exposure could hold (y over 1) has no
-+	 * colour to trust: the white balance of the room tints a bright lamp, or
-+	 * the sky, whose light is another colour. It fades to white as it passes
-+	 * that, as the highlights of film and of the sensors of phones do.
++	 * What is a lot brighter than the long exposure could hold has no colour
++	 * to trust: the white balance of the room tints a bright lamp, or the sky,
++	 * whose light is another colour. Its surroundings fade it to white, a
++	 * long way past the long exposure's range, so that what is not near it
++	 * keeps its colour.
 +	 */
-+	float compressed = hdr_compress(y);
-+	return mix(p * (compressed / y), vec3(compressed), smoothstep(0.9, 2.0, y));
++	return mix(q, vec3(dot(q, vec3(0.299, 0.587, 0.114))), smoothstep(2.5, 8.0, yb));
 +}
 +#endif
 +
@@ -730,7 +789,7 @@ index 046cb626f..d60ed2cf7 100644
  uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
  uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
  uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
-@@ -244,7 +298,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
+@@ -244,7 +311,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
  
  void main(void)
  {
@@ -738,7 +797,7 @@ index 046cb626f..d60ed2cf7 100644
  	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
  
  	vec3 level = max(c - blacklevel * 1020.0, 0.0);
-@@ -252,30 +305,41 @@ void main(void)
+@@ -252,30 +318,43 @@ void main(void)
  		     vec3(1.0, 0.70710678, 1.0);
  	vec3 width = mix(width_lo, width_hi,
  			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
@@ -794,12 +853,14 @@ index 046cb626f..d60ed2cf7 100644
 +	vec3 average = sum / weights;
 +	vec3 lin = linear_stage(average / 1020.0, shading);
 +#if defined(HDR)
-+	lin = hdr_tonemap(lin);
++	/* The surroundings, from a coarse level of the cells (the bias is of the level the pixel's derivatives choose) */
++	vec3 base = linear_stage(texture2D(cell_base, textureOut, 5.0).rgb * (1023.0 / 1020.0), shading);
++	lin = hdr_tonemap(lin, base);
 +#endif
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -285,8 +349,12 @@ void main(void)
+@@ -285,8 +364,12 @@ void main(void)
  		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
@@ -1089,10 +1150,18 @@ index 8e18178b7..5442bb437 100644
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..60deb70c7 100644
+index a3dfae76e..2dfbf174e 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
-@@ -137,6 +137,7 @@ int DebayerEGL::getShaderVariableLocations(void)
+@@ -130,6 +130,7 @@ int DebayerEGL::getShaderVariableLocations(void)
+ 	chromaUniform_ = glGetUniformLocation(programId_, "chroma");
+ 	chromaShearUniform_ = glGetUniformLocation(programId_, "chroma_shear");
+ 	cellTexUniform_ = glGetUniformLocation(programId_, "cell_tex");
++	cellBaseUniform_ = glGetUniformLocation(programId_, "cell_base");
+ 	cellSizeUniform_ = glGetUniformLocation(programId_, "cell_size");
+ 	noiseUniform_ = glGetUniformLocation(programId_, "noise");
+ 	widthLowUniform_ = glGetUniformLocation(programId_, "width_lo");
+@@ -137,6 +138,7 @@ int DebayerEGL::getShaderVariableLocations(void)
  	anchorsUniform_ = glGetUniformLocation(programId_, "anchors");
  	sharpenLutUniform_ = glGetUniformLocation(programId_, "sharpen_lut");
  	sharpenUniform_ = glGetUniformLocation(programId_, "sharpen");
@@ -1100,7 +1169,7 @@ index a3dfae76e..60deb70c7 100644
  
  	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
  	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
-@@ -198,6 +199,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -198,6 +200,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  	for (const std::string &define : lscDefines)
  		egl_.pushEnv(shaderEnv, define.c_str());
  
@@ -1108,7 +1177,7 @@ index a3dfae76e..60deb70c7 100644
  	/*
  	 * Tell shaders how to re-order output taking account of how the pixels
  	 * are actually stored by EGL.
-@@ -360,62 +362,117 @@ bool DebayerEGL::cellsSupported()
+@@ -360,62 +363,117 @@ bool DebayerEGL::cellsSupported()
  	       (major > 3 || (major == 3 && minor >= 2));
  }
  
@@ -1263,7 +1332,7 @@ index a3dfae76e..60deb70c7 100644
  
  	cellsSize_ = Size(width_ / 2, height_ / 2);
  
-@@ -426,18 +483,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+@@ -426,18 +484,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
  }
  
  /*
@@ -1294,7 +1363,7 @@ index a3dfae76e..60deb70c7 100644
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-@@ -465,9 +528,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -465,9 +529,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  
  	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
  	static const uint32_t unitIds[2] = { 4, 6 };
@@ -1315,7 +1384,7 @@ index a3dfae76e..60deb70c7 100644
  			if (!cells_[i]) {
  				LOG(Debayer, Error) << "Render targets of the cells fail";
  				return -ENODEV;
-@@ -483,26 +556,93 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -483,26 +557,94 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	const DebayerParams::Denoise &d = params.denoise;
  	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
  
@@ -1334,7 +1403,8 @@ index a3dfae76e..60deb70c7 100644
 +					   static_cast<float>(outputSize_.height) / nativeOutputSize_.height);
 +		const float fx = std::min(1.0f, static_cast<float>(outputSize_.width) / width_) / fit;
 +		const float fy = std::min(1.0f, static_cast<float>(outputSize_.height) / height_) / fit;
-+		constexpr int margin = 4;
++		/* More with HDR, whose local tone map reads coarse levels of the cells */
++		const int margin = params.hdr.enabled ? 40 : 4;
 +		binWidth = std::min<int>(cellsSize_.width, std::ceil(fx * cellsSize_.width) + margin);
 +		binHeight = std::min<int>(cellsSize_.height, std::ceil(fy * cellsSize_.height) + margin);
 +	}
@@ -1419,7 +1489,7 @@ index a3dfae76e..60deb70c7 100644
  		    params.blackLevel[2] * 1020.0f);
  
  	/*
-@@ -511,21 +651,46 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -511,21 +653,67 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	 * frame's reference, which the exposure's changes moved.
  	 */
  	const DebayerParams::Hdr &h = params.hdr;
@@ -1462,6 +1532,27 @@ index a3dfae76e..60deb70c7 100644
  
  	/* The main pass's program samples the cells just written */
  	egl_.activateBindTexture(*cells_[next]);
++
++	/*
++	 * With HDR, the local tone map reads a coarse level of them, as the
++	 * brightness of the surroundings: the texture on a unit of its own, with
++	 * a sampler that filters between its levels (the other units' samplers,
++	 * of the texture's own parameters, read the first level only).
++	 */
++	if (params.hdr.enabled) {
++		if (!baseSampler_) {
++			glGenSamplers(1, &baseSampler_);
++			glSamplerParameteri(baseSampler_, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
++			glSamplerParameteri(baseSampler_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++			glSamplerParameteri(baseSampler_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++			glSamplerParameteri(baseSampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++		}
++		glActiveTexture(GL_TEXTURE8);
++		glBindTexture(GL_TEXTURE_2D, cells_[next]->texture_);
++		glGenerateMipmap(GL_TEXTURE_2D);
++		glBindSampler(8, baseSampler_);
++	}
++
  	cellsCurrent_ = next;
  	cellsHistory_ = true;
 -	prevReference_ = h.reference;
@@ -1470,7 +1561,7 @@ index a3dfae76e..60deb70c7 100644
  
  	GLenum err = glGetError();
  	if (err != GL_NO_ERROR) {
-@@ -540,11 +705,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -540,11 +728,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
   * Make the main program the one that samples single pixels, or the one that
   * samples the cells, and read the locations of its variables if it changed.
   */
@@ -1487,7 +1578,15 @@ index a3dfae76e..60deb70c7 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -867,7 +1034,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -833,6 +1023,7 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 		const DebayerParams::Denoise &d = params.denoise;
+ 
+ 		glUniform1i(cellTexUniform_, cells_[cellsCurrent_]->texture_unit_uniform_id_);
++		glUniform1i(cellBaseUniform_, 8);
+ 		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
+ 		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
+ 		/* Without noise reduction (only sharpening), the taps carry no weight */
+@@ -867,7 +1058,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
@@ -1509,7 +1608,7 @@ index a3dfae76e..60deb70c7 100644
  	}
  
  	return;
-@@ -988,7 +1168,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1192,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -1518,16 +1617,16 @@ index a3dfae76e..60deb70c7 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1146,7 +1326,7 @@ int DebayerEGL::start()
+@@ -1146,7 +1350,7 @@ int DebayerEGL::start()
  
  	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
  
 -	cellsCapable_ = maxTextureImageUnits >= 7 && cellsSupported();
-+	cellsCapable_ = maxTextureImageUnits >= 8 && cellsSupported();
++	cellsCapable_ = maxTextureImageUnits >= 9 && cellsSupported();
  
  	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
  	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-@@ -1210,6 +1390,7 @@ void DebayerEGL::stop()
+@@ -1210,6 +1414,7 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
@@ -1535,7 +1634,7 @@ index a3dfae76e..60deb70c7 100644
  	for (auto &cells : cells_)
  		cells.reset();
  	cellsCurrent_ = 0;
-@@ -1217,11 +1398,12 @@ void DebayerEGL::stop()
+@@ -1217,11 +1422,16 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
@@ -1547,11 +1646,15 @@ index a3dfae76e..60deb70c7 100644
 -	singleProgramId_ = cellsMainProgramId_ = binProgramId_ = 0;
 +	singleProgramId_ = cellsMainProgramId_ = cellsMainHdrProgramId_ = 0;
 +	bin_[0].id = bin_[1].id = ratio_.id = 0;
++	if (baseSampler_) {
++		glDeleteSamplers(1, &baseSampler_);
++		baseSampler_ = 0;
++	}
  	programId_ = 0;
  	cellsActive_ = false;
  }
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 89ccf9129..56290fcea 100644
+index 89ccf9129..68f79560d 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -145,9 +145,9 @@ private:
@@ -1624,7 +1727,7 @@ index 89ccf9129..56290fcea 100644
  	Size cellsSize_;
  
  	/*
-@@ -236,6 +254,7 @@ private:
+@@ -236,9 +254,13 @@ private:
  	std::array<uint8_t, DebayerParams::kSharpenLevels * 4> sharpenLutData_;
  	GLint sharpenLutUniform_;
  	GLint sharpenUniform_;
@@ -1632,6 +1735,12 @@ index 89ccf9129..56290fcea 100644
  
  	/* The main program's variables for the cells */
  	GLint cellTexUniform_;
++	GLint cellBaseUniform_;
++	/* The sampler of the cells' coarse levels (unit 8), for the local tone map of HDR */
++	GLuint baseSampler_ = 0;
+ 	GLint cellSizeUniform_;
+ 	GLint noiseUniform_;
+ 	GLint widthLowUniform_;
 -- 
 2.55.0
 
