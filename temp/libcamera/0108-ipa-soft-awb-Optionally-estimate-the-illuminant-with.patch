@@ -1,4 +1,4 @@
-From a90923a72f95b8e4125af5973c15484ad8afc467 Mon Sep 17 00:00:00 2001
+From c3f5e7a8d7cc73e9612374524ffa79d3003de969 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 16:48:08 +0000
 Subject: [PATCH] ipa: soft: awb: Optionally estimate the illuminant with an
@@ -16,13 +16,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  meson_options.txt                     |   5 +
  src/ipa/soft/algorithms/awb.cpp       |  39 +++-
  src/ipa/soft/algorithms/awb.h         |   5 +
- src/ipa/soft/algorithms/awb_model.cpp | 265 ++++++++++++++++++++++++++
+ src/ipa/soft/algorithms/awb_model.cpp | 274 ++++++++++++++++++++++++++
  src/ipa/soft/algorithms/awb_model.h   |  74 +++++++
  src/ipa/soft/algorithms/meson.build   |   1 +
  src/ipa/soft/ipa_context.h            |   3 +
  src/ipa/soft/meson.build              |  15 +-
  src/ipa/soft/soft_simple.cpp          |   5 +
- 9 files changed, 409 insertions(+), 3 deletions(-)
+ 9 files changed, 418 insertions(+), 3 deletions(-)
  create mode 100644 src/ipa/soft/algorithms/awb_model.cpp
  create mode 100644 src/ipa/soft/algorithms/awb_model.h
 
@@ -145,10 +145,10 @@ index 8b5235643..e73871677 100644
  } /* namespace ipa::soft::algorithms */
 diff --git a/src/ipa/soft/algorithms/awb_model.cpp b/src/ipa/soft/algorithms/awb_model.cpp
 new file mode 100644
-index 000000000..3b74f3020
+index 000000000..01d0d47fb
 --- /dev/null
 +++ b/src/ipa/soft/algorithms/awb_model.cpp
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,274 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
@@ -160,6 +160,7 @@ index 000000000..3b74f3020
 +
 +#include <algorithm>
 +#include <array>
++#include <chrono>
 +#include <cmath>
 +#include <vector>
 +
@@ -318,6 +319,8 @@ index 000000000..3b74f3020
 +	if (!impl_->session)
 +		return false;
 +
++	const auto start = std::chrono::steady_clock::now();
++
 +	/*
 +	 * The samples a zone has when none of them is saturated: all the
 +	 * window's, which the histogram counts, over the zones.
@@ -382,6 +385,12 @@ index 000000000..3b74f3020
 +		LOG(IPASoftAwb, Warning) << "The illuminant model failed: " << e.what();
 +		return false;
 +	}
++
++	LOG(IPASoftAwb, Debug)
++		<< "The illuminant model took "
++		<< std::chrono::duration_cast<std::chrono::microseconds>(
++			   std::chrono::steady_clock::now() - start).count()
++		<< " us";
 +
 +	return true;
 +}
