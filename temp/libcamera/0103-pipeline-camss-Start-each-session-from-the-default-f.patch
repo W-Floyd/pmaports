@@ -1,0 +1,101 @@
+From da816086ef2784c1f59554607a7bfd08a3310d75 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 15:11:20 +0000
+Subject: [PATCH] pipeline: camss: Start each session from the default frame
+ length
+
+The software ISP lengthens the frame for long exposures in the dark, and
+the sensor keeps the vertical blanking after the session, so the next one
+read an exposure limit that was already lengthened. Set the default when
+configuring, and refresh the sensor's control information.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../pipeline/camss/camss_isp_ope.cpp          |  2 +-
+ .../pipeline/camss/camss_isp_soft.cpp         |  2 +-
+ src/libcamera/pipeline/camss/camss_util.cpp   | 19 ++++++++++++++++++-
+ src/libcamera/pipeline/camss/camss_util.h     |  3 ++-
+ 4 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index f46f979ea..1dd5e55ed 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -457,7 +457,7 @@ StreamConfiguration CamssIspOpe::validate(const StreamConfiguration &raw, const
+ int CamssIspOpe::configure(const StreamConfiguration &inputCfg,
+ 			   const StreamConfiguration &outputCfg)
+ {
+-	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_));
++	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_, true));
+ 	if (ret < 0)
+ 		return ret;
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index e073a0ba6..19e642a9b 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -187,7 +187,7 @@ int CamssIspSoft::configure(const StreamConfiguration &inputCfg,
+ 
+ 	/* \todo refactor SoftwareIsp to remove the need to pass this */
+ 	return swIsp_->configure(inputCfg, outputCfgs,
+-				 camssSoftIpaConfigInfo(sensor_));
++				 camssSoftIpaConfigInfo(sensor_, true));
+ }
+ 
+ int CamssIspSoft::allocateBuffers([[maybe_unused]] unsigned int bufferCount)
+diff --git a/src/libcamera/pipeline/camss/camss_util.cpp b/src/libcamera/pipeline/camss/camss_util.cpp
+index 4c1049914..7ed0e05fc 100644
+--- a/src/libcamera/pipeline/camss/camss_util.cpp
++++ b/src/libcamera/pipeline/camss/camss_util.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include "libcamera/internal/camera_lens.h"
+ #include "libcamera/internal/camera_sensor.h"
++#include "libcamera/internal/v4l2_subdevice.h"
+ #include "libcamera/internal/v4l2_videodevice.h"
+ 
+ namespace libcamera {
+@@ -46,10 +47,26 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+  * control maps. A sensor without them gets empty maps, so that the IPA does
+  * not offer their controls.
+  */
+-ipa::soft::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor)
++ipa::soft::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor,
++						bool resetFrameLength)
+ {
+ 	ipa::soft::IPAConfigInfo info;
+ 
++	/*
++	 * The IPA lengthens the frame (vertical blanking) for long exposures
++	 * and the sensor keeps it after the session: start from the default,
++	 * which the exposure limit the IPA reads is relative to.
++	 */
++	if (resetFrameLength) {
++		const auto vblank = sensor->controls().find(V4L2_CID_VBLANK);
++		if (vblank != sensor->controls().end()) {
++			ControlList ctrls(sensor->controls());
++			ctrls.set(V4L2_CID_VBLANK, vblank->second.def().get<int32_t>());
++			sensor->setControls(&ctrls);
++			sensor->device()->updateControlInfo();
++		}
++	}
++
+ 	/* The sensor's timing at the format set, which the IPA's init() did not have */
+ 	if (sensor->sensorInfo(&info.sensorInfo))
+ 		info.sensorInfo = {};
+diff --git a/src/libcamera/pipeline/camss/camss_util.h b/src/libcamera/pipeline/camss/camss_util.h
+index 2586ab546..a702c85a3 100644
+--- a/src/libcamera/pipeline/camss/camss_util.h
++++ b/src/libcamera/pipeline/camss/camss_util.h
+@@ -19,6 +19,7 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+ 					      const StreamConfiguration &cfg,
+ 					      const char *msgPrefix);
+ 
+-ipa::soft::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor);
++ipa::soft::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor,
++						bool resetFrameLength = false);
+ 
+ } /* namespace libcamera */
+-- 
+2.55.0
+

@@ -3,7 +3,7 @@ maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
 pkgver=9999$_pkgver
-pkgrel=59
+pkgrel=69
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -153,6 +153,15 @@ source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libc
 	0094-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
 	0095-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
 	0096-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
+	0097-pipeline-simple-Delay-the-vertical-blanking-control.patch
+	0098-ipa-soft-agc-Lengthen-the-frame-for-longer-exposures.patch
+	0099-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
+	0100-pipeline-camss-Delay-the-vertical-blanking-control.patch
+	0101-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
+	0102-ipa-soft-agc-Lengthen-the-frame-along-the-tuning-s-e.patch
+	0103-pipeline-camss-Start-each-session-from-the-default-f.patch
+	0104-ipa-soft-agc-Allow-the-longest-exposure-at-the-maxim.patch
+	0105-ipa-soft-agc-Bring-a-long-exposure-back-along-the-tu.patch
 	$_tuning_files
 	"
 builddir="$srcdir/$pkgname-v$_pkgver"
@@ -357,6 +366,15 @@ c122de6f7a64067483a5d8a599db30776c3cdfc50ed2ec7a550d6c8d80194f9471df5ec0c08a6c38
 6e98238f2d12eb0be0f11713630f2f9e4f0eaa7f15316c3e46cae79d953f822abe754305f444170ff68f30f42659cea3a25c1fcc57abcc6101dc614bc1ff732f  0094-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
 2de11d056afbd1859d759fcbf22f808fec1e0b2bed3272c67a9077e69c2d029fad4e54f1824985ca4154d825b94f0811e8c128fba54a7259e74b339e8efcaf33  0095-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
 aed769b0bf3c0febb32a5a3f7c99eba3eca643a579ee7f8d582fa71e094c7e1ea9e4c0d06101ab6b6ee735ab69d28e125c6c0e76575b71c61cb2af3f42521472  0096-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
+16f1c3d30d5af76ac5f5e87f09c0f4b0a50f5195572e1f39d9d443125b3df60f7d8ae17521914304ad3da687adec39fc32783677683720e476a95a5421c9a82b  0097-pipeline-simple-Delay-the-vertical-blanking-control.patch
+0fef1dcf103f309a605b4ec51a809ffe7196562dcb5f6b2ba7563b1683e496c7083f272817e848a8ae811d88e1cc7a12d07d5a8c64b98ad5aa6ef0249950f152  0098-ipa-soft-agc-Lengthen-the-frame-for-longer-exposures.patch
+f642553a29f49241deca0f2a8dfc74736c4271f6fdfbfc9de4994227c3813f49b85403fa290d6fd76f5654b2ec2dd97a6da41f6ce0a4ba1a3e1aa2cc2eeb97ef  0099-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
+25a525f6c3b66289cf88f83320bd63dd33703ec208b8244ca1720c016bfb8c5d9cba595ee207d646c4610362e38ecd3bfeff72ecd18985d4cf489d58678d2f73  0100-pipeline-camss-Delay-the-vertical-blanking-control.patch
+b38194e4c4c006e68cf9ecec7357373c036024994ec1be7224cd35671a54ebb75f3df49ec89fce7f920df4a0c3973167b96e43675cffae2d234d23cb67ee18c6  0101-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
+f57536218680dc74a14c8666f6753ec1f5926b0848e9b143063581682f4dd19126b70dca3891a1afc02d823c1065cae62d5fb5f03b608801a042495e3f76eb44  0102-ipa-soft-agc-Lengthen-the-frame-along-the-tuning-s-e.patch
+302891cd0152bcd7c1aa770d347b5cbaf568e7057d4f88e2b443c96c2d55c09e754c9eaa8a3367adaa768ea3e64415ca077b376d7dda0104ada2e70c6e8d11a4  0103-pipeline-camss-Start-each-session-from-the-default-f.patch
+7c39ec13bd6697a7d241e7af5da4be981ebdcf151c0e4426350cba10582f14dab0ad64bd37d2ce2e280b18b0c2365f576c17f56f3760011330d98f0ec6dda7ee  0104-ipa-soft-agc-Allow-the-longest-exposure-at-the-maxim.patch
+4f9587614a306f72ea34b686e90a8fd6c96438ca3bdfa8e128883809276ddff2015562ca8a617e64bea76f2d63185029cd7d466211f61466206e47b7153ebb83  0105-ipa-soft-agc-Bring-a-long-exposure-back-along-the-tu.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 578dfd7c239590a85fe8f2092f9e6dd2d45472264f1621aa3a813ddebbd8ce3c663b259684a90bf0e2d074df448073daca78dd788e65064554614502b6b1f350  imx320.yaml
 acba0299c6f9dbb983d7bb8dbe64b98896665b2228ab584876e3cbbb6c58a583851fb8540a7eae1eebc76f37cf9eb4a4afecf434c3803b3d1ea5ec10725d4cbd  imx345.yaml

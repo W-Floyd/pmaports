@@ -1,0 +1,78 @@
+From 1f7afd39b84d94ca2fcd3251862191a66a558336 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 14:58:19 +0000
+Subject: [PATCH] ipa: soft: Take the sensor's timing at the configured format
+
+init() gets the sensor information of the format the sensor starts with,
+which is often the largest, and configure() kept using it: on the S5KJN1,
+streaming its 4080x3072 binned mode, the line duration came out twice the
+real one (hblank + width of the full size over the pixel rate), and so did
+every exposure time computed from it. Pass the information in the
+configuration, queried after the format is set.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ include/libcamera/ipa/soft.mojom         |  1 +
+ src/ipa/soft/soft_simple.cpp             | 11 +++++++++++
+ src/libcamera/pipeline/simple/simple.cpp |  4 ++++
+ 3 files changed, 16 insertions(+)
+
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index 129f04e87..588de8aab 100644
+--- a/include/libcamera/ipa/soft.mojom
++++ b/include/libcamera/ipa/soft.mojom
+@@ -9,6 +9,7 @@ module ipa.soft;
+ import "include/libcamera/ipa/core.mojom";
+ 
+ struct IPAConfigInfo {
++	libcamera.IPACameraSensorInfo sensorInfo;
+ 	libcamera.ControlInfoMap sensorControls;
+ 	libcamera.ControlInfoMap lensControls;
+ 	libcamera.ControlInfoMap irisControls;
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index ba04ff899..23cc39130 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -283,6 +283,12 @@ void IPASoftSimple::updateApertureRange()
+ 
+ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ {
++	/*
++	 * The sensor's timing at the configured format: the one init() had is
++	 * of the format the sensor started with (often the largest), whose
++	 * line is longer than that of a binned mode's.
++	 */
++	context_.sensorInfo = configInfo.sensorInfo;
+ 	sensorInfoMap_ = configInfo.sensorControls;
+ 	lensInfoMap_ = configInfo.lensControls;
+ 	irisInfoMap_ = configInfo.irisControls;
+@@ -305,6 +311,11 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 
+ 	context_.configuration.agc.lineDuration =
+ 		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
++	LOG(IPASoft, Debug)
++		<< "Sensor output " << context_.sensorInfo.outputSize
++		<< ", line length " << context_.sensorInfo.minLineLength
++		<< ", pixel rate " << context_.sensorInfo.pixelRate
++		<< ", line " << context_.configuration.agc.lineDuration;
+ 	context_.configuration.agc.exposureMin = exposureInfo.min().get<int32_t>();
+ 	context_.configuration.agc.exposureMax = exposureInfo.max().get<int32_t>();
+ 	if (!context_.configuration.agc.exposureMin) {
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 916968bd1..3a6f22db2 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1661,6 +1661,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 		return data->converter_->configure(inputCfg, outputCfgs);
+ 	} else {
+ 		ipa::soft::IPAConfigInfo configInfo;
++		/* The sensor's timing at the format set, not the one it started with */
++		int ret = data->sensor_->sensorInfo(&configInfo.sensorInfo);
++		if (ret)
++			return ret;
+ 		configInfo.sensorControls = data->sensor_->controls();
+ 		if (data->sensor_->focusLens())
+ 			configInfo.lensControls = data->sensor_->focusLens()->controls();
+-- 
+2.55.0
+

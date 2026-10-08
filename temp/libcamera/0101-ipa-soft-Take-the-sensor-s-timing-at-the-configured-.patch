@@ -1,0 +1,46 @@
+From f1c71dabdd5d71c641f4e2e5990b4088e52fc285 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 15:01:39 +0000
+Subject: [PATCH 101/101] ipa: soft: Take the sensor's timing at the configured
+ format, camss too
+
+Pass the sensor information in the configuration from the camss pipeline
+as well, and keep init()'s if the pipeline gives none.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/soft/soft_simple.cpp                | 3 ++-
+ src/libcamera/pipeline/camss/camss_util.cpp | 3 +++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
+index 23cc39130..c7912d061 100644
+--- a/src/ipa/soft/soft_simple.cpp
++++ b/src/ipa/soft/soft_simple.cpp
+@@ -288,7 +288,8 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 	 * of the format the sensor started with (often the largest), whose
+ 	 * line is longer than that of a binned mode's.
+ 	 */
+-	context_.sensorInfo = configInfo.sensorInfo;
++	if (configInfo.sensorInfo.pixelRate)
++		context_.sensorInfo = configInfo.sensorInfo;
+ 	sensorInfoMap_ = configInfo.sensorControls;
+ 	lensInfoMap_ = configInfo.lensControls;
+ 	irisInfoMap_ = configInfo.irisControls;
+diff --git a/src/libcamera/pipeline/camss/camss_util.cpp b/src/libcamera/pipeline/camss/camss_util.cpp
+index 98d84bfe0..4c1049914 100644
+--- a/src/libcamera/pipeline/camss/camss_util.cpp
++++ b/src/libcamera/pipeline/camss/camss_util.cpp
+@@ -50,6 +50,9 @@ ipa::soft::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor)
+ {
+ 	ipa::soft::IPAConfigInfo info;
+ 
++	/* The sensor's timing at the format set, which the IPA's init() did not have */
++	if (sensor->sensorInfo(&info.sensorInfo))
++		info.sensorInfo = {};
+ 	info.sensorControls = sensor->controls();
+ 	CameraLens *focusLens = sensor->focusLens();
+ 	info.lensControls = focusLens ? focusLens->controls() : ControlInfoMap();
+-- 
+2.55.0
+

@@ -1,0 +1,189 @@
+From cfa399947abc266c7ed0fb2e677323b9d3bd5f13 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 15:07:30 +0000
+Subject: [PATCH] ipa: soft: agc: Lengthen the frame along the tuning's
+ exposure by gain
+
+The tuning's exposure table keeps the exposure near the frame's 33 ms until
+the gain is about 32, and reaches 50 to 70 ms at 64 and above. Lengthening
+the frame as soon as the exposure ran out dropped the frame rate to 14 fps
+in a merely dim room. Allow the exposure the table has at the gain, and
+shorten it first when the gain falls.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/soft/algorithms/agc.cpp | 90 +++++++++++++++++++++++++--------
+ src/ipa/soft/algorithms/agc.h   |  5 ++
+ 2 files changed, 74 insertions(+), 21 deletions(-)
+
+diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
+index 39dfe3ede..c32a069fb 100644
+--- a/src/ipa/soft/algorithms/agc.cpp
++++ b/src/ipa/soft/algorithms/agc.cpp
+@@ -92,14 +92,6 @@ static constexpr float kAcquireError = 0.5;
+  * of it (the hysteresis), and a direct one beyond kMeanAcquire stops.
+  */
+ static constexpr double kMeanSatisfactory = 0.1;
+-
+-/*
+- * The analogue gain from which a longer exposure than the frame allows
+- * lengthens the frame, in the dark, rather than raising the gain further:
+- * one stop of gain first, as the noise of more gain costs more than the
+- * frame rate of a longer frame, in the dark.
+- */
+-static constexpr double kExtendGain = 2.0;
+ static constexpr double kMeanAcquire = 0.6;
+ 
+ Agc::Agc()
+@@ -188,13 +180,26 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+ 
+ 	/*
+ 	 * maxExposure: the longest exposure time (us) to lengthen the frame
+-	 * (vertical blanking) for, once the exposure is at the frame's
+-	 * limit and the gain has risen to a stop above unity. The tuning's
+-	 * exposure table reaches it. Without it the frame is never lengthened.
++	 * (vertical blanking) for, in the dark, which the tuning's exposure
++	 * table reaches; without it the frame is never lengthened.
++	 * exposureByGain: the exposure time (us) the table has at each gain
++	 * ((gain, us) pairs, rising), which the frame is lengthened along:
++	 * the exposure is not allowed to be longer than the table's at the
++	 * gain, so that the frame stays short until the gain is high, as
++	 * with the vendor's AEC.
++	 *
++	 *   maxExposure: 70000
++	 *   exposureByGain: [ 1, 32, 2, 5000, 32, 30000, 128, 70000 ]
+ 	 */
+ 	auto maxExposure = tuningData["maxExposure"].get<double>();
+ 	if (maxExposure && *maxExposure > 0.0)
+ 		maxExposureUs_ = *maxExposure;
++	auto byGain = tuningData["exposureByGain"].get<std::vector<double>>();
++	if (byGain && byGain->size() >= 4 && byGain->size() % 2 == 0) {
++		for (unsigned int i = 0; i < byGain->size(); i += 2)
++			exposureByGainUs_.emplace_back((*byGain)[i], (*byGain)[i + 1]);
++		std::sort(exposureByGainUs_.begin(), exposureByGainUs_.end());
++	}
+ 
+ 	/*
+ 	 * histogram: adjusts the mean luminance target from the brightest
+@@ -387,9 +392,16 @@ int Agc::configure(IPAContext &context, const IPAConfigInfo &configInfo)
+ 
+ 	const auto vblank = configInfo.sensorControls.find(V4L2_CID_VBLANK);
+ 	const double lineUs = agc.lineDuration.get<std::micro>();
+-	if (maxExposureUs_ <= 0.0 || vblank == configInfo.sensorControls.end() || lineUs <= 0.0)
++	double maxUs = maxExposureUs_;
++	if (maxUs <= 0.0 && !exposureByGainUs_.empty())
++		maxUs = exposureByGainUs_.back().second;
++	if (maxUs <= 0.0 || vblank == configInfo.sensorControls.end() || lineUs <= 0.0)
+ 		return 0;
+ 
++	exposureByGainLines_.clear();
++	for (const auto &[gain, us] : exposureByGainUs_)
++		exposureByGainLines_.emplace_back(gain, us / lineUs);
++
+ 	/*
+ 	 * The sensor's exposure limit (exposureMax) is the frame length less
+ 	 * a margin, at the vertical blanking the sensor starts with, which
+@@ -399,7 +411,7 @@ int Agc::configure(IPAContext &context, const IPAConfigInfo &configInfo)
+ 	const ControlInfo &info = vblank->second;
+ 	agc.vblankBase = info.def().get<int32_t>();
+ 	agc.vblankMax = info.max().get<int32_t>();
+-	agc.exposureCap = std::min<int32_t>(std::lround(maxExposureUs_ / lineUs),
++	agc.exposureCap = std::min<int32_t>(std::lround(maxUs / lineUs),
+ 					    agc.exposureMax + (agc.vblankMax - agc.vblankBase));
+ 	if (agc.exposureCap <= agc.exposureMax) {
+ 		agc.exposureCap = 0;
+@@ -414,6 +426,35 @@ int Agc::configure(IPAContext &context, const IPAConfigInfo &configInfo)
+ 	return 0;
+ }
+ 
++/*
++ * The longest exposure (lines) the frame may be lengthened to at a gain: the
++ * tuning's exposure table's, between the frame the sensor starts with and
++ * the longest exposure to lengthen it for. Between two entries of the table,
++ * as the vendor's AEC does, it follows the gain's logarithm.
++ */
++int32_t Agc::allowedExposure(const IPAContext &context, double gain) const
++{
++	const auto &cfg = context.configuration.agc;
++	const auto &path = exposureByGainLines_;
++	if (path.empty())
++		return cfg.exposureCap;
++
++	double lines;
++	if (gain <= path.front().first) {
++		lines = path.front().second;
++	} else if (gain >= path.back().first) {
++		lines = path.back().second;
++	} else {
++		auto hi = std::upper_bound(path.begin(), path.end(), gain,
++					   [](double g, const auto &p) { return g < p.first; });
++		auto lo = hi - 1;
++		const double t = std::log2(gain / lo->first) / std::log2(hi->first / lo->first);
++		lines = lo->second + (hi->second - lo->second) * t;
++	}
++
++	return std::clamp<int32_t>(std::lround(lines), cfg.exposureMax, cfg.exposureCap);
++}
++
+ /* The histogram adjustment of a tuning node (see init()), if it is valid */
+ std::optional<Agc::HistTuning> Agc::readHist(const ValueNode &hist)
+ {
+@@ -650,15 +691,17 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 	if (factor > 1.0f) {
+ 		/*
+ 		 * Scene too dark: increase exposure first, then gain, and
+-		 * once the gain is above kExtendGain, lengthen the frame for
+-		 * more exposure time (which costs frame rate).
++		 * lengthen the frame for more exposure time (which costs frame
++		 * rate) as far as the tuning allows at the gain.
+ 		 */
+-		if (exposure < limit) {
++		const int32_t allowed = cfg.exposureCap ? allowedExposure(context, again) : limit;
++		const int32_t ceiling = std::min(limit, allowed);
++		if (exposure < ceiling) {
+ 			int32_t next = static_cast<int32_t>(exposure * factor);
+-			exposure = std::max(next, exposure + 1);
+-		} else if (cfg.exposureCap > limit && again >= kExtendGain) {
++			exposure = std::clamp(std::max(next, exposure + 1), exposure + 1, ceiling);
++		} else if (exposure < allowed) {
+ 			int32_t next = static_cast<int32_t>(exposure * factor);
+-			next = std::clamp(next, exposure + 1, cfg.exposureCap);
++			next = std::clamp(next, exposure + 1, allowed);
+ 			state.vblank = std::min(cfg.vblankMax, state.vblank + (next - limit));
+ 			exposure = next;
+ 		} else {
+@@ -669,8 +712,13 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 				again = next;
+ 		}
+ 	} else {
+-		/* Scene too bright: decrease gain first, then exposure. */
+-		if (again > context.configuration.agc.again10) {
++		/*
++		 * Scene too bright: decrease gain first, then exposure, but
++		 * exposure first while it is longer than the tuning has at
++		 * the gain.
++		 */
++		const bool longExposure = cfg.exposureCap && exposure > allowedExposure(context, again);
++		if (again > context.configuration.agc.again10 && !longExposure) {
+ 			double next = again * factor;
+ 			if (again - next < context.configuration.agc.againMinStep)
+ 				again -= context.configuration.agc.againMinStep;
+diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
+index a2283a259..2f1ad429c 100644
+--- a/src/ipa/soft/algorithms/agc.h
++++ b/src/ipa/soft/algorithms/agc.h
+@@ -94,6 +94,11 @@ private:
+ 
+ 	/* The longest exposure time (us) to lengthen the frame for, 0 for none */
+ 	double maxExposureUs_ = 0.0;
++	/* The exposure time (us) the tuning's table has at each gain, and in lines */
++	std::vector<std::pair<double, double>> exposureByGainUs_;
++	std::vector<std::pair<double, double>> exposureByGainLines_;
++
++	int32_t allowedExposure(const IPAContext &context, double gain) const;
+ 
+ 	/* The DRC gain exposure is being set for */
+ 	double drcDecided_ = 1.0;
+-- 
+2.55.0
+
