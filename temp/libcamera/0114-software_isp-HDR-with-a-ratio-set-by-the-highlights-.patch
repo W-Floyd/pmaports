@@ -1,4 +1,4 @@
-From f9b300a6351f9dfc07f78c6b9292b94136493220 Mon Sep 17 00:00:00 2001
+From 139b81d4063be58fa6bbc93c7839ebeac34a907c Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -21,19 +21,21 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  .../internal/software_isp/swisp_stats.h       |  10 +
  .../internal/software_isp/swstats_cpu.h       |   2 +-
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
- src/ipa/soft/algorithms/agc.cpp               | 227 ++++++++++--
+ src/ipa/soft/algorithms/agc.cpp               | 227 ++++++++--
  src/ipa/soft/algorithms/agc.h                 |  18 +-
  src/ipa/soft/ipa_context.h                    |  20 +
- src/ipa/soft/soft_simple.cpp                  | 103 +++++-
+ src/ipa/soft/soft_simple.cpp                  | 103 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    | 130 +++++--
- src/libcamera/shaders/bayer_cells_bin.frag    |  91 +++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 130 +++++-
+ src/libcamera/shaders/bayer_cells_base.frag   |  57 +++
+ src/libcamera/shaders/bayer_cells_bin.frag    |  91 +++-
  src/libcamera/shaders/bayer_cells_ratio.frag  |  75 ++++
  src/libcamera/shaders/identity.vert           |  15 +
- src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 347 ++++++++++++++----
- src/libcamera/software_isp/debayer_egl.h      |  51 ++-
- 16 files changed, 933 insertions(+), 179 deletions(-)
+ src/libcamera/shaders/meson.build             |   2 +
+ src/libcamera/software_isp/debayer_egl.cpp    | 424 +++++++++++++++---
+ src/libcamera/software_isp/debayer_egl.h      |  66 ++-
+ 17 files changed, 1083 insertions(+), 179 deletions(-)
+ create mode 100644 src/libcamera/shaders/bayer_cells_base.frag
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -709,7 +711,7 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..afe2d2af1 100644
+index 046cb626f..faea530b6 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
 @@ -235,8 +235,76 @@ vec4 finish(vec3 rgb)
@@ -753,14 +755,14 @@ index 046cb626f..afe2d2af1 100644
 +
 +/*
 + * A local tone map: the brightness of the pixel's surroundings (base, the
-+ * cells blurred by the texture's coarse level, through the same colour
++ * cells averaged and blurred into a small texture, through the same colour
 + * stages) is what is compressed, and the pixel keeps its own detail on top of
 + * it, its ratio to the base. A bright window then is brought down as a whole,
 + * and its trees keep their contrast, where compressing each pixel by its own
 + * brightness flattens them to the shoulder's top.
 + */
 +uniform sampler2D cell_base;
-+uniform float base_lod;
++uniform vec2 base_scale;	/* how many times the cells' texture is the part the base covers */
 +
 +vec3 hdr_tonemap(vec3 linear, vec3 base)
 +{
@@ -854,8 +856,8 @@ index 046cb626f..afe2d2af1 100644
 +	vec3 average = sum / weights;
 +	vec3 lin = linear_stage(average / 1020.0, shading);
 +#if defined(HDR)
-+	/* The surroundings, from a coarse level of the cells (the bias is of the level the pixel's derivatives choose) */
-+	vec3 base = linear_stage(texture2D(cell_base, textureOut, base_lod).rgb * (1023.0 / 1020.0), shading);
++	/* The brightness of the surroundings, from the base: a small, smooth texture */
++	vec3 base = linear_stage(texture2D(cell_base, textureOut * base_scale).rgb * (1023.0 / 1020.0), shading);
 +	lin = hdr_tonemap(lin, base);
 +#endif
  	vec3 rgb = tone_chroma(lin);
@@ -876,6 +878,69 @@ index 046cb626f..afe2d2af1 100644
  		float y = dot(rgb, luma);
  
  		vec4 levels = texture2D(sharpen_lut,
+diff --git a/src/libcamera/shaders/bayer_cells_base.frag b/src/libcamera/shaders/bayer_cells_base.frag
+new file mode 100644
+index 000000000..1cdc95640
+--- /dev/null
++++ b/src/libcamera/shaders/bayer_cells_base.frag
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * bayer_cells_base.frag - The base of the local tone map of HDR: the
++ * brightness of each place's surroundings, as a small, smooth texture, from
++ * the cells the merge made.
++ *
++ * Two passes of this program make it. The first (mode 0) averages the cells
++ * a texel of the small texture stands for (an area of them, by a grid of
++ * taps whose bilinear filtering averages the cells between), and the others
++ * (mode 1) blur it along a direction, a horizontal pass and then a vertical
++ * one, by a Gaussian, so that the main pass's one filtered fetch of it has no
++ * blocks, where the coarse level of a mip chain is a box filter and shows a
++ * lamp's surroundings as rectangles.
++ */
++
++precision highp float;
++precision highp sampler2D;
++
++uniform sampler2D src;
++uniform vec2 dst_size;		/* the texture being drawn */
++uniform vec2 bin_frac;		/* the part of the cells texture the cells were binned in */
++uniform float mode;		/* 0: average the cells, 1: blur */
++uniform vec2 dir;		/* the blur's step, in texels of src */
++
++out vec4 fragColor;
++
++void main(void)
++{
++	vec2 uv = gl_FragCoord.xy / dst_size;
++
++	if (mode < 0.5) {
++		/* The cells this texel stands for: its part of the binned area */
++		vec2 origin = (gl_FragCoord.xy - 0.5) / dst_size * bin_frac;
++		vec2 span = bin_frac / dst_size;
++		vec3 sum = vec3(0.0);
++		for (int j = 0; j < 8; j++) {
++			for (int i = 0; i < 8; i++) {
++				vec2 at = origin + span * ((vec2(float(i), float(j)) + 0.5) / 8.0);
++				sum += texture(src, at).rgb;
++			}
++		}
++		fragColor = vec4(sum / 64.0, 1.0);
++		return;
++	}
++
++	/* A Gaussian of 4 texels' reach on each side, of a sigma of 1.7 */
++	const float w[5] = float[5](0.2315, 0.1990, 0.1170, 0.0470, 0.0125);
++	vec3 sum = texture(src, uv).rgb * w[0];
++	float total = w[0];
++	for (int k = 1; k < 5; k++) {
++		sum += (texture(src, uv + dir * float(k)).rgb + texture(src, uv - dir * float(k)).rgb) * w[k];
++		total += 2.0 * w[k];
++	}
++	fragColor = vec4(sum / total, 1.0);
++}
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
 index 680b00bda..3793d39c7 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
@@ -1139,19 +1204,20 @@ index 907e8741f..532b92614 100644
 +#endif
  }
 diff --git a/src/libcamera/shaders/meson.build b/src/libcamera/shaders/meson.build
-index 8e18178b7..5442bb437 100644
+index 8e18178b7..b7c8abd31 100644
 --- a/src/libcamera/shaders/meson.build
 +++ b/src/libcamera/shaders/meson.build
-@@ -5,6 +5,7 @@
+@@ -5,6 +5,8 @@
  shader_files = files([
      'bayer_1x_packed.frag',
      'bayer_cells_bin.frag',
 +    'bayer_cells_ratio.frag',
++    'bayer_cells_base.frag',
      'cells.vert',
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..d715d3636 100644
+index a3dfae76e..cb693162a 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -130,6 +130,8 @@ int DebayerEGL::getShaderVariableLocations(void)
@@ -1159,7 +1225,7 @@ index a3dfae76e..d715d3636 100644
  	chromaShearUniform_ = glGetUniformLocation(programId_, "chroma_shear");
  	cellTexUniform_ = glGetUniformLocation(programId_, "cell_tex");
 +	cellBaseUniform_ = glGetUniformLocation(programId_, "cell_base");
-+	baseLodUniform_ = glGetUniformLocation(programId_, "base_lod");
++	baseScaleUniform_ = glGetUniformLocation(programId_, "base_scale");
  	cellSizeUniform_ = glGetUniformLocation(programId_, "cell_size");
  	noiseUniform_ = glGetUniformLocation(programId_, "noise");
  	widthLowUniform_ = glGetUniformLocation(programId_, "width_lo");
@@ -1179,7 +1245,7 @@ index a3dfae76e..d715d3636 100644
  	/*
  	 * Tell shaders how to re-order output taking account of how the pixels
  	 * are actually stored by EGL.
-@@ -360,62 +364,117 @@ bool DebayerEGL::cellsSupported()
+@@ -360,62 +364,147 @@ bool DebayerEGL::cellsSupported()
  	       (major > 3 || (major == 3 && minor >= 2));
  }
  
@@ -1246,6 +1312,40 @@ index a3dfae76e..d715d3636 100644
 +	return 0;
 +}
 +
++int DebayerEGL::buildBaseProgram()
++{
++	std::vector<std::string> env;
++	egl_.pushEnv(env, "#version 310 es");
++
++	GLuint vertexShaderId = 0;
++	GLuint fragmentShaderId = 0;
++	if (egl_.compileVertexShader(vertexShaderId, cells_vert, env) ||
++	    egl_.compileFragmentShader(fragmentShaderId, bayer_cells_base_frag, env)) {
++		LOG(Debayer, Error) << "Compile cells base shaders fail";
+ 		return -ENODEV;
+ 	}
+-	utils::scope_exit binVShaderGuard([&] { glDeleteShader(binVertexShaderId); });
+-	utils::scope_exit binFShaderGuard([&] { glDeleteShader(binFragmentShaderId); });
++	utils::scope_exit vShaderGuard([&] { glDeleteShader(vertexShaderId); });
++	utils::scope_exit fShaderGuard([&] { glDeleteShader(fragmentShaderId); });
+ 
+-	if (egl_.linkProgram(binProgramId_, binVertexShaderId, binFragmentShaderId)) {
+-		LOG(Debayer, Error) << "Linking cells binning program fail";
++	if (egl_.linkProgram(base_.id, vertexShaderId, fragmentShaderId)) {
++		LOG(Debayer, Error) << "Linking cells base program fail";
++		return -ENODEV;
++	}
++
++	base_.vertex = glGetAttribLocation(base_.id, "vertexIn");
++	base_.src = glGetUniformLocation(base_.id, "src");
++	base_.dstSize = glGetUniformLocation(base_.id, "dst_size");
++	base_.binFrac = glGetUniformLocation(base_.id, "bin_frac");
++	base_.mode = glGetUniformLocation(base_.id, "mode");
++	base_.dir = glGetUniformLocation(base_.id, "dir");
++
++	return 0;
++}
++
 +int DebayerEGL::buildRatioProgram()
 +{
 +	std::vector<std::string> env;
@@ -1257,15 +1357,11 @@ index a3dfae76e..d715d3636 100644
 +	if (egl_.compileVertexShader(vertexShaderId, cells_vert, env) ||
 +	    egl_.compileFragmentShader(fragmentShaderId, bayer_cells_ratio_frag, env)) {
 +		LOG(Debayer, Error) << "Compile cells ratio shaders fail";
- 		return -ENODEV;
- 	}
--	utils::scope_exit binVShaderGuard([&] { glDeleteShader(binVertexShaderId); });
--	utils::scope_exit binFShaderGuard([&] { glDeleteShader(binFragmentShaderId); });
++		return -ENODEV;
++	}
 +	utils::scope_exit vShaderGuard([&] { glDeleteShader(vertexShaderId); });
 +	utils::scope_exit fShaderGuard([&] { glDeleteShader(fragmentShaderId); });
- 
--	if (egl_.linkProgram(binProgramId_, binVertexShaderId, binFragmentShaderId)) {
--		LOG(Debayer, Error) << "Linking cells binning program fail";
++
 +	if (egl_.linkProgram(ratio_.id, vertexShaderId, fragmentShaderId)) {
 +		LOG(Debayer, Error) << "Linking cells ratio program fail";
  		return -ENODEV;
@@ -1329,12 +1425,12 @@ index a3dfae76e..d715d3636 100644
 +
 +	/* The passes that bin the cells, and with HDR merge frames' */
 +	if (buildBinProgram(bin_[0], false) || buildBinProgram(bin_[1], true) ||
-+	    buildRatioProgram())
++	    buildRatioProgram() || buildBaseProgram())
 +		return -ENODEV;
  
  	cellsSize_ = Size(width_ / 2, height_ / 2);
  
-@@ -426,18 +485,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+@@ -426,18 +515,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
  }
  
  /*
@@ -1365,7 +1461,7 @@ index a3dfae76e..d715d3636 100644
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-@@ -465,9 +530,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -465,9 +560,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  
  	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
  	static const uint32_t unitIds[2] = { 4, 6 };
@@ -1386,7 +1482,7 @@ index a3dfae76e..d715d3636 100644
  			if (!cells_[i]) {
  				LOG(Debayer, Error) << "Render targets of the cells fail";
  				return -ENODEV;
-@@ -483,26 +558,94 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -483,26 +588,93 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	const DebayerParams::Denoise &d = params.denoise;
  	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
  
@@ -1405,8 +1501,7 @@ index a3dfae76e..d715d3636 100644
 +					   static_cast<float>(outputSize_.height) / nativeOutputSize_.height);
 +		const float fx = std::min(1.0f, static_cast<float>(outputSize_.width) / width_) / fit;
 +		const float fy = std::min(1.0f, static_cast<float>(outputSize_.height) / height_) / fit;
-+		/* More with HDR, whose local tone map reads coarse levels of the cells */
-+		const int margin = params.hdr.enabled ? 40 : 4;
++		constexpr int margin = 4;
 +		binWidth = std::min<int>(cellsSize_.width, std::ceil(fx * cellsSize_.width) + margin);
 +		binHeight = std::min<int>(cellsSize_.height, std::ceil(fy * cellsSize_.height) + margin);
 +	}
@@ -1491,7 +1586,7 @@ index a3dfae76e..d715d3636 100644
  		    params.blackLevel[2] * 1020.0f);
  
  	/*
-@@ -511,21 +654,67 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -511,21 +683,116 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	 * frame's reference, which the exposure's changes moved.
  	 */
  	const DebayerParams::Hdr &h = params.hdr;
@@ -1536,23 +1631,72 @@ index a3dfae76e..d715d3636 100644
  	egl_.activateBindTexture(*cells_[next]);
 +
 +	/*
-+	 * With HDR, the local tone map reads a coarse level of them, as the
-+	 * brightness of the surroundings: the texture on a unit of its own, with
-+	 * a sampler that filters between its levels (the other units' samplers,
-+	 * of the texture's own parameters, read the first level only).
++	 * With HDR, the local tone map's base, a small, smooth texture of the
++	 * brightness of each place's surroundings: the cells averaged over areas,
++	 * and that blurred along rows and then along columns. It is a sixteenth
++	 * of the cells in each direction, and covers the part of them that was
++	 * binned.
 +	 */
 +	if (params.hdr.enabled) {
-+		if (!baseSampler_) {
-+			glGenSamplers(1, &baseSampler_);
-+			glSamplerParameteri(baseSampler_, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-+			glSamplerParameteri(baseSampler_, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-+			glSamplerParameteri(baseSampler_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-+			glSamplerParameteri(baseSampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++		const int baseWidth = (cellsSize_.width + 15) / 16;
++		const int baseHeight = (cellsSize_.height + 15) / 16;
++		if (!baseTex_[0] || baseSize_.width != static_cast<unsigned int>(baseWidth) ||
++		    baseSize_.height != static_cast<unsigned int>(baseHeight)) {
++			baseSize_ = Size(baseWidth, baseHeight);
++			static const GLenum baseUnits[2] = { GL_TEXTURE8, GL_TEXTURE9 };
++			for (unsigned int i = 0; i < 2; i++) {
++				baseTex_[i] = std::make_unique<eGLImage>(GL_RGBA, baseWidth, baseHeight,
++									 baseWidth * 8, baseUnits[i], 8 + i);
++				egl_.activateBindTexture(*baseTex_[i]);
++				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, baseWidth, baseHeight, 0,
++					     GL_RGBA, GL_HALF_FLOAT, nullptr);
++				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++				if (egl_.attachTextureToFBO(*baseTex_[i]))
++					return -ENODEV;
++			}
 +		}
-+		glActiveTexture(GL_TEXTURE8);
-+		glBindTexture(GL_TEXTURE_2D, cells_[next]->texture_);
-+		glGenerateMipmap(GL_TEXTURE_2D);
-+		glBindSampler(8, baseSampler_);
++
++		const float binFracX = static_cast<float>(binWidth) / cellsSize_.width;
++		const float binFracY = static_cast<float>(binHeight) / cellsSize_.height;
++		baseScaleX_ = 1.0f / binFracX;
++		baseScaleY_ = 1.0f / binFracY;
++
++		egl_.useProgram(base_.id);
++		glEnableVertexAttribArray(base_.vertex);
++		glVertexAttribPointer(base_.vertex, 2, GL_FLOAT, GL_TRUE,
++				      2 * sizeof(GLfloat), vcoordinates);
++		glViewport(0, 0, baseWidth, baseHeight);
++		glUniform2f(base_.dstSize, static_cast<GLfloat>(baseWidth), static_cast<GLfloat>(baseHeight));
++		glUniform2f(base_.binFrac, binFracX, binFracY);
++
++		/* The cells, averaged over areas */
++		if (egl_.attachTextureToFBO(*baseTex_[0]))
++			return -ENODEV;
++		glUniform1i(base_.src, cells_[next]->texture_unit_uniform_id_);
++		glUniform1f(base_.mode, 0.0f);
++		glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++
++		/* Blurred along the rows, and then along the columns */
++		glUniform1f(base_.mode, 1.0f);
++		if (egl_.attachTextureToFBO(*baseTex_[1]))
++			return -ENODEV;
++		egl_.activateBindTexture(*baseTex_[0]);
++		glUniform1i(base_.src, baseTex_[0]->texture_unit_uniform_id_);
++		glUniform2f(base_.dir, 1.0f / baseWidth, 0.0f);
++		glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++
++		if (egl_.attachTextureToFBO(*baseTex_[0]))
++			return -ENODEV;
++		egl_.activateBindTexture(*baseTex_[1]);
++		glUniform1i(base_.src, baseTex_[1]->texture_unit_uniform_id_);
++		glUniform2f(base_.dir, 0.0f, 1.0f / baseHeight);
++		glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++
++		/* The main pass reads the final one, on its unit */
++		egl_.activateBindTexture(*baseTex_[0]);
 +	}
 +
  	cellsCurrent_ = next;
@@ -1563,7 +1707,7 @@ index a3dfae76e..d715d3636 100644
  
  	GLenum err = glGetError();
  	if (err != GL_NO_ERROR) {
-@@ -540,11 +729,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -540,11 +807,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
   * Make the main program the one that samples single pixels, or the one that
   * samples the cells, and read the locations of its variables if it changed.
   */
@@ -1580,19 +1724,16 @@ index a3dfae76e..d715d3636 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -833,6 +1024,11 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -833,6 +1102,8 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		const DebayerParams::Denoise &d = params.denoise;
  
  		glUniform1i(cellTexUniform_, cells_[cellsCurrent_]->texture_unit_uniform_id_);
 +		glUniform1i(cellBaseUniform_, 8);
-+		{
-+			static const char *lodEnv = utils::secure_getenv("LIBCAMERA_SOFTISP_BASE_LOD"); /* EXPERIMENT */
-+			glUniform1f(baseLodUniform_, lodEnv ? static_cast<float>(atof(lodEnv)) : 5.0f);
-+		}
++		glUniform2f(baseScaleUniform_, baseScaleX_, baseScaleY_);
  		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
  		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
  		/* Without noise reduction (only sharpening), the taps carry no weight */
-@@ -867,7 +1063,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -867,7 +1138,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
@@ -1614,7 +1755,7 @@ index a3dfae76e..d715d3636 100644
  	}
  
  	return;
-@@ -988,7 +1197,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1272,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -1623,16 +1764,16 @@ index a3dfae76e..d715d3636 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1146,7 +1355,7 @@ int DebayerEGL::start()
+@@ -1146,7 +1430,7 @@ int DebayerEGL::start()
  
  	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
  
 -	cellsCapable_ = maxTextureImageUnits >= 7 && cellsSupported();
-+	cellsCapable_ = maxTextureImageUnits >= 9 && cellsSupported();
++	cellsCapable_ = maxTextureImageUnits >= 10 && cellsSupported();
  
  	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
  	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-@@ -1210,6 +1419,7 @@ void DebayerEGL::stop()
+@@ -1210,6 +1494,7 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
@@ -1640,7 +1781,7 @@ index a3dfae76e..d715d3636 100644
  	for (auto &cells : cells_)
  		cells.reset();
  	cellsCurrent_ = 0;
-@@ -1217,11 +1427,16 @@ void DebayerEGL::stop()
+@@ -1217,11 +1502,18 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
@@ -1652,15 +1793,17 @@ index a3dfae76e..d715d3636 100644
 -	singleProgramId_ = cellsMainProgramId_ = binProgramId_ = 0;
 +	singleProgramId_ = cellsMainProgramId_ = cellsMainHdrProgramId_ = 0;
 +	bin_[0].id = bin_[1].id = ratio_.id = 0;
-+	if (baseSampler_) {
-+		glDeleteSamplers(1, &baseSampler_);
-+		baseSampler_ = 0;
++	for (auto &tex : baseTex_)
++		tex.reset();
++	if (base_.id) {
++		glDeleteProgram(base_.id);
++		base_.id = 0;
 +	}
  	programId_ = 0;
  	cellsActive_ = false;
  }
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 89ccf9129..dc854395c 100644
+index 89ccf9129..eb67ab81e 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -145,9 +145,9 @@ private:
@@ -1733,7 +1876,7 @@ index 89ccf9129..dc854395c 100644
  	Size cellsSize_;
  
  	/*
-@@ -236,9 +254,14 @@ private:
+@@ -236,9 +254,29 @@ private:
  	std::array<uint8_t, DebayerParams::kSharpenLevels * 4> sharpenLutData_;
  	GLint sharpenLutUniform_;
  	GLint sharpenUniform_;
@@ -1742,9 +1885,24 @@ index 89ccf9129..dc854395c 100644
  	/* The main program's variables for the cells */
  	GLint cellTexUniform_;
 +	GLint cellBaseUniform_;
-+	GLint baseLodUniform_;
-+	/* The sampler of the cells' coarse levels (unit 8), for the local tone map of HDR */
-+	GLuint baseSampler_ = 0;
++	GLint baseScaleUniform_;
++	/*
++	 * The base of HDR's local tone map, the brightness of each place's
++	 * surroundings, as a small texture (on unit 8, with a scratch one on
++	 * unit 9) that two small passes of bayer_cells_base.frag make from the
++	 * cells: their average over areas, and a Gaussian blur of that.
++	 */
++	struct BaseProgram {
++		GLuint id = 0;
++		GLint vertex, src, dstSize, binFrac, mode, dir;
++	};
++	int buildBaseProgram();
++	BaseProgram base_;
++	std::array<std::unique_ptr<eGLImage>, 2> baseTex_;
++	Size baseSize_;
++	/* How many times the cells' texture is the part of it the base covers, across and down */
++	float baseScaleX_ = 1.0f;
++	float baseScaleY_ = 1.0f;
  	GLint cellSizeUniform_;
  	GLint noiseUniform_;
  	GLint widthLowUniform_;
