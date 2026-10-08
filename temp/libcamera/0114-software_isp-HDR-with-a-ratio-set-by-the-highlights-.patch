@@ -1,4 +1,4 @@
-From b50ecf0725626bff3f03e184f21109ec32bfcd7b Mon Sep 17 00:00:00 2001
+From 7be0a53e9db86f3ef9c682a9eaecab184b5354fc Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -19,10 +19,10 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../internal/software_isp/debayer_params.h    |   8 +
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
- src/ipa/soft/algorithms/agc.cpp               | 164 +++++++--
+ src/ipa/soft/algorithms/agc.cpp               | 177 ++++++++--
  src/ipa/soft/algorithms/agc.h                 |  16 +-
- src/ipa/soft/ipa_context.h                    |  11 +
- src/ipa/soft/soft_simple.cpp                  |  89 ++++-
+ src/ipa/soft/ipa_context.h                    |  20 ++
+ src/ipa/soft/soft_simple.cpp                  |  91 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
  src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  78 +++--
@@ -31,7 +31,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 778 insertions(+), 168 deletions(-)
+ 14 files changed, 800 insertions(+), 170 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -69,7 +69,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..1ae7a304b 100644
+index ae99e98a8..c63669152 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -103,11 +103,22 @@ static constexpr double kMeanAcquire = 0.6;
@@ -324,15 +324,43 @@ index ae99e98a8..1ae7a304b 100644
  }
  
  /*
-@@ -988,6 +1086,8 @@ void Agc::process(IPAContext &context,
+@@ -959,7 +1057,7 @@ void Agc::applyManual(IPAContext &context, IPAFrameContext &frameContext) const
+ }
+ 
+ void Agc::process(IPAContext &context,
+-		  [[maybe_unused]] const uint32_t frame,
++		  const uint32_t frame,
+ 		  IPAFrameContext &frameContext,
+ 		  const SwIspStats *stats,
+ 		  ControlList &metadata)
+@@ -988,6 +1086,10 @@ void Agc::process(IPAContext &context,
  		context.activeState.agc.darkBoost = 1.0;
  		drcDecided_ = 1.0;
  		darkDecided_ = 1.0;
 +		hdrWanted_ = 1.0;
 +		hdrBelow_ = 0;
++		context.activeState.agc.hdr.askedUpTo = 0;
++		context.activeState.agc.hdr.flipFrom = 0;
  	}
  
  	/* The DRC gain the tone curve must use from now on */
+@@ -1005,8 +1107,15 @@ void Agc::process(IPAContext &context,
+ 			       frameContext.sensor.exposure * frameContext.sensor.gain >
+ 				       context.activeState.agc.exposure * context.activeState.agc.again *
+ 					       std::sqrt(hdrState.ratio);
+-	if (longFrame)
++	/*
++	 * The phase changes only for frames asked for after the last change: the
++	 * statistics come late, and the frames asked for before it took effect
++	 * keep the old phase, and would change it again every time.
++	 */
++	if (longFrame && frame >= hdrState.flipFrom) {
+ 		hdrState.longNext = !hdrState.longNext;
++		hdrState.flipFrom = hdrState.askedUpTo + 1;
++	}
+ 
+ 	if (!stats->valid || longFrame) {
+ 		/*
 diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
 index 0484b88eb..69c0b9aa4 100644
 --- a/src/ipa/soft/algorithms/agc.h
@@ -362,13 +390,22 @@ index 0484b88eb..69c0b9aa4 100644
  	/* The longest exposure time (us) to lengthen the frame for, 0 for none */
  	double maxExposureUs_ = 0.0;
 diff --git a/src/ipa/soft/ipa_context.h b/src/ipa/soft/ipa_context.h
-index 678a8f817..499bddaaa 100644
+index 678a8f817..3a36a1710 100644
 --- a/src/ipa/soft/ipa_context.h
 +++ b/src/ipa/soft/ipa_context.h
-@@ -79,6 +79,17 @@ struct IPAActiveState {
+@@ -79,6 +79,26 @@ struct IPAActiveState {
  			bool longNext;
  			double ratio;
  			double reference;
++			/*
++			 * The last frame an exposure has been asked for, and the
++			 * first frame whose role (short or long) the last
++			 * change of the alternation's phase applies to: the
++			 * frames before it were asked for earlier, and say
++			 * nothing of the phase now.
++			 */
++			uint32_t askedUpTo;
++			uint32_t flipFrom;
 +			/*
 +			 * The exposures and gain the frames are asked for, set
 +			 * by the loop and used by computeParams(), which asks
@@ -384,7 +421,7 @@ index 678a8f817..499bddaaa 100644
  		bool valid;
  		/*
 diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
-index 0b23a62aa..b2d10b35c 100644
+index 0b23a62aa..60ffe8114 100644
 --- a/src/ipa/soft/soft_simple.cpp
 +++ b/src/ipa/soft/soft_simple.cpp
 @@ -10,6 +10,7 @@
@@ -454,7 +491,7 @@ index 0b23a62aa..b2d10b35c 100644
  void IPASoftSimple::computeParams(const uint32_t frame, const ControlList &sensorControls)
  {
  	context_.activeState.combinedMatrix = Matrix<float, 3, 3>::identity();
-@@ -423,10 +462,41 @@ void IPASoftSimple::computeParams(const uint32_t frame, const ControlList &senso
+@@ -423,10 +462,43 @@ void IPASoftSimple::computeParams(const uint32_t frame, const ControlList &senso
  		const int32_t code = gain.get<int32_t>();
  		frameContext.sensor.gain = camHelper_ ? camHelper_->gain(code) : code;
  	}
@@ -485,6 +522,8 @@ index 0b23a62aa..b2d10b35c 100644
 +		hdrAsked_[frame] = { asked, camHelper_ ? camHelper_->gain(gainCode) : gainCode };
 +		while (hdrAsked_.size() > 16)
 +			hdrAsked_.erase(hdrAsked_.begin());
++		/* This ask is for the frame two after this one (see hdrExposureOf()) */
++		hdr.askedUpTo = frame + 2;
 +		if (context_.configuration.agc.exposureCap)
 +			ctrls.set(V4L2_CID_VBLANK, context_.activeState.agc.vblank);
 +		LOG(IPASoft, Debug)
@@ -496,7 +535,7 @@ index 0b23a62aa..b2d10b35c 100644
  	paramsComputed.emit(frame);
  }
  
-@@ -440,6 +510,8 @@ void IPASoftSimple::processStats(const uint32_t frame,
+@@ -440,6 +512,8 @@ void IPASoftSimple::processStats(const uint32_t frame,
  		sensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>();
  	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
  	frameContext.sensor.gain = camHelper_ ? camHelper_->gain(again) : again;
@@ -505,7 +544,7 @@ index 0b23a62aa..b2d10b35c 100644
  
  	ControlList metadata(controls::controls);
  	for (const auto &algo : algorithms())
-@@ -455,13 +527,16 @@ void IPASoftSimple::processStats(const uint32_t frame,
+@@ -455,13 +529,16 @@ void IPASoftSimple::processStats(const uint32_t frame,
  
  	ControlList ctrls(sensorInfoMap_);
  
