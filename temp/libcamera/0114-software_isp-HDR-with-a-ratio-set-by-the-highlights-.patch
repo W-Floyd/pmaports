@@ -1,4 +1,4 @@
-From 912db6ac17f5b637fce6f04a43947cbe33b83e0b Mon Sep 17 00:00:00 2001
+From 1269a081d2bf34e115270be77c57673a0ede9634 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -25,13 +25,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/soft_simple.cpp                  |  89 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
  src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
- src/libcamera/shaders/bayer_cells_bin.frag    |  78 +++--
- src/libcamera/shaders/bayer_cells_ratio.frag  |  70 ++++
+ src/libcamera/shaders/bayer_cells_bin.frag    |  93 ++++--
+ src/libcamera/shaders/bayer_cells_ratio.frag  |  75 +++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 310 ++++++++++++++----
+ src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 769 insertions(+), 168 deletions(-)
+ 14 files changed, 793 insertions(+), 168 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -710,7 +710,7 @@ index 046cb626f..d60ed2cf7 100644
  
  		vec4 levels = texture2D(sharpen_lut,
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..f27affa1d 100644
+index 680b00bda..a6d75bc49 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -723,7 +723,7 @@ index 680b00bda..f27affa1d 100644
   * brought to the units of the short exposure (merge.x, its scale; 1 for the
   * short frames), and blended with the estimate the previous frames made, in
   * the units of their reference (merge.y brings it to this one's), by their
-@@ -55,12 +56,23 @@ uniform vec3 black;		/* black level of red, green and blue, in counts */
+@@ -55,12 +56,25 @@ uniform vec3 black;		/* black level of red, green and blue, in counts */
   */
  uniform vec4 merge;
  
@@ -733,10 +733,12 @@ index 680b00bda..f27affa1d 100644
 + * long one (whose measure is 1 / ratio, ratio_snap.x) if it is near that, and
 + * the scale is then 1 or the measure itself, which brings the frame to the
 + * estimate's units as they are; with ratio_snap.y at 1 and a measure that is
-+ * neither, merge.x holds.
++ * neither, merge.x holds. The measure of a band of rows (ratio_snap.z, the
++ * rows the bands cover) that is not the one of the rest of the frame, as
++ * the first rows' is, scales that band's cells by the difference.
 + */
 +uniform sampler2D ratio_tex;
-+uniform vec2 ratio_snap;
++uniform vec3 ratio_snap;
 +
  out vec4 fragColor;
  
@@ -749,7 +751,7 @@ index 680b00bda..f27affa1d 100644
  }
  
  void main(void)
-@@ -83,17 +95,17 @@ void main(void)
+@@ -83,17 +97,17 @@ void main(void)
  	 * A gather at the corner shared by four texels returns them as
  	 * (x, y + 1), (x + 1, y + 1), (x + 1, y), (x, y) in its components.
  	 */
@@ -774,7 +776,7 @@ index 680b00bda..f27affa1d 100644
  
  	vec2 red = tex_bayer_first_red;
  	vec4 is_red = vec4((1.0 - red.x) * (1.0 - red.y), red.x * (1.0 - red.y),
-@@ -106,8 +118,21 @@ void main(void)
+@@ -106,8 +120,34 @@ void main(void)
  
  	vec3 cell = vec3(r, g * 0.5, b);
  
@@ -783,21 +785,34 @@ index 680b00bda..f27affa1d 100644
 -		vec3 cur = black + (cell - black) * merge.x;
 +		float scale = merge.x;
 +		if (ratio_snap.y > 0.0) {
-+			vec2 measure = texelFetch(ratio_tex, ivec2(0), 0).xy;
-+			if (measure.y > 0.05 && measure.x > 0.0) {
-+				float to_short = abs(log(measure.x));
-+				float to_long = abs(log(measure.x * ratio_snap.x));
++			int bands = textureSize(ratio_tex, 0).y;
++			/* The frame's exposure, from a band below the first rows */
++			vec2 base = texelFetch(ratio_tex, ivec2(0, bands * 3 / 5), 0).xy;
++			if (base.y > 0.05 && base.x > 0.0) {
++				float to_short = abs(log(base.x));
++				float to_long = abs(log(base.x * ratio_snap.x));
++				float unit = 0.0;
 +				if (to_short < to_long && to_short < 0.3)
-+					scale = 1.0;
++					unit = 1.0;
 +				else if (to_long < 0.3)
-+					scale = measure.x * merge.y;
++					unit = base.x * merge.y;
++				if (unit > 0.0) {
++					scale = unit;
++					int band = min(int(gl_FragCoord.y / ratio_snap.z * float(bands)), bands - 1);
++					vec2 here = texelFetch(ratio_tex, ivec2(0, band), 0).xy;
++					if (here.y > 0.1 && here.x > 0.0) {
++						float relative = here.x / base.x;
++						if (abs(log(relative)) < 1.4)
++							scale = unit * relative;
++					}
++				}
 +			}
 +		}
 +		vec3 cur = black + (cell - black) * scale;
  		if (merge.w > 0.0) {
  			vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
  			prev = black + (prev - black) * merge.y;
-@@ -119,31 +144,44 @@ void main(void)
+@@ -119,31 +159,44 @@ void main(void)
  			 * estimates differ), and for all three channels, as a
  			 * clipped one has the wrong colour.
  			 */
@@ -853,10 +868,10 @@ index 680b00bda..f27affa1d 100644
  		prev = black + (prev - black) * merge.y;
 diff --git a/src/libcamera/shaders/bayer_cells_ratio.frag b/src/libcamera/shaders/bayer_cells_ratio.frag
 new file mode 100644
-index 000000000..553e34e38
+index 000000000..3293b3cf6
 --- /dev/null
 +++ b/src/libcamera/shaders/bayer_cells_ratio.frag
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,75 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
@@ -865,14 +880,17 @@ index 000000000..553e34e38
 + * frames' merge made are than this raw frame, for the HDR merge to tell from
 + * the data which of the alternating exposures the frame has, as the exposures
 + * the pipeline reports for the frames are not always the ones the sensor used
-+ * (the sensor takes a write at a time that varies by a frame).
++ * (the sensor takes a write at a time that varies by a frame), and how the
++ * exposure varies down the frame: the first rows of a frame began their
++ * exposure before the change to the new one, and have another.
 + *
-+ * The result is one texel: x is the sum, over a grid of cells where this frame
-+ * is well below saturation, of the estimate's level above black over the
-+ * frame's, which is 1 for a frame of the estimate's units (the short exposure)
-+ * and 1 / ratio for a long one; y is the fraction of the grid's cells that
-+ * counted. The frame's cells are read as bayer_cells_bin.frag does, from the
-+ * 8 high bits of their four pixels.
++ * The result is a column of texels, one for each of a few bands of rows of the
++ * cells the merge covers: x is the sum, over a grid of cells of the band where
++ * this frame is well below saturation, of the estimate's level above black
++ * over the frame's, which is 1 for a frame of the estimate's units (the short
++ * exposure) and 1 / ratio for a long one; y is the fraction of the band's grid
++ * that counted. The frame's cells are read as bayer_cells_bin.frag does, from
++ * the 8 high bits of their four pixels.
 + */
 +
 +precision highp float;
@@ -887,11 +905,12 @@ index 000000000..553e34e38
 +uniform sampler2D prev_cells;
 +uniform vec3 black;		/* black level of red, green and blue, in counts */
 +uniform vec2 area;		/* the cells the frame's merge covers */
++uniform float bands;		/* how many bands the covered rows are split in */
 +
 +out vec4 fragColor;
 +
-+const int kColumns = 16;
-+const int kRows = 12;
++const int kColumns = 32;
++const int kRows = 2;
 +
 +void main(void)
 +{
@@ -899,11 +918,12 @@ index 000000000..553e34e38
 +	float sum_prev = 0.0;
 +	float sum_cur = 0.0;
 +	float counted = 0.0;
++	float band = floor(gl_FragCoord.y);
 +
 +	for (int j = 0; j < kRows; j++) {
 +		for (int i = 0; i < kColumns; i++) {
-+			vec2 cell = floor((vec2(float(i), float(j)) + 0.5) /
-+					  vec2(float(kColumns), float(kRows)) * area);
++			vec2 grid = (vec2(float(i), float(j)) + 0.5) / vec2(float(kColumns), float(kRows));
++			vec2 cell = floor(vec2(grid.x * area.x, (band + grid.y) / bands * area.y));
 +			vec2 p = cell * 2.0;
 +			float group = floor(p.x / 4.0);
 +			float first = group * 5.0 + (p.x - group * 4.0);
@@ -968,7 +988,7 @@ index 8e18178b7..5442bb437 100644
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..870c6cac4 100644
+index a3dfae76e..a5f0e4f5f 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -137,6 +137,7 @@ int DebayerEGL::getShaderVariableLocations(void)
@@ -987,7 +1007,7 @@ index a3dfae76e..870c6cac4 100644
  	/*
  	 * Tell shaders how to re-order output taking account of how the pixels
  	 * are actually stored by EGL.
-@@ -360,62 +362,116 @@ bool DebayerEGL::cellsSupported()
+@@ -360,62 +362,117 @@ bool DebayerEGL::cellsSupported()
  	       (major > 3 || (major == 3 && minor >= 2));
  }
  
@@ -1094,6 +1114,7 @@ index a3dfae76e..870c6cac4 100644
 +	ratio_.prev = glGetUniformLocation(ratio_.id, "prev_cells");
 +	ratio_.black = glGetUniformLocation(ratio_.id, "black");
 +	ratio_.area = glGetUniformLocation(ratio_.id, "area");
++	ratio_.bands = glGetUniformLocation(ratio_.id, "bands");
 +
 +	return 0;
 +}
@@ -1141,7 +1162,7 @@ index a3dfae76e..870c6cac4 100644
  
  	cellsSize_ = Size(width_ / 2, height_ / 2);
  
-@@ -426,18 +482,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+@@ -426,18 +483,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
  }
  
  /*
@@ -1172,7 +1193,7 @@ index a3dfae76e..870c6cac4 100644
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-@@ -465,9 +527,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -465,9 +528,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  
  	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
  	static const uint32_t unitIds[2] = { 4, 6 };
@@ -1193,7 +1214,7 @@ index a3dfae76e..870c6cac4 100644
  			if (!cells_[i]) {
  				LOG(Debayer, Error) << "Render targets of the cells fail";
  				return -ENODEV;
-@@ -483,26 +555,90 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -483,26 +556,93 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	const DebayerParams::Denoise &d = params.denoise;
  	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
  
@@ -1222,12 +1243,14 @@ index a3dfae76e..870c6cac4 100644
 +	 * against the merge so far into a texel of its own texture, which the
 +	 * binning pass reads.
 +	 */
++	/* The bands of rows the exposure is measured in */
++	static constexpr int kRatioBands = 24;
 +	bool measured = false;
 +	if (params.hdr.enabled) {
 +		if (!ratioState_) {
-+			ratioState_ = std::make_unique<eGLImage>(GL_RGBA, 1, 1, 8, GL_TEXTURE7, 7);
++			ratioState_ = std::make_unique<eGLImage>(GL_RGBA, 1, kRatioBands, 8, GL_TEXTURE7, 7);
 +			egl_.activateBindTexture(*ratioState_);
-+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 1, 1, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
++			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 1, kRatioBands, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
 +			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 +			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 +			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1252,7 +1275,8 @@ index a3dfae76e..870c6cac4 100644
 +				    params.blackLevel[1] * 1020.0f, params.blackLevel[2] * 1020.0f);
 +			glUniform2f(ratio_.area, static_cast<GLfloat>(binWidth),
 +				    static_cast<GLfloat>(binHeight));
-+			glViewport(0, 0, 1, 1);
++			glUniform1f(ratio_.bands, static_cast<GLfloat>(kRatioBands));
++			glViewport(0, 0, 1, kRatioBands);
 +			glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
 +			measured = true;
 +		}
@@ -1294,7 +1318,7 @@ index a3dfae76e..870c6cac4 100644
  		    params.blackLevel[2] * 1020.0f);
  
  	/*
-@@ -511,21 +647,46 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -511,21 +651,46 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	 * frame's reference, which the exposure's changes moved.
  	 */
  	const DebayerParams::Hdr &h = params.hdr;
@@ -1321,7 +1345,7 @@ index a3dfae76e..870c6cac4 100644
 +	glUniform4f(bin.merge, scale, prevScale, h.enabled ? 1.0f : 0.0f,
  		    cellsHistory_ ? 1.0f : 0.0f);
 +	glUniform1i(bin.ratioTex, 7);
-+	glUniform2f(bin.ratioSnap, h.ratio, measured ? 1.0f : 0.0f);
++	glUniform3f(bin.ratioSnap, h.ratio, measured ? 1.0f : 0.0f, static_cast<GLfloat>(binHeight));
  
  	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
 +
@@ -1345,7 +1369,7 @@ index a3dfae76e..870c6cac4 100644
  
  	GLenum err = glGetError();
  	if (err != GL_NO_ERROR) {
-@@ -540,11 +701,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -540,11 +705,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
   * Make the main program the one that samples single pixels, or the one that
   * samples the cells, and read the locations of its variables if it changed.
   */
@@ -1362,7 +1386,7 @@ index a3dfae76e..870c6cac4 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -867,7 +1030,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -867,7 +1034,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
@@ -1384,7 +1408,7 @@ index a3dfae76e..870c6cac4 100644
  	}
  
  	return;
-@@ -988,7 +1164,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1168,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -1393,7 +1417,7 @@ index a3dfae76e..870c6cac4 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1146,7 +1322,7 @@ int DebayerEGL::start()
+@@ -1146,7 +1326,7 @@ int DebayerEGL::start()
  
  	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
  
@@ -1402,7 +1426,7 @@ index a3dfae76e..870c6cac4 100644
  
  	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
  	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-@@ -1210,6 +1386,7 @@ void DebayerEGL::stop()
+@@ -1210,6 +1390,7 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
@@ -1410,7 +1434,7 @@ index a3dfae76e..870c6cac4 100644
  	for (auto &cells : cells_)
  		cells.reset();
  	cellsCurrent_ = 0;
-@@ -1217,11 +1394,12 @@ void DebayerEGL::stop()
+@@ -1217,11 +1398,12 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
@@ -1426,7 +1450,7 @@ index a3dfae76e..870c6cac4 100644
  	cellsActive_ = false;
  }
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 89ccf9129..dc3322603 100644
+index 89ccf9129..56290fcea 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -145,9 +145,9 @@ private:
@@ -1475,7 +1499,7 @@ index 89ccf9129..dc3322603 100644
 +	 */
 +	struct RatioProgram {
 +		GLuint id = 0;
-+		GLint vertex, texY, rawSize, prev, black, area;
++		GLint vertex, texY, rawSize, prev, black, area, bands;
 +	};
 +	int buildRatioProgram();
 +	RatioProgram ratio_;
