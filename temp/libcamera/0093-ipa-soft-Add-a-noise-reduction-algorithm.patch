@@ -1,7 +1,7 @@
-From ef88a97253159105256b2b6d312e58608bde5bb9 Mon Sep 17 00:00:00 2001
+From 08d7cf5d6d9f347b6462793717a37db56f60238b Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
-Date: Wed, 7 Oct 2026 23:36:21 +0000
-Subject: [PATCH 93/93] ipa: soft: Add a noise reduction algorithm
+Date: Thu, 8 Oct 2026 03:51:04 +0000
+Subject: [PATCH 93/94] ipa: soft: Add a noise reduction algorithm
 
 Denoise sets the GPU debayer's noise filter for each frame from the vendor
 tuning's adaptive Bayer filter, by the frame's gain: the noise model (the
