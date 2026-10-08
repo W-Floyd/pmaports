@@ -1,4 +1,4 @@
-From 405cd80b14395e54005bf9aa32fffdd0d2201886 Mon Sep 17 00:00:00 2001
+From cdb9140dd40935f2dfd969ab0372204b032dfed8 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -27,13 +27,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/soft_simple.cpp                  | 103 +++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
  src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
- src/libcamera/shaders/bayer_cells_bin.frag    |  78 +++--
+ src/libcamera/shaders/bayer_cells_bin.frag    |  91 +++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  75 +++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 16 files changed, 833 insertions(+), 176 deletions(-)
+ 16 files changed, 844 insertions(+), 178 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -105,7 +105,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..b79cbaf48 100644
+index ae99e98a8..b6c0d0042 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -99,15 +99,28 @@ static constexpr double kMeanAcquire = 0.6;
@@ -129,7 +129,7 @@ index ae99e98a8..b79cbaf48 100644
 +static constexpr double kHdrRatioRise = 1.03;
 +static constexpr double kHdrRatioFall = 0.995;
 +/* The most HDR holds the short exposure below the long one by */
-+static constexpr double kHdrMax = 32.0;
++static constexpr double kHdrMax = 8.0;
 +/*
 + * The fractions of clipped pixels over which the ratio wanted grows, by
 + * kHdrGrow a time, and over which it is held
@@ -815,7 +815,7 @@ index 046cb626f..d60ed2cf7 100644
  
  		vec4 levels = texture2D(sharpen_lut,
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..4b66abb46 100644
+index 680b00bda..3793d39c7 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -902,7 +902,7 @@ index 680b00bda..4b66abb46 100644
  		if (merge.w > 0.0) {
  			vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
  			prev = black + (prev - black) * merge.y;
-@@ -119,31 +144,44 @@ void main(void)
+@@ -119,31 +144,53 @@ void main(void)
  			 * estimates differ), and for all three channels, as a
  			 * clipped one has the wrong colour.
  			 */
@@ -916,9 +916,20 @@ index 680b00bda..4b66abb46 100644
 -				       half_green * (merge.x * merge.x);
 +				       half_green * (scale * scale);
  			vec3 level_prev = max(prev - black, 0.0);
- 			/* The estimate has the variance of some frames' mean */
+-			/* The estimate has the variance of some frames' mean */
++			/*
++			 * The estimate has the variance of some frames' mean; where the
++			 * long exposure could see the level, that of the long frames', a
++			 * ratio squared less, as in the shadows the estimate is made of
++			 * those. A short frame's weight there would otherwise be a third
++			 * of the update, with its noise and black level error times the
++			 * ratio.
++			 */
++			vec3 level_long = level_prev * ratio_snap.x;
++			float long_sees = 1.0 - smoothstep(600.0, 800.0, black.g + max(max(level_long.r, level_long.g), level_long.b));
  			vec3 var_prev = (noise.x * level_prev + noise.y * level_prev * level_prev + noise.z) *
- 					half_green * 0.6;
+-					half_green * 0.6;
++					half_green * 0.6 * mix(1.0, 1.0 / (ratio_snap.x * ratio_snap.x), long_sees);
  
  			/* One gate for the three channels, from the one that differs most */
 -			vec3 d = abs(cur - prev) / sqrt(var_cur + var_prev);
@@ -931,14 +942,14 @@ index 680b00bda..4b66abb46 100644
  			/* Where the cell fades out its difference from the estimate is no sign of motion */
 -			float gate = mix(1.0, exp(-0.5 * m * m), fresh);
 +			float gate = mix(1.0, exp(-0.5 * m2), fresh);
++
++			/* The inverse-variance mean, as the estimate plus a share of the difference */
++			vec3 share = fresh * var_prev;
++			cell = prev + diff * share / max(share + gate * var_cur, 1e-6);
  
 -			vec3 w_cur = fresh / max(var_cur, 1e-3);
 -			vec3 w_prev = gate / max(var_prev, 1e-3);
 -			cell = (w_cur * cur + w_prev * prev) / (w_cur + w_prev);
-+			/* The inverse-variance mean, as the estimate plus a share of the difference */
-+			vec3 share = fresh * var_prev;
-+			cell = prev + diff * share / max(share + gate * var_cur, 1e-6);
-+
 +			/*
 +			 * What saturates in the frame is at least as bright as it reads
 +			 * (scaled to the estimate's units): an estimate below that is the
