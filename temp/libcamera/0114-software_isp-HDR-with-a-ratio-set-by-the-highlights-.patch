@@ -1,4 +1,4 @@
-From 9e40b619d019999799ef8d2c56782375535e6061 Mon Sep 17 00:00:00 2001
+From 6d0c9934a9372914ee1da5491505d3e1054c196c Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -24,14 +24,14 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/ipa_context.h                    |  11 +
  src/ipa/soft/soft_simple.cpp                  |  89 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    | 111 +++++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  70 ++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  70 ++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 310 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 758 insertions(+), 168 deletions(-)
+ 14 files changed, 761 insertions(+), 168 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -558,10 +558,10 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..a61470135 100644
+index 046cb626f..d60ed2cf7 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -235,8 +235,52 @@ vec4 finish(vec3 rgb)
+@@ -235,8 +235,62 @@ vec4 finish(vec3 rgb)
   */
  uniform sampler2D sharpen_lut;
  uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
@@ -604,7 +604,17 @@ index 046cb626f..a61470135 100644
 +{
 +	vec3 p = linear * hdr_map.x;
 +	float y = dot(p, vec3(0.299, 0.587, 0.114));
-+	return y > hdr_map.y ? p * (hdr_compress(y) / y) : p;
++	if (y <= hdr_map.y)
++		return p;
++
++	/*
++	 * What is brighter than the long exposure could hold (y over 1) has no
++	 * colour to trust: the white balance of the room tints a bright lamp, or
++	 * the sky, whose light is another colour. It fades to white as it passes
++	 * that, as the highlights of film and of the sensors of phones do.
++	 */
++	float compressed = hdr_compress(y);
++	return mix(p * (compressed / y), vec3(compressed), smoothstep(0.9, 2.0, y));
 +}
 +#endif
 +
@@ -615,7 +625,7 @@ index 046cb626f..a61470135 100644
  uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
  uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
  uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
-@@ -244,7 +288,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
+@@ -244,7 +298,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
  
  void main(void)
  {
@@ -623,7 +633,7 @@ index 046cb626f..a61470135 100644
  	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
  
  	vec3 level = max(c - blacklevel * 1020.0, 0.0);
-@@ -252,30 +295,48 @@ void main(void)
+@@ -252,30 +305,41 @@ void main(void)
  		     vec3(1.0, 0.70710678, 1.0);
  	vec3 width = mix(width_lo, width_hi,
  			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
@@ -680,18 +690,11 @@ index 046cb626f..a61470135 100644
 +	vec3 lin = linear_stage(average / 1020.0, shading);
 +#if defined(HDR)
 +	lin = hdr_tonemap(lin);
-+	/*
-+	 * What nears clipping even in the short exposure has lost its colour (green, the brightest channel, compresses first): a clipped
-+	 * channel is scaled by the white balance past the others, and tints it
-+	 * (pink, usually), so it fades to its luma.
-+	 */
-+	float clipped = smoothstep(600.0, 800.0, max(max(average.r, average.g), average.b));
-+	lin = mix(lin, vec3(dot(lin, vec3(0.299, 0.587, 0.114))), clipped);
 +#endif
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -285,8 +346,12 @@ void main(void)
+@@ -285,8 +349,12 @@ void main(void)
  		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
