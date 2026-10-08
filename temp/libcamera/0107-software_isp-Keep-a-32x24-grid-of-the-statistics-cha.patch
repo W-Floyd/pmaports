@@ -1,0 +1,144 @@
+From e9730f31eaf8e461a7d2993bc04d9e53feccf20b Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 16:33:46 +0000
+Subject: [PATCH] software_isp: Keep a 32x24 grid of the statistics' channel
+ sums
+
+Alongside the whole-window sums, the CPU statistics accumulate the same
+samples (lens shading corrected, saturated ones left out) in a grid of
+zones over the statistics window, for white balance that looks at where in
+the frame the light is. AWB logs the grid against the sums for now.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/swisp_stats.h       | 21 ++++++++++++++++++
+ src/ipa/soft/algorithms/awb.cpp               | 17 ++++++++++++++
+ src/libcamera/software_isp/swstats_cpu.cpp    | 22 +++++++++++++++++++
+ 3 files changed, 60 insertions(+)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index 9e180f648..b95d3924b 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -61,6 +61,27 @@ struct SwIspStats {
+ 	 * divisor whenever \ref sum_ is normalised.
+ 	 */
+ 	uint64_t sumCount;
++	/**
++	 * \brief Number of zones of the statistics window across and down
++	 */
++	static constexpr unsigned int kZonesX = 32;
++	static constexpr unsigned int kZonesY = 24;
++	/**
++	 * \brief The channel sums of one zone of the window
++	 *
++	 * The samples are the ones \ref sum_ is made of: lens shading
++	 * corrected, saturated samples left out, so that a zone's mean is its
++	 * sums over its own count, in the same units as sum_ / sumCount.
++	 */
++	struct Zone {
++		uint64_t r, g, b;
++		uint64_t count;
++	};
++	/**
++	 * \brief The zones, row by row from the top left; the window is divided
++	 * evenly into kZonesX x kZonesY
++	 */
++	std::array<Zone, kZonesX * kZonesY> zones;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/ipa/soft/algorithms/awb.cpp b/src/ipa/soft/algorithms/awb.cpp
+index f11f6f136..280d816d7 100644
+--- a/src/ipa/soft/algorithms/awb.cpp
++++ b/src/ipa/soft/algorithms/awb.cpp
+@@ -310,6 +310,23 @@ void Awb::process(IPAContext &context,
+ 	if (!stats->valid)
+ 		return;
+ 
++	/* The zones are the sums' samples, divided over the window */
++	uint64_t zoneCount = 0, zoneG = 0;
++	for (const SwIspStats::Zone &z : stats->zones) {
++		zoneCount += z.count;
++		zoneG += z.g;
++	}
++	const SwIspStats::Zone &mid =
++		stats->zones[(SwIspStats::kZonesY / 2) * SwIspStats::kZonesX +
++			     SwIspStats::kZonesX / 2];
++	LOG(IPASoftAwb, Debug)
++		<< "Zones hold " << zoneCount << " samples of " << stats->sumCount
++		<< ", green " << zoneG << " of " << stats->sum_.g()
++		<< "; the middle zone " << mid.count << " samples, mean "
++		<< (mid.count ? mid.r / mid.count : 0) << " "
++		<< (mid.count ? mid.g / mid.count : 0) << " "
++		<< (mid.count ? mid.b / mid.count : 0);
++
+ 	/*
+ 	 * Saturated samples do not contribute to the sums, so if almost
+ 	 * everything is clipping there is too little unclipped data left to
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index efdb589dd..3b51bcb74 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -192,6 +192,9 @@ static constexpr unsigned int kSaturated = 248;
+ 	uint64_t sumG = 0;                \
+ 	uint64_t sumB = 0;                \
+ 	uint64_t sumCount = 0;            \
++	/* This line's row of the zones, over the window */ \
++	SwIspStats::Zone *zoneRow = &stats.zones[((y - window_.y) * SwIspStats::kZonesY / \
++						  window_.height) * SwIspStats::kZonesX]; \
+ 	pixel_t g0 = 0, g1 = 0;           \
+ 	unsigned int gCount = 0;          \
+ 	uint64_t sharpness = 0;           \
+@@ -234,6 +237,11 @@ static constexpr unsigned int kSaturated = 248;
+ 		sumG += g;                 \
+ 		sumB += b;                 \
+ 		sumCount++;                \
++		SwIspStats::Zone &zone = zoneRow[x * SwIspStats::kZonesX / xSpan]; \
++		zone.r += r;               \
++		zone.g += g;               \
++		zone.b += b;               \
++		zone.count++;              \
+ 	}                                  \
+                                            \
+ 	yVal = r * kRedYMul;               \
+@@ -497,6 +505,7 @@ void SwStatsCpu::startFrame(uint32_t frame)
+ 		s.yHistogram.fill(0);
+ 		s.sharpness = 0;
+ 		s.sumCount = 0;
++		s.zones.fill({ 0, 0, 0, 0 });
+ 	}
+ }
+ 
+@@ -516,8 +525,15 @@ void SwStatsCpu::finishFrame(uint32_t frame, uint32_t bufferId)
+ 		sharedStats_->yHistogram.fill(0);
+ 		sharedStats_->sharpness = 0;
+ 		sharedStats_->sumCount = 0;
++		sharedStats_->zones.fill({ 0, 0, 0, 0 });
+ 		for (const auto &s : stats_) {
+ 			sharedStats_->sum_ += s.sum_;
++			for (unsigned int j = 0; j < s.zones.size(); j++) {
++				sharedStats_->zones[j].r += s.zones[j].r;
++				sharedStats_->zones[j].g += s.zones[j].g;
++				sharedStats_->zones[j].b += s.zones[j].b;
++				sharedStats_->zones[j].count += s.zones[j].count;
++			}
+ 			for (unsigned int j = 0; j < SwIspStats::kYHistogramSize; j++)
+ 				sharedStats_->yHistogram[j] += s.yHistogram[j];
+ 			sharedStats_->sharpness += s.sharpness;
+@@ -531,6 +547,12 @@ void SwStatsCpu::finishFrame(uint32_t frame, uint32_t bufferId)
+ 		 * domain as sum_ for the deeper bit depths that shift.
+ 		 */
+ 		sharedStats_->sumCount >>= sumShift_;
++		for (auto &z : sharedStats_->zones) {
++			z.r >>= sumShift_;
++			z.g >>= sumShift_;
++			z.b >>= sumShift_;
++			z.count >>= sumShift_;
++		}
+ 	}
+ 
+ 	sharedStats_->valid = valid;
+-- 
+2.55.0
+
