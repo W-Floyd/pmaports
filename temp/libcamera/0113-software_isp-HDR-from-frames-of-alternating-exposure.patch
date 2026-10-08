@@ -1,4 +1,4 @@
-From b63fd512699941a086e73a853c834e94f5734cc5 Mon Sep 17 00:00:00 2001
+From 3c71fc3bf3e150b50e0b26e06bb27ff58a596e0e Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 17:44:44 +0000
 Subject: [PATCH] software_isp: HDR from frames of alternating exposure
@@ -17,15 +17,15 @@ temporal filter without HDR.
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
- .../internal/software_isp/debayer_params.h    |  17 +++
- src/ipa/soft/algorithms/agc.cpp               | 138 +++++++++++++++++-
- src/ipa/soft/algorithms/agc.h                 |   8 +
+ .../internal/software_isp/debayer_params.h    |  17 ++
+ src/ipa/soft/algorithms/agc.cpp               | 148 +++++++++++++++++-
+ src/ipa/soft/algorithms/agc.h                 |  10 ++
  src/ipa/soft/algorithms/denoise.cpp           |   8 +-
  src/ipa/soft/ipa_context.h                    |  12 ++
- src/libcamera/shaders/bayer_cells_bin.frag    |  46 +++++-
+ src/libcamera/shaders/bayer_cells_bin.frag    |  53 ++++++-
  src/libcamera/software_isp/debayer_egl.cpp    |  16 +-
  src/libcamera/software_isp/debayer_egl.h      |   3 +
- 8 files changed, 242 insertions(+), 6 deletions(-)
+ 8 files changed, 261 insertions(+), 6 deletions(-)
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
 index 620ebd77d..d57221bde 100644
@@ -56,7 +56,7 @@ index 620ebd77d..d57221bde 100644
  	 * Sharpening, applied by the GPU debayer on the cells path (where the
  	 * pixel's cell and the ones around it are at hand): the difference
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index 5ee10fcf5..681729d1c 100644
+index 5ee10fcf5..ae99e98a8 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -16,6 +16,7 @@
@@ -67,7 +67,7 @@ index 5ee10fcf5..681729d1c 100644
  
  #include "control_ids.h"
  
-@@ -94,6 +95,18 @@ static constexpr float kAcquireError = 0.5;
+@@ -94,6 +95,20 @@ static constexpr float kAcquireError = 0.5;
  static constexpr double kMeanSatisfactory = 0.1;
  static constexpr double kMeanAcquire = 0.6;
  
@@ -82,11 +82,13 @@ index 5ee10fcf5..681729d1c 100644
 +static constexpr double kHdrOn = 1.25;
 +static constexpr double kHdrOff = 1.12;
 +static constexpr double kHdrRatioStep = 0.15;
++/* The frames the DRC gain must stay below kHdrOff for, before HDR stops */
++static constexpr unsigned int kHdrHold = 30;
 +
  Agc::Agc()
  	: exposureOptimal_(kExposureOptimal),
  	  exposureSatisfactory_(kDefaultExposureSatisfactory),
-@@ -194,6 +207,14 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+@@ -194,6 +209,14 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
  	auto maxExposure = tuningData["maxExposure"].get<double>();
  	if (maxExposure && *maxExposure > 0.0)
  		maxExposureUs_ = *maxExposure;
@@ -101,7 +103,7 @@ index 5ee10fcf5..681729d1c 100644
  	auto byGain = tuningData["exposureByGain"].get<std::vector<double>>();
  	if (byGain && byGain->size() >= 4 && byGain->size() % 2 == 0) {
  		for (unsigned int i = 0; i < byGain->size(); i += 2)
-@@ -375,6 +396,16 @@ static constexpr double kDrcMatch = 0.02;
+@@ -375,6 +398,16 @@ static constexpr double kDrcMatch = 0.02;
   */
  void Agc::trackDrc(IPAContext &context, const IPAFrameContext &frameContext)
  {
@@ -118,7 +120,7 @@ index 5ee10fcf5..681729d1c 100644
  	const double product = frameContext.sensor.exposure * frameContext.sensor.gain;
  	const auto &history = context.activeState.agc.drcHistory;
  
-@@ -807,6 +838,94 @@ void Agc::queueRequest([[maybe_unused]] typename Module::Context &context,
+@@ -807,6 +840,102 @@ void Agc::queueRequest([[maybe_unused]] typename Module::Context &context,
  		analogueGain_ = *g;
  }
  
@@ -178,12 +180,20 @@ index 5ee10fcf5..681729d1c 100644
 +			LOG(IPASoftExposure, Info) << "HDR on, the long exposure "
 +						   << hdr.ratio << " times the short";
 +		}
-+	} else if (drcDecided_ < hdrOff_ || !split(hdr.ratio)) {
++	} else if (!split(hdr.ratio) ||
++		   (drcDecided_ < hdrOff_ && ++hdrBelow_ >= kHdrHold)) {
++		/* The DRC gain has to stay low for a while, or HDR flaps on and off */
 +		hdr.active = false;
++		hdrBelow_ = 0;
 +		LOG(IPASoftExposure, Info) << "HDR off";
-+	} else if (std::abs(drcDecided_ / hdr.ratio - 1.0) > kHdrRatioStep && split(drcDecided_)) {
-+		hdr.ratio = drcDecided_;
++	} else if (drcDecided_ >= hdrOff_) {
++		hdrBelow_ = 0;
 +	}
++
++	/* The ratio follows the DRC gain once it is off by a step */
++	if (hdr.active && std::abs(drcDecided_ / hdr.ratio - 1.0) > kHdrRatioStep &&
++	    split(drcDecided_))
++		hdr.ratio = drcDecided_;
 +
 +	if (!hdr.active)
 +		return;
@@ -213,7 +223,7 @@ index 5ee10fcf5..681729d1c 100644
  /*
   * The application's exposure time and gain in place of the loop's, where
   * their modes are manual, within the sensor's range. The loop's state
-@@ -840,6 +959,9 @@ void Agc::process(IPAContext &context,
+@@ -840,6 +969,9 @@ void Agc::process(IPAContext &context,
  	metadata.set(controls::ExposureTime, exposureTime.get<std::micro>());
  	metadata.set(controls::AnalogueGain, frameContext.sensor.gain);
  
@@ -223,7 +233,7 @@ index 5ee10fcf5..681729d1c 100644
  	if (!context.activeState.agc.valid) {
  		/*
  		 * Init active-state from sensor values in case updateExposure()
-@@ -862,7 +984,21 @@ void Agc::process(IPAContext &context,
+@@ -862,7 +994,21 @@ void Agc::process(IPAContext &context,
  	if (hist_)
  		trackDrc(context, frameContext);
  
@@ -247,7 +257,7 @@ index 5ee10fcf5..681729d1c 100644
  		 * Use the new exposure and gain values calculated the last time
  		 * there were valid stats.
 diff --git a/src/ipa/soft/algorithms/agc.h b/src/ipa/soft/algorithms/agc.h
-index 2f1ad429c..053e10781 100644
+index 2f1ad429c..0484b88eb 100644
 --- a/src/ipa/soft/algorithms/agc.h
 +++ b/src/ipa/soft/algorithms/agc.h
 @@ -30,6 +30,9 @@ public:
@@ -268,13 +278,15 @@ index 2f1ad429c..053e10781 100644
  	double histTarget(IPAContext &context, const SwIspStats *stats);
  	void trackDrc(IPAContext &context, const IPAFrameContext &frameContext);
  	void updateExposure(IPAContext &context, IPAFrameContext &frameContext,
-@@ -92,6 +96,10 @@ private:
+@@ -92,6 +96,12 @@ private:
  	};
  	std::optional<LuxTuning> lux_;
  
 +	/* The DRC gains HDR starts and stops at */
 +	double hdrOn_ = 1.25;
 +	double hdrOff_ = 1.12;
++	/* How many frames the DRC gain has been below hdrOff_ */
++	unsigned int hdrBelow_ = 0;
 +
  	/* The longest exposure time (us) to lengthen the frame for, 0 for none */
  	double maxExposureUs_ = 0.0;
@@ -330,7 +342,7 @@ index 2b413867f..678a8f817 100644
  		/*
  		 * Dynamic range compression: how far exposure is held below
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index dee779695..3ffa6f4c3 100644
+index dee779695..680b00bda 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -43,6 +43,18 @@ uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
@@ -352,7 +364,7 @@ index dee779695..3ffa6f4c3 100644
  out vec4 fragColor;
  
  /* A byte gathered, from 0 to 255 */
-@@ -94,8 +106,40 @@ void main(void)
+@@ -94,8 +106,47 @@ void main(void)
  
  	vec3 cell = vec3(r, g * 0.5, b);
  
@@ -363,8 +375,14 @@ index dee779695..3ffa6f4c3 100644
 +			vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
 +			prev = black + (prev - black) * merge.y;
 +
-+			/* A cell of a saturated channel has the wrong colour, of all three */
-+			bool valid = max(max(cell.r, cell.g), cell.b) < 992.0;
++			/*
++			 * The weight of a cell fades out as its brightest channel
++			 * nears saturation, well below it where sensors compress
++			 * (a hard cut leaves contour lines where the two frames'
++			 * estimates differ), and for all three channels, as a
++			 * clipped one has the wrong colour.
++			 */
++			float fresh = 1.0 - smoothstep(780.0, 940.0, max(max(cell.r, cell.g), cell.b));
 +
 +			/* A cell's green is the mean of two pixels: half the variance */
 +			vec3 half_green = vec3(1.0, 0.5, 1.0);
@@ -379,9 +397,10 @@ index dee779695..3ffa6f4c3 100644
 +			/* One gate for the three channels, from the one that differs most */
 +			vec3 d = abs(cur - prev) / sqrt(var_cur + var_prev);
 +			float m = max(max(d.x, d.y), d.z) / max(temporal.y, 0.001);
-+			float gate = valid ? exp(-0.5 * m * m) : 1.0;
++			/* Where the cell fades out its difference from the estimate is no sign of motion */
++			float gate = mix(1.0, exp(-0.5 * m * m), fresh);
 +
-+			vec3 w_cur = valid ? 1.0 / max(var_cur, 1e-3) : vec3(0.0);
++			vec3 w_cur = fresh / max(var_cur, 1e-3);
 +			vec3 w_prev = gate / max(var_prev, 1e-3);
 +			cell = (w_cur * cur + w_prev * prev) / (w_cur + w_prev);
 +		} else {
