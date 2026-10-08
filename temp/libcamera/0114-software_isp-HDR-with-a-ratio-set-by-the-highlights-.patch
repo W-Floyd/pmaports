@@ -1,4 +1,4 @@
-From 7be0a53e9db86f3ef9c682a9eaecab184b5354fc Mon Sep 17 00:00:00 2001
+From 49be579fa2f5dc89b072f64fc30b2c466447c5c7 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -18,11 +18,13 @@ stayed below 1.6 for 30 frames.
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../internal/software_isp/debayer_params.h    |   8 +
+ .../internal/software_isp/swisp_stats.h       |  10 +
+ .../internal/software_isp/swstats_cpu.h       |   2 +-
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
  src/ipa/soft/algorithms/agc.cpp               | 177 ++++++++--
  src/ipa/soft/algorithms/agc.h                 |  16 +-
  src/ipa/soft/ipa_context.h                    |  20 ++
- src/ipa/soft/soft_simple.cpp                  |  91 ++++-
+ src/ipa/soft/soft_simple.cpp                  | 103 +++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
  src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  78 +++--
@@ -31,7 +33,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 800 insertions(+), 170 deletions(-)
+ 16 files changed, 822 insertions(+), 172 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -53,6 +55,40 @@ index d57221bde..b4f162fc9 100644
  	} hdr;
  
  	/*
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index b95d3924b..5624f9d4d 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -22,6 +22,16 @@ namespace libcamera {
+  * wrap around.
+  */
+ struct SwIspStats {
++	/**
++	 * \brief Statistics are made of one frame in this many (the frames whose
++	 *        number is a multiple of it)
++	 *
++	 * The \ref valid flag says so for the frame whose statistics were last
++	 * finished, and is overwritten by the frames after it, which can finish
++	 * before the statistics of the one before are read: what a reader of the
++	 * statistics of a frame should go by is its number.
++	 */
++	static constexpr uint32_t kFramesPerStats = 4;
+ 	/**
+ 	 * \brief True if the statistics buffer contains valid data, false if
+ 	 *        no statistics were generated for this frame
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index e6fd44ea0..bcfcaae6a 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -45,7 +45,7 @@ public:
+ 	 * Run stats once every 4 frames to ensure any previous
+ 	 * exposure changes have been applied.
+ 	 */
+-	static constexpr uint32_t kStatPerNumFrames = 4;
++	static constexpr uint32_t kStatPerNumFrames = SwIspStats::kFramesPerStats;
+ 
+ 	bool isValid() const { return sharedStats_.fd().isValid(); }
+ 
 diff --git a/src/ipa/soft/algorithms/adjust.cpp b/src/ipa/soft/algorithms/adjust.cpp
 index ed78eb353..9a3c21ea9 100644
 --- a/src/ipa/soft/algorithms/adjust.cpp
@@ -421,7 +457,7 @@ index 678a8f817..3a36a1710 100644
  		bool valid;
  		/*
 diff --git a/src/ipa/soft/soft_simple.cpp b/src/ipa/soft/soft_simple.cpp
-index 0b23a62aa..60ffe8114 100644
+index 0b23a62aa..f5733ed86 100644
 --- a/src/ipa/soft/soft_simple.cpp
 +++ b/src/ipa/soft/soft_simple.cpp
 @@ -10,6 +10,7 @@
@@ -535,16 +571,31 @@ index 0b23a62aa..60ffe8114 100644
  	paramsComputed.emit(frame);
  }
  
-@@ -440,6 +512,8 @@ void IPASoftSimple::processStats(const uint32_t frame,
+@@ -440,10 +512,22 @@ void IPASoftSimple::processStats(const uint32_t frame,
  		sensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>();
  	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
  	frameContext.sensor.gain = camHelper_ ? camHelper_->gain(again) : again;
 +	if (context_.activeState.agc.hdr.active)
 +		hdrExposureOf(frame, frameContext);
++
++	/*
++	 * The statistics of this frame are valid if one in this many frames is:
++	 * the flag in the shared buffer is the last frame's finished, and is
++	 * cleared by the frames that finished after this one before it was read
++	 * (the thread of the statistics runs the frames that waited for a long
++	 * job back to back), which left most of the valid ones unseen.
++	 */
++	SwIspStats stats = *stats_;
++	stats.valid = !(frame % SwIspStats::kFramesPerStats);
  
  	ControlList metadata(controls::controls);
  	for (const auto &algo : algorithms())
-@@ -455,13 +529,16 @@ void IPASoftSimple::processStats(const uint32_t frame,
+-		algo->process(context_, frame, frameContext, stats_, metadata);
++		algo->process(context_, frame, frameContext, &stats, metadata);
+ 	metadataReady.emit(frame, metadata);
+ 
+ 	/* Sanity check */
+@@ -455,13 +539,16 @@ void IPASoftSimple::processStats(const uint32_t frame,
  
  	ControlList ctrls(sensorInfoMap_);
  
