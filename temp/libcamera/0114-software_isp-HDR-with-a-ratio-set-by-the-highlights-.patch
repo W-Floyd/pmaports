@@ -1,4 +1,4 @@
-From a048feb8c99484e4287a68a646405cb9381db38c Mon Sep 17 00:00:00 2001
+From 9e40b619d019999799ef8d2c56782375535e6061 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -558,7 +558,7 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..3ac9df079 100644
+index 046cb626f..a61470135 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
 @@ -235,8 +235,52 @@ vec4 finish(vec3 rgb)
@@ -681,11 +681,11 @@ index 046cb626f..3ac9df079 100644
 +#if defined(HDR)
 +	lin = hdr_tonemap(lin);
 +	/*
-+	 * What clipped even in the short exposure has lost its colour: a clipped
++	 * What nears clipping even in the short exposure has lost its colour (green, the brightest channel, compresses first): a clipped
 +	 * channel is scaled by the white balance past the others, and tints it
 +	 * (pink, usually), so it fades to its luma.
 +	 */
-+	float clipped = smoothstep(840.0, 1000.0, max(max(average.r, average.g), average.b));
++	float clipped = smoothstep(600.0, 800.0, max(max(average.r, average.g), average.b));
 +	lin = mix(lin, vec3(dot(lin, vec3(0.299, 0.587, 0.114))), clipped);
 +#endif
  	vec3 rgb = tone_chroma(lin);
