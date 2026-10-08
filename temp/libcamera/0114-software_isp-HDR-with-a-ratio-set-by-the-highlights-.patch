@@ -1,4 +1,4 @@
-From 1269a081d2bf34e115270be77c57673a0ede9634 Mon Sep 17 00:00:00 2001
+From 43c022e32210cb4b4f9488440649071d0039bc55 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -25,13 +25,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/soft_simple.cpp                  |  89 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
  src/libcamera/shaders/bayer_1x_packed.frag    | 114 +++++--
- src/libcamera/shaders/bayer_cells_bin.frag    |  93 ++++--
+ src/libcamera/shaders/bayer_cells_bin.frag    | 100 ++++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  75 +++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 314 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 793 insertions(+), 168 deletions(-)
+ 14 files changed, 800 insertions(+), 168 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -710,7 +710,7 @@ index 046cb626f..d60ed2cf7 100644
  
  		vec4 levels = texture2D(sharpen_lut,
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..a6d75bc49 100644
+index 680b00bda..058c4a172 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -776,7 +776,7 @@ index 680b00bda..a6d75bc49 100644
  
  	vec2 red = tex_bayer_first_red;
  	vec4 is_red = vec4((1.0 - red.x) * (1.0 - red.y), red.x * (1.0 - red.y),
-@@ -106,8 +120,34 @@ void main(void)
+@@ -106,8 +120,41 @@ void main(void)
  
  	vec3 cell = vec3(r, g * 0.5, b);
  
@@ -800,10 +800,17 @@ index 680b00bda..a6d75bc49 100644
 +					scale = unit;
 +					int band = min(int(gl_FragCoord.y / ratio_snap.z * float(bands)), bands - 1);
 +					vec2 here = texelFetch(ratio_tex, ivec2(0, band), 0).xy;
-+					if (here.y > 0.1 && here.x > 0.0) {
-+						float relative = here.x / base.x;
-+						if (abs(log(relative)) < 1.4)
-+							scale = unit * relative;
++					/*
++					 * Only the first rows differ (those of the first
++					 * exposure time or so, a fourth of the frame at
++					 * the most), within what a change of exposure
++					 * does to them; a band's measure elsewhere is
++					 * noise, and bands of it show as stripes.
++					 */
++					float top = clamp((float(bands / 4) - float(band)) / 2.0, 0.0, 1.0);
++					if (top > 0.0 && here.y > 0.1 && here.x > 0.0) {
++						float relative = clamp(here.x / base.x, 0.4, 2.5);
++						scale = unit * mix(1.0, relative, top);
 +					}
 +				}
 +			}
@@ -812,7 +819,7 @@ index 680b00bda..a6d75bc49 100644
  		if (merge.w > 0.0) {
  			vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
  			prev = black + (prev - black) * merge.y;
-@@ -119,31 +159,44 @@ void main(void)
+@@ -119,31 +166,44 @@ void main(void)
  			 * estimates differ), and for all three channels, as a
  			 * clipped one has the wrong colour.
  			 */
