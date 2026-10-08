@@ -1,0 +1,335 @@
+From 973523a1d95857effecd02f7653a3218d2a37dc0 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 17:20:08 +0000
+Subject: [PATCH] software_isp: Filter the cells over time
+
+The pass that bins the raw frame into cells blends each cell with the
+previous frame's, recursively, with a weight that follows the sensor's
+noise as the spatial filter's does, so that what moved is not averaged
+and a still scene's noise falls from frame to frame. The cells ping-pong
+between two textures; the filter is off for the first frame after the
+cells path was last off. The Denoise algorithm sets its strength by gain.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/debayer_params.h    |  9 +++
+ src/ipa/soft/algorithms/denoise.cpp           | 25 ++++++++
+ src/ipa/soft/algorithms/denoise.h             |  3 +
+ src/libcamera/shaders/bayer_cells_bin.frag    | 34 ++++++++++-
+ src/libcamera/software_isp/debayer_egl.cpp    | 61 ++++++++++++++-----
+ src/libcamera/software_isp/debayer_egl.h      | 17 +++++-
+ 6 files changed, 131 insertions(+), 18 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index e34f90d60..620ebd77d 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -102,6 +102,15 @@ struct DebayerParams {
+ 		std::array<float, 3> widthHigh = { 2.0f, 2.0f, 2.0f };
+ 		float levelLow = 64.0f;
+ 		float levelHigh = 160.0f;
++		/*
++		 * Temporal noise reduction, in the pass that bins the cells: a
++		 * recursive blend of each cell with the previous frame's, the
++		 * previous one weighed by temporal times the same range kernel
++		 * (with a width of temporalWidth deviations), so that motion is
++		 * not averaged. 0 for none.
++		 */
++		float temporal = 0.0f;
++		float temporalWidth = 2.0f;
+ 	} denoise;
+ 
+ 	/*
+diff --git a/src/ipa/soft/algorithms/denoise.cpp b/src/ipa/soft/algorithms/denoise.cpp
+index e4e0dfd62..92abcbdee 100644
+--- a/src/ipa/soft/algorithms/denoise.cpp
++++ b/src/ipa/soft/algorithms/denoise.cpp
+@@ -8,6 +8,7 @@
+ #include "denoise.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ 
+ #include <libcamera/base/log.h>
+ 
+@@ -32,6 +33,18 @@ static constexpr double kMaxWidth = 4.0;
+ static constexpr double kEnableGain = 3.0;
+ static constexpr double kDisableGain = 2.0;
+ 
++/*
++ * The temporal filter (see DebayerParams::Denoise): the weight of the
++ * previous frame's cell at no difference is kTemporalBase at the first gain
++ * and rises by kTemporalPerStop for each doubling of the gain, to
++ * kTemporalMax; a difference counts as motion beyond kTemporalWidth noise
++ * deviations.
++ */
++static constexpr double kTemporalBase = 0.8;
++static constexpr double kTemporalPerStop = 0.5;
++static constexpr double kTemporalMax = 2.5;
++static constexpr double kTemporalWidth = 2.0;
++
+ /* The variance of the read noise, in 10-bit counts squared, by gain */
+ static constexpr double kReadNoiseBase = 0.3;
+ static constexpr double kReadNoisePerGain = 0.05;
+@@ -62,6 +75,9 @@ static constexpr double kReadNoisePerGain = 0.05;
+ 
+ int Denoise::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ {
++	/* temporalScale: how strong the temporal filter is, 1 as set, 0 for none */
++	temporalScale_ = std::max(tuningData["temporalScale"].get<double>(1.0), 0.0);
++
+ 	for (const ValueNode &node : tuningData["regions"].asList()) {
+ 		auto gain = node["gain"].get<std::vector<double>>();
+ 		auto lo = node["strengthLo"].get<std::vector<double>>();
+@@ -139,6 +155,15 @@ void Denoise::prepare(IPAContext &context,
+ 	d.widthHigh = widths(lo.strengthHi, hi.strengthHi);
+ 	d.levelLow = mix(lo.anchorLo, hi.anchorLo);
+ 	d.levelHigh = mix(lo.anchorHi, hi.anchorHi);
++
++	/*
++	 * The temporal filter's strength: more of the previous frame as there
++	 * is more noise to average, up to a limit that keeps what moves from
++	 * trailing.
++	 */
++	d.temporal = std::clamp(kTemporalBase + kTemporalPerStop * std::log2(gain / kEnableGain),
++				kTemporalBase, kTemporalMax) * temporalScale_;
++	d.temporalWidth = kTemporalWidth;
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Denoise, "Denoise")
+diff --git a/src/ipa/soft/algorithms/denoise.h b/src/ipa/soft/algorithms/denoise.h
+index 778da72f8..528c1f26e 100644
+--- a/src/ipa/soft/algorithms/denoise.h
++++ b/src/ipa/soft/algorithms/denoise.h
+@@ -46,6 +46,9 @@ private:
+ 
+ 	/* Whether the noise reduction is on, with a hysteresis in the gain */
+ 	bool active_ = false;
++
++	/* The temporal filter's strength is scaled by this; 0 turns it off */
++	double temporalScale_ = 1.0;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
+index 1263ae6f2..ad80d11af 100644
+--- a/src/libcamera/shaders/bayer_cells_bin.frag
++++ b/src/libcamera/shaders/bayer_cells_bin.frag
+@@ -25,6 +25,24 @@ uniform sampler2D tex_y;
+ uniform vec2 raw_size;
+ uniform vec2 tex_bayer_first_red;
+ 
++/*
++ * Temporal noise reduction: the cells the previous frame's pass wrote, which
++ * are blended into this frame's, recursively, with a weight that follows the
++ * sensor's noise as the spatial filter's does:
++ *
++ *   weight = strength * exp(-(difference / (width * sigma))^2 / 2)
++ *   cell = (cell + weight * previous cell) / (1 + weight)
++ *
++ * so that what changed by more than a few deviations (motion) is not
++ * averaged, and a still scene's noise falls frame by frame. sigma^2 =
++ * slope * level + quad * level^2 + floor, the level above black in 10-bit
++ * counts. A strength of 0 leaves the frame's cells as they are.
++ */
++uniform sampler2D prev_cells;
++uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
++uniform vec2 temporal;		/* strength, and width in deviations */
++uniform vec3 black;		/* black level of red, green and blue, in counts */
++
+ out vec4 fragColor;
+ 
+ /* A byte gathered, from 0 to 255 */
+@@ -74,6 +92,20 @@ void main(void)
+ 	float b = dot(v, is_blue);
+ 	float g = v.x + v.y + v.z + v.w - r - b;
+ 
++	vec3 cell = vec3(r, g * 0.5, b);
++
++	if (temporal.x > 0.0) {
++		vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
++		vec3 level = max(cell - black, 0.0);
++		/* A cell's green is the mean of two pixels: half the variance */
++		vec3 sigma = sqrt(noise.x * level + noise.y * level * level + noise.z) *
++			     vec3(1.0, 0.70710678, 1.0);
++		/* The previous cell is itself filtered, which widens the difference's spread */
++		vec3 d = (cell - prev) / max(temporal.y * sigma * 1.2, 0.001);
++		vec3 w = temporal.x * exp(-0.5 * d * d);
++		cell = (cell + w * prev) / (1.0 + w);
++	}
++
+ 	/* 10-bit unorm: counts over 1023, exact for the whole counts */
+-	fragColor = vec4(r, g * 0.5, b, 0.0) / 1023.0;
++	fragColor = vec4(cell, 0.0) / 1023.0;
+ }
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 398fce691..ffb164488 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -411,6 +411,10 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+ 	binUniformTexY_ = glGetUniformLocation(binProgramId_, "tex_y");
+ 	binUniformRawSize_ = glGetUniformLocation(binProgramId_, "raw_size");
+ 	binUniformFirstRed_ = glGetUniformLocation(binProgramId_, "tex_bayer_first_red");
++	binUniformPrev_ = glGetUniformLocation(binProgramId_, "prev_cells");
++	binUniformNoise_ = glGetUniformLocation(binProgramId_, "noise");
++	binUniformTemporal_ = glGetUniformLocation(binProgramId_, "temporal");
++	binUniformBlack_ = glGetUniformLocation(binProgramId_, "black");
+ 
+ 	cellsSize_ = Size(width_ / 2, height_ / 2);
+ 
+@@ -446,9 +450,10 @@ std::unique_ptr<eGLImage> DebayerEGL::createCellsTexture(GLenum unit, uint32_t u
+ 
+ /*
+  * Run the cells path's first pass: bin each cell of the input into a texel of
+- * the cells texture, which stays bound to texture unit 4 for the main pass.
++ * the cells texture (blended with the previous frame's, when the temporal
++ * filter is on), which stays bound to its texture unit for the main pass.
+  */
+-int DebayerEGL::renderCells(eGLImage &eglImageIn)
++int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ {
+ 	static const GLfloat vcoordinates[4][2] = {
+ 		{ -1.0f, -1.0f },
+@@ -457,16 +462,29 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn)
+ 		{ +1.0f, -1.0f },
+ 	};
+ 
+-	if (!cells_) {
+-		cells_ = createCellsTexture(GL_TEXTURE4, 4);
+-		if (!cells_) {
+-			LOG(Debayer, Error) << "Render targets of the cells fail";
+-			return -ENODEV;
++	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
++	static const uint32_t unitIds[2] = { 4, 6 };
++	for (unsigned int i = 0; i < 2; i++) {
++		if (!cells_[i]) {
++			cells_[i] = createCellsTexture(units[i], unitIds[i]);
++			if (!cells_[i]) {
++				LOG(Debayer, Error) << "Render targets of the cells fail";
++				return -ENODEV;
++			}
++			/* Nothing in it to filter with */
++			cellsHistory_ = false;
+ 		}
+ 	}
+ 
+-	if (egl_.attachTextureToFBO(*cells_))
++	/* Write the one the last frame did not, and read that one */
++	const unsigned int previous = cellsCurrent_;
++	const unsigned int next = 1 - previous;
++	const DebayerParams::Denoise &d = params.denoise;
++	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
++
++	if (egl_.attachTextureToFBO(*cells_[next]))
+ 		return -ENODEV;
++	egl_.activateBindTexture(*cells_[previous]);
+ 
+ 	egl_.useProgram(binProgramId_);
+ 	glEnableVertexAttribArray(binAttributeVertex_);
+@@ -479,11 +497,20 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn)
+ 		    static_cast<GLfloat>(height_));
+ 	glUniform2f(binUniformFirstRed_, firstRed_x_, firstRed_y_);
+ 
++	/* The temporal filter: the previous cells, the noise, and the black level */
++	glUniform1i(binUniformPrev_, cells_[previous]->texture_unit_uniform_id_);
++	glUniform3f(binUniformNoise_, d.slope, d.quad, d.floor);
++	glUniform2f(binUniformTemporal_, temporal ? d.temporal : 0.0f, d.temporalWidth);
++	glUniform3f(binUniformBlack_, params.blackLevel[0] * 1020.0f, params.blackLevel[1] * 1020.0f,
++		    params.blackLevel[2] * 1020.0f);
++
+ 	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
+ 	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
+ 
+-	/* The main pass's program samples the cells on unit 4 */
+-	egl_.activateBindTexture(*cells_);
++	/* The main pass's program samples the cells just written */
++	egl_.activateBindTexture(*cells_[next]);
++	cellsCurrent_ = next;
++	cellsHistory_ = true;
+ 
+ 	GLenum err = glGetError();
+ 	if (err != GL_NO_ERROR) {
+@@ -790,7 +817,7 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 	if (cellsActive_) {
+ 		const DebayerParams::Denoise &d = params.denoise;
+ 
+-		glUniform1i(cellTexUniform_, cells_->texture_unit_uniform_id_);
++		glUniform1i(cellTexUniform_, cells_[cellsCurrent_]->texture_unit_uniform_id_);
+ 		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
+ 		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
+ 		/* Without noise reduction (only sharpening), the taps carry no weight */
+@@ -936,11 +963,14 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 	 * it is not tried again.
+ 	 */
+ 	bool cells = cellsEligible_ && (params.denoise.enabled || params.sharpen.enabled);
+-	if (cells && renderCells(*eglImageIn)) {
++	if (cells && renderCells(*eglImageIn, params)) {
+ 		LOG(Debayer, Error) << "No noise reduction: the cells path failed";
+ 		cellsEligible_ = false;
+ 		cells = false;
+ 	}
++	/* The cells of a frame the path did not run for are not the last frame's */
++	if (!cells)
++		cellsHistory_ = false;
+ 	selectProgram(cells);
+ 
+ 	egl_.attachTextureToFBO(*eglImageOut);
+@@ -1041,7 +1071,7 @@ int DebayerEGL::start()
+ 
+ 	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
+ 
+-	cellsCapable_ = maxTextureImageUnits >= 6 && cellsSupported();
++	cellsCapable_ = maxTextureImageUnits >= 7 && cellsSupported();
+ 
+ 	if (initBayerShaders(inputPixelFormat_, outputPixelFormat_))
+ 		return -EINVAL;
+@@ -1100,7 +1130,10 @@ void DebayerEGL::stop()
+ 	eglImageInCache_.clear();
+ 	toneLut_.reset();
+ 	lsc_.reset();
+-	cells_.reset();
++	for (auto &cells : cells_)
++		cells.reset();
++	cellsCurrent_ = 0;
++	cellsHistory_ = false;
+ 
+ 	if (singleProgramId_)
+ 		glDeleteProgram(singleProgramId_);
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index bf9e7fcea..7546f9436 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -146,7 +146,7 @@ private:
+ 			      Span<const unsigned char> vertexShaderData,
+ 			      Span<const unsigned char> fragmentShaderData);
+ 	std::unique_ptr<eGLImage> createCellsTexture(GLenum unit, uint32_t uniformId);
+-	int renderCells(eGLImage &eglImageIn);
++	int renderCells(eGLImage &eglImageIn, const DebayerParams &params);
+ 	void selectProgram(bool cells);
+ 
+ 	/* Whether the context has what the cells path needs, and the frame fits */
+@@ -162,8 +162,19 @@ private:
+ 	GLint binUniformTexY_;
+ 	GLint binUniformRawSize_;
+ 	GLint binUniformFirstRed_;
+-	/* The binned cells, on texture unit 4 */
+-	std::unique_ptr<eGLImage> cells_;
++	GLint binUniformPrev_;
++	GLint binUniformNoise_;
++	GLint binUniformTemporal_;
++	GLint binUniformBlack_;
++	/*
++	 * The binned cells, on texture units 4 and 6 in turn: each frame's
++	 * pass writes the one the last frame's did not, which it also reads for
++	 * the temporal filter, and the main pass samples the one written.
++	 * cellsHistory_ is whether the other one holds the previous frame's.
++	 */
++	std::array<std::unique_ptr<eGLImage>, 2> cells_;
++	unsigned int cellsCurrent_ = 0;
++	bool cellsHistory_ = false;
+ 	Size cellsSize_;
+ 
+ 	/*
+-- 
+2.55.0
+
