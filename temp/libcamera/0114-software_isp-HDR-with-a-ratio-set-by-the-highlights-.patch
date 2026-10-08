@@ -1,4 +1,4 @@
-From a22cd991e9e2519d7dea366cac0ad42a2763f33d Mon Sep 17 00:00:00 2001
+From 80bbb2c6da2e5cc3838fe7d3f57bbbbbc4de3171 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -26,14 +26,14 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/ipa_context.h                    |  20 +
  src/ipa/soft/soft_simple.cpp                  | 103 +++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    | 129 +++++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 130 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  91 +++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  75 ++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 342 ++++++++++++++----
- src/libcamera/software_isp/debayer_egl.h      |  50 ++-
- 16 files changed, 926 insertions(+), 179 deletions(-)
+ src/libcamera/software_isp/debayer_egl.cpp    | 347 ++++++++++++++----
+ src/libcamera/software_isp/debayer_egl.h      |  51 ++-
+ 16 files changed, 933 insertions(+), 179 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -709,10 +709,10 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..9886de247 100644
+index 046cb626f..afe2d2af1 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -235,8 +235,75 @@ vec4 finish(vec3 rgb)
+@@ -235,8 +235,76 @@ vec4 finish(vec3 rgb)
   */
  uniform sampler2D sharpen_lut;
  uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
@@ -760,6 +760,7 @@ index 046cb626f..9886de247 100644
 + * brightness flattens them to the shoulder's top.
 + */
 +uniform sampler2D cell_base;
++uniform float base_lod;
 +
 +vec3 hdr_tonemap(vec3 linear, vec3 base)
 +{
@@ -789,7 +790,7 @@ index 046cb626f..9886de247 100644
  uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
  uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
  uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
-@@ -244,7 +311,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
+@@ -244,7 +312,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
  
  void main(void)
  {
@@ -797,7 +798,7 @@ index 046cb626f..9886de247 100644
  	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
  
  	vec3 level = max(c - blacklevel * 1020.0, 0.0);
-@@ -252,30 +318,43 @@ void main(void)
+@@ -252,30 +319,43 @@ void main(void)
  		     vec3(1.0, 0.70710678, 1.0);
  	vec3 width = mix(width_lo, width_hi,
  			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
@@ -854,13 +855,13 @@ index 046cb626f..9886de247 100644
 +	vec3 lin = linear_stage(average / 1020.0, shading);
 +#if defined(HDR)
 +	/* The surroundings, from a coarse level of the cells (the bias is of the level the pixel's derivatives choose) */
-+	vec3 base = linear_stage(texture2D(cell_base, textureOut, 5.0).rgb * (1023.0 / 1020.0), shading);
++	vec3 base = linear_stage(texture2D(cell_base, textureOut, base_lod).rgb * (1023.0 / 1020.0), shading);
 +	lin = hdr_tonemap(lin, base);
 +#endif
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -285,8 +364,12 @@ void main(void)
+@@ -285,8 +365,12 @@ void main(void)
  		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
@@ -1150,18 +1151,19 @@ index 8e18178b7..5442bb437 100644
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..2dfbf174e 100644
+index a3dfae76e..d715d3636 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
-@@ -130,6 +130,7 @@ int DebayerEGL::getShaderVariableLocations(void)
+@@ -130,6 +130,8 @@ int DebayerEGL::getShaderVariableLocations(void)
  	chromaUniform_ = glGetUniformLocation(programId_, "chroma");
  	chromaShearUniform_ = glGetUniformLocation(programId_, "chroma_shear");
  	cellTexUniform_ = glGetUniformLocation(programId_, "cell_tex");
 +	cellBaseUniform_ = glGetUniformLocation(programId_, "cell_base");
++	baseLodUniform_ = glGetUniformLocation(programId_, "base_lod");
  	cellSizeUniform_ = glGetUniformLocation(programId_, "cell_size");
  	noiseUniform_ = glGetUniformLocation(programId_, "noise");
  	widthLowUniform_ = glGetUniformLocation(programId_, "width_lo");
-@@ -137,6 +138,7 @@ int DebayerEGL::getShaderVariableLocations(void)
+@@ -137,6 +139,7 @@ int DebayerEGL::getShaderVariableLocations(void)
  	anchorsUniform_ = glGetUniformLocation(programId_, "anchors");
  	sharpenLutUniform_ = glGetUniformLocation(programId_, "sharpen_lut");
  	sharpenUniform_ = glGetUniformLocation(programId_, "sharpen");
@@ -1169,7 +1171,7 @@ index a3dfae76e..2dfbf174e 100644
  
  	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
  	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
-@@ -198,6 +200,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+@@ -198,6 +201,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
  	for (const std::string &define : lscDefines)
  		egl_.pushEnv(shaderEnv, define.c_str());
  
@@ -1177,7 +1179,7 @@ index a3dfae76e..2dfbf174e 100644
  	/*
  	 * Tell shaders how to re-order output taking account of how the pixels
  	 * are actually stored by EGL.
-@@ -360,62 +363,117 @@ bool DebayerEGL::cellsSupported()
+@@ -360,62 +364,117 @@ bool DebayerEGL::cellsSupported()
  	       (major > 3 || (major == 3 && minor >= 2));
  }
  
@@ -1332,7 +1334,7 @@ index a3dfae76e..2dfbf174e 100644
  
  	cellsSize_ = Size(width_ / 2, height_ / 2);
  
-@@ -426,18 +484,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+@@ -426,18 +485,24 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
  }
  
  /*
@@ -1363,7 +1365,7 @@ index a3dfae76e..2dfbf174e 100644
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
  	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-@@ -465,9 +529,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -465,9 +530,19 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  
  	static const GLenum units[2] = { GL_TEXTURE4, GL_TEXTURE6 };
  	static const uint32_t unitIds[2] = { 4, 6 };
@@ -1384,7 +1386,7 @@ index a3dfae76e..2dfbf174e 100644
  			if (!cells_[i]) {
  				LOG(Debayer, Error) << "Render targets of the cells fail";
  				return -ENODEV;
-@@ -483,26 +557,94 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -483,26 +558,94 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	const DebayerParams::Denoise &d = params.denoise;
  	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
  
@@ -1489,7 +1491,7 @@ index a3dfae76e..2dfbf174e 100644
  		    params.blackLevel[2] * 1020.0f);
  
  	/*
-@@ -511,21 +653,67 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -511,21 +654,67 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
  	 * frame's reference, which the exposure's changes moved.
  	 */
  	const DebayerParams::Hdr &h = params.hdr;
@@ -1561,7 +1563,7 @@ index a3dfae76e..2dfbf174e 100644
  
  	GLenum err = glGetError();
  	if (err != GL_NO_ERROR) {
-@@ -540,11 +728,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+@@ -540,11 +729,13 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
   * Make the main program the one that samples single pixels, or the one that
   * samples the cells, and read the locations of its variables if it changed.
   */
@@ -1578,15 +1580,19 @@ index a3dfae76e..2dfbf174e 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -833,6 +1023,7 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -833,6 +1024,11 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		const DebayerParams::Denoise &d = params.denoise;
  
  		glUniform1i(cellTexUniform_, cells_[cellsCurrent_]->texture_unit_uniform_id_);
 +		glUniform1i(cellBaseUniform_, 8);
++		{
++			static const char *lodEnv = utils::secure_getenv("LIBCAMERA_SOFTISP_BASE_LOD"); /* EXPERIMENT */
++			glUniform1f(baseLodUniform_, lodEnv ? static_cast<float>(atof(lodEnv)) : 5.0f);
++		}
  		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
  		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
  		/* Without noise reduction (only sharpening), the taps carry no weight */
-@@ -867,7 +1058,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -867,7 +1063,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
@@ -1608,7 +1614,7 @@ index a3dfae76e..2dfbf174e 100644
  	}
  
  	return;
-@@ -988,7 +1192,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1197,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -1617,7 +1623,7 @@ index a3dfae76e..2dfbf174e 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1146,7 +1350,7 @@ int DebayerEGL::start()
+@@ -1146,7 +1355,7 @@ int DebayerEGL::start()
  
  	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
  
@@ -1626,7 +1632,7 @@ index a3dfae76e..2dfbf174e 100644
  
  	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
  	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-@@ -1210,6 +1414,7 @@ void DebayerEGL::stop()
+@@ -1210,6 +1419,7 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
@@ -1634,7 +1640,7 @@ index a3dfae76e..2dfbf174e 100644
  	for (auto &cells : cells_)
  		cells.reset();
  	cellsCurrent_ = 0;
-@@ -1217,11 +1422,16 @@ void DebayerEGL::stop()
+@@ -1217,11 +1427,16 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
@@ -1654,7 +1660,7 @@ index a3dfae76e..2dfbf174e 100644
  	cellsActive_ = false;
  }
 diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
-index 89ccf9129..68f79560d 100644
+index 89ccf9129..dc854395c 100644
 --- a/src/libcamera/software_isp/debayer_egl.h
 +++ b/src/libcamera/software_isp/debayer_egl.h
 @@ -145,9 +145,9 @@ private:
@@ -1727,7 +1733,7 @@ index 89ccf9129..68f79560d 100644
  	Size cellsSize_;
  
  	/*
-@@ -236,9 +254,13 @@ private:
+@@ -236,9 +254,14 @@ private:
  	std::array<uint8_t, DebayerParams::kSharpenLevels * 4> sharpenLutData_;
  	GLint sharpenLutUniform_;
  	GLint sharpenUniform_;
@@ -1736,6 +1742,7 @@ index 89ccf9129..68f79560d 100644
  	/* The main program's variables for the cells */
  	GLint cellTexUniform_;
 +	GLint cellBaseUniform_;
++	GLint baseLodUniform_;
 +	/* The sampler of the cells' coarse levels (unit 8), for the local tone map of HDR */
 +	GLuint baseSampler_ = 0;
  	GLint cellSizeUniform_;
