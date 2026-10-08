@@ -1,0 +1,152 @@
+From 3d3706aa484c477c7ec1918513bf71b1d4e2118b Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 17:31:47 +0000
+Subject: [PATCH] software_isp: debayer_egl: Time the GPU passes
+
+With LIBCAMERA_SOFTISP_GPU_TIMING set, and where the GPU has timer
+queries, log the average GPU time of the binning and main passes every 60
+frames.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 66 ++++++++++++++++++++++
+ src/libcamera/software_isp/debayer_egl.h   | 16 ++++++
+ 2 files changed, 82 insertions(+)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index ffb164488..8f983c8f8 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -505,7 +505,9 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 		    params.blackLevel[2] * 1020.0f);
+ 
+ 	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
++	timerBegin(TimerBin);
+ 	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++	timerEnd(TimerBin);
+ 
+ 	/* The main pass's program samples the cells just written */
+ 	egl_.activateBindTexture(*cells_[next]);
+@@ -950,6 +952,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 
+ 	/* eGL context switch */
+ 	egl_.makeCurrent();
++	timerCollect();
+ 
+ 	eglImageIn = getCachedInputFrameBuffer(input, inMapped, inDmaSyncer);
+ 	if (!eglImageIn)
+@@ -980,7 +983,9 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 						       quadBayer_);
+ 	glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+ 	glClear(GL_COLOR_BUFFER_BIT);
++	timerBegin(TimerMain);
+ 	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
++	timerEnd(TimerMain);
+ 
+ 	GLenum err = glGetError();
+ 	if (err != GL_NO_ERROR) {
+@@ -1060,6 +1065,62 @@ error:
+ 	return;
+ }
+ 
++void DebayerEGL::timerBegin(unsigned int pass)
++{
++	if (!timerQueries_)
++		return;
++
++	GLuint &id = timerIds_[pass][timerFrame_ & 1];
++	if (!id)
++		glGenQueries(1, &id);
++	glBeginQuery(GL_TIME_ELAPSED_EXT, id);
++}
++
++void DebayerEGL::timerEnd(unsigned int pass)
++{
++	if (!timerQueries_)
++		return;
++
++	glEndQuery(GL_TIME_ELAPSED_EXT);
++	timerPending_[pass][timerFrame_ & 1] = true;
++}
++
++/* Read the results of the last frame's passes, which are ready by now */
++void DebayerEGL::timerCollect()
++{
++	if (!timerQueries_)
++		return;
++
++	timerFrame_++;
++	const unsigned int last = (timerFrame_ + 1) & 1;
++	for (unsigned int pass = 0; pass < TimerPasses; pass++) {
++		if (!timerPending_[pass][last])
++			continue;
++
++		GLuint available = 0;
++		glGetQueryObjectuiv(timerIds_[pass][last], GL_QUERY_RESULT_AVAILABLE, &available);
++		if (!available)
++			continue;
++
++		GLuint ns = 0;
++		glGetQueryObjectuiv(timerIds_[pass][last], GL_QUERY_RESULT, &ns);
++		timerPending_[pass][last] = false;
++		timerSum_[pass] += ns / 1e6;
++		timerCount_[pass]++;
++	}
++
++	if (timerFrame_ % 60 == 0 && timerCount_[TimerMain]) {
++		LOG(Debayer, Info)
++			<< "GPU time a frame: binning "
++			<< (timerCount_[TimerBin] ? timerSum_[TimerBin] / timerCount_[TimerBin] : 0.0)
++			<< " ms, main pass " << timerSum_[TimerMain] / timerCount_[TimerMain] << " ms";
++		for (unsigned int pass = 0; pass < TimerPasses; pass++) {
++			timerSum_[pass] = 0.0;
++			timerCount_[pass] = 0;
++		}
++	}
++}
++
+ int DebayerEGL::start()
+ {
+ 	GLint maxTextureImageUnits;
+@@ -1073,6 +1134,11 @@ int DebayerEGL::start()
+ 
+ 	cellsCapable_ = maxTextureImageUnits >= 7 && cellsSupported();
+ 
++	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
++	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
++	timerQueries_ = utils::secure_getenv("LIBCAMERA_SOFTISP_GPU_TIMING") && extensions &&
++			strstr(extensions, "GL_EXT_disjoint_timer_query");
++
+ 	if (initBayerShaders(inputPixelFormat_, outputPixelFormat_))
+ 		return -EINVAL;
+ 
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 7546f9436..6466783ca 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -209,6 +209,22 @@ private:
+ 
+ 	StatsThread statsThread_;
+ 
++	/*
++	 * The GPU time of the two passes (the cells' binning, and the main
++	 * one), from timer queries, logged every few frames when
++	 * LIBCAMERA_SOFTISP_GPU_TIMING is set.
++	 */
++	enum { TimerBin, TimerMain, TimerPasses };
++	void timerBegin(unsigned int pass);
++	void timerEnd(unsigned int pass);
++	void timerCollect();
++	bool timerQueries_ = false;
++	unsigned int timerFrame_ = 0;
++	GLuint timerIds_[TimerPasses][2] = {};
++	bool timerPending_[TimerPasses][2] = {};
++	double timerSum_[TimerPasses] = {};
++	unsigned int timerCount_[TimerPasses] = {};
++
+ 	/*
+ 	 * The sharpening's gains and weights, a texture on unit 5 that the
+ 	 * cells path's main program samples (see DebayerParams::Sharpen)
+-- 
+2.55.0
+
