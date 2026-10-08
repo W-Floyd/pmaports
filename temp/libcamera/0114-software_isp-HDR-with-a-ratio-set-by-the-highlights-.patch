@@ -1,4 +1,4 @@
-From 7b17d8740268e413929cd1856220f2ef3a40e7b0 Mon Sep 17 00:00:00 2001
+From c51b108b929f687a60c48acae0b9bf518c4a4fd4 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -19,19 +19,19 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
 ---
  .../internal/software_isp/debayer_params.h    |   8 +
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
- src/ipa/soft/algorithms/agc.cpp               | 164 ++++++++--
+ src/ipa/soft/algorithms/agc.cpp               | 164 +++++++--
  src/ipa/soft/algorithms/agc.h                 |  16 +-
  src/ipa/soft/ipa_context.h                    |  11 +
- src/ipa/soft/soft_simple.cpp                  |  89 +++++-
+ src/ipa/soft/soft_simple.cpp                  |  89 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    |  89 ++++--
- src/libcamera/shaders/bayer_cells_bin.frag    |  68 ++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 101 ++++--
+ src/libcamera/shaders/bayer_cells_bin.frag    |  70 ++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  70 ++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
- src/libcamera/software_isp/debayer_egl.cpp    | 301 ++++++++++++++----
+ src/libcamera/software_isp/debayer_egl.cpp    | 310 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 727 insertions(+), 166 deletions(-)
+ 14 files changed, 749 insertions(+), 167 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -69,7 +69,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..8d37b19f8 100644
+index ae99e98a8..1ae7a304b 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -103,11 +103,22 @@ static constexpr double kMeanAcquire = 0.6;
@@ -83,7 +83,7 @@ index ae99e98a8..8d37b19f8 100644
  static constexpr double kHdrRatioStep = 0.15;
 -/* The frames the DRC gain must stay below kHdrOff for, before HDR stops */
 +/* The most HDR holds the short exposure below the long one by */
-+static constexpr double kHdrMax = 8.0;
++static constexpr double kHdrMax = 32.0;
 +/*
 + * The fractions of clipped pixels over which the ratio wanted grows, by
 + * kHdrGrow a time, and over which it is held
@@ -558,10 +558,10 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..3bb34669b 100644
+index 046cb626f..74d9c75e9 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
-@@ -235,8 +235,40 @@ vec4 finish(vec3 rgb)
+@@ -235,8 +235,52 @@ vec4 finish(vec3 rgb)
   */
  uniform sampler2D sharpen_lut;
  uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
@@ -576,16 +576,28 @@ index 046cb626f..3bb34669b 100644
 + * ratios kept so that the colour is.
 + */
 +#if defined(HDR)
-+uniform vec2 hdr_map;
++uniform vec3 hdr_map;	/* the ratio, the knee, and the shoulder's curvature */
 +
-+/* The luma of a pixel (scaled by the ratio already), compressed */
++/*
++ * The luma of a pixel (scaled by the ratio already), compressed: above the
++ * knee, a logarithm of the distance from it, in the room that is left,
++ *
++ *   knee + room * log(1 + a u) / a,  u = (y - knee) / room
++ *
++ * which has a slope of 1 at the knee, and reaches the top (1) just where the
++ * ratio's range ends, with a such that a = log(1 + a w) for w the range's
++ * length in u (set from the ratio), so that all of the range, up to what the
++ * short exposure holds, has its own levels, where an exponential shoulder
++ * would put the most of it at white.
++ */
 +float hdr_compress(float y)
 +{
 +	float knee = hdr_map.y;
 +	if (y <= knee)
 +		return y;
 +	float room = 1.0 - knee;
-+	return knee + room * (1.0 - exp(-(y - knee) / room));
++	float u = (y - knee) / room;
++	return knee + room * min(log(1.0 + hdr_map.z * u) / hdr_map.z, 1.0);
 +}
 +
 +vec3 hdr_tonemap(vec3 linear)
@@ -603,7 +615,7 @@ index 046cb626f..3bb34669b 100644
  uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
  uniform vec3 width_lo;		/* range kernel width of red, green and blue, */
  uniform vec3 width_hi;		/* at and below anchors.x, and at and above anchors.y */
-@@ -244,7 +276,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
+@@ -244,7 +288,6 @@ uniform vec2 anchors;		/* levels, in counts above black */
  
  void main(void)
  {
@@ -611,7 +623,7 @@ index 046cb626f..3bb34669b 100644
  	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
  
  	vec3 level = max(c - blacklevel * 1020.0, 0.0);
-@@ -252,30 +283,40 @@ void main(void)
+@@ -252,30 +295,40 @@ void main(void)
  		     vec3(1.0, 0.70710678, 1.0);
  	vec3 width = mix(width_lo, width_hi,
  			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
@@ -670,7 +682,7 @@ index 046cb626f..3bb34669b 100644
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -285,8 +326,12 @@ void main(void)
+@@ -285,8 +338,12 @@ void main(void)
  		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
@@ -686,7 +698,7 @@ index 046cb626f..3bb34669b 100644
  
  		vec4 levels = texture2D(sharpen_lut,
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..c2bf6ceca 100644
+index 680b00bda..908f4b671 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -773,7 +785,14 @@ index 680b00bda..c2bf6ceca 100644
  		if (merge.w > 0.0) {
  			vec3 prev = texture(prev_cells, gl_FragCoord.xy / vec2(textureSize(prev_cells, 0))).rgb * 1023.0;
  			prev = black + (prev - black) * merge.y;
-@@ -125,25 +150,30 @@ void main(void)
+@@ -119,31 +144,36 @@ void main(void)
+ 			 * estimates differ), and for all three channels, as a
+ 			 * clipped one has the wrong colour.
+ 			 */
+-			float fresh = 1.0 - smoothstep(780.0, 940.0, max(max(cell.r, cell.g), cell.b));
++			float fresh = 1.0 - smoothstep(600.0, 800.0, max(max(cell.r, cell.g), cell.b));
+ 
+ 			/* A cell's green is the mean of two pixels: half the variance */
  			vec3 half_green = vec3(1.0, 0.5, 1.0);
  			vec3 level = max(cell - black, 0.0);
  			vec3 var_cur = (noise.x * level + noise.y * level * level + noise.z) *
@@ -929,7 +948,7 @@ index 8e18178b7..5442bb437 100644
      'bayer_unpacked.frag',
      'bayer_unpacked.vert',
 diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
-index a3dfae76e..45d85934e 100644
+index a3dfae76e..870c6cac4 100644
 --- a/src/libcamera/software_isp/debayer_egl.cpp
 +++ b/src/libcamera/software_isp/debayer_egl.cpp
 @@ -137,6 +137,7 @@ int DebayerEGL::getShaderVariableLocations(void)
@@ -1125,8 +1144,8 @@ index a3dfae76e..45d85934e 100644
 -	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, cellsSize_.width, cellsSize_.height, 0,
 -		     GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, nullptr);
 +	if (half)
-+		glTexImage2D(GL_TEXTURE_2D, 0, GL_R11F_G11F_B10F, cellsSize_.width, cellsSize_.height, 0,
-+			     GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, nullptr);
++		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, cellsSize_.width, cellsSize_.height, 0,
++			     GL_RGBA, GL_HALF_FLOAT, nullptr);
 +	else
 +		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, cellsSize_.width, cellsSize_.height, 0,
 +			     GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, nullptr);
@@ -1323,7 +1342,7 @@ index a3dfae76e..45d85934e 100644
  		getShaderVariableLocations();
  	}
  	egl_.useProgram(programId_);
-@@ -867,7 +1030,11 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+@@ -867,7 +1030,20 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
  		}
  		egl_.activateBindTexture(*sharpenLut_);
  		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
@@ -1332,11 +1351,20 @@ index a3dfae76e..45d85934e 100644
 +
 +		/* The HDR tone mapping: the ratio, and where the compression of the highlights starts */
 +		static constexpr float kHdrKnee = 0.55f;
-+		glUniform2f(hdrMapUniform_, params.hdr.enabled ? hdrToneRatio_ : 1.0f, kHdrKnee);
++		/*
++		 * The shoulder's curvature a, with a = log(1 + a w) for w, the
++		 * ratio's range above the knee as a share of the room left
++		 */
++		const float toneRatio = params.hdr.enabled ? hdrToneRatio_ : 1.0f;
++		const float w = std::max((toneRatio - kHdrKnee) / (1.0f - kHdrKnee), 1.01f);
++		float a = 1.0f;
++		for (int i = 0; i < 40; i++)
++			a = std::log(1.0f + a * w);
++		glUniform3f(hdrMapUniform_, toneRatio, kHdrKnee, a);
  	}
  
  	return;
-@@ -988,7 +1155,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+@@ -988,7 +1164,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
  	/* The cells of a frame the path did not run for are not the last frame's */
  	if (!cells)
  		cellsHistory_ = false;
@@ -1345,7 +1373,7 @@ index a3dfae76e..45d85934e 100644
  
  	egl_.attachTextureToFBO(*eglImageOut);
  	setShaderVariableValues(*eglImageIn, params);
-@@ -1146,7 +1313,7 @@ int DebayerEGL::start()
+@@ -1146,7 +1322,7 @@ int DebayerEGL::start()
  
  	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
  
@@ -1354,7 +1382,7 @@ index a3dfae76e..45d85934e 100644
  
  	/* GPU timing of the passes, for tuning: LIBCAMERA_SOFTISP_GPU_TIMING=1 */
  	const char *extensions = reinterpret_cast<const char *>(glGetString(GL_EXTENSIONS));
-@@ -1210,6 +1377,7 @@ void DebayerEGL::stop()
+@@ -1210,6 +1386,7 @@ void DebayerEGL::stop()
  	eglImageInCache_.clear();
  	toneLut_.reset();
  	lsc_.reset();
@@ -1362,7 +1390,7 @@ index a3dfae76e..45d85934e 100644
  	for (auto &cells : cells_)
  		cells.reset();
  	cellsCurrent_ = 0;
-@@ -1217,11 +1385,12 @@ void DebayerEGL::stop()
+@@ -1217,11 +1394,12 @@ void DebayerEGL::stop()
  
  	if (singleProgramId_)
  		glDeleteProgram(singleProgramId_);
