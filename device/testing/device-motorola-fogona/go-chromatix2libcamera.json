@@ -9,7 +9,9 @@
     },
     {
       "sensor": "ov08f10",
-      "tuned": "com.qti.tuned.mot_ov08f.bin"
+      "tuned": "com.qti.tuned.mot_ov08f.bin",
+      "module": "com.qti.sensormodule.mot_ov08f_tsp.bin",
+      "eeprom": "i2c-bus@1/camera@10"
     }
   ]
 }
