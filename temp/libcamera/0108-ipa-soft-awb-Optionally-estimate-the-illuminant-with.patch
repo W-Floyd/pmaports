@@ -1,4 +1,4 @@
-From 3806ba1103c12a0c31af0bf8fa56ef8865a6e290 Mon Sep 17 00:00:00 2001
+From a90923a72f95b8e4125af5973c15484ad8afc467 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 16:48:08 +0000
 Subject: [PATCH] ipa: soft: awb: Optionally estimate the illuminant with an
@@ -16,13 +16,13 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  meson_options.txt                     |   5 +
  src/ipa/soft/algorithms/awb.cpp       |  39 +++-
  src/ipa/soft/algorithms/awb.h         |   5 +
- src/ipa/soft/algorithms/awb_model.cpp | 262 ++++++++++++++++++++++++++
- src/ipa/soft/algorithms/awb_model.h   |  74 ++++++++
+ src/ipa/soft/algorithms/awb_model.cpp | 265 ++++++++++++++++++++++++++
+ src/ipa/soft/algorithms/awb_model.h   |  74 +++++++
  src/ipa/soft/algorithms/meson.build   |   1 +
  src/ipa/soft/ipa_context.h            |   3 +
  src/ipa/soft/meson.build              |  15 +-
  src/ipa/soft/soft_simple.cpp          |   5 +
- 9 files changed, 406 insertions(+), 3 deletions(-)
+ 9 files changed, 409 insertions(+), 3 deletions(-)
  create mode 100644 src/ipa/soft/algorithms/awb_model.cpp
  create mode 100644 src/ipa/soft/algorithms/awb_model.h
 
@@ -145,10 +145,10 @@ index 8b5235643..e73871677 100644
  } /* namespace ipa::soft::algorithms */
 diff --git a/src/ipa/soft/algorithms/awb_model.cpp b/src/ipa/soft/algorithms/awb_model.cpp
 new file mode 100644
-index 000000000..6018bb9fd
+index 000000000..3b74f3020
 --- /dev/null
 +++ b/src/ipa/soft/algorithms/awb_model.cpp
-@@ -0,0 +1,262 @@
+@@ -0,0 +1,265 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Copyright (C) 2026, William Floyd
@@ -239,7 +239,9 @@ index 000000000..6018bb9fd
 +		bool haveScene = false;
 +		for (unsigned int i = 0; i < 2; i++) {
 +			const std::string name = session.GetInputNameAllocated(i, allocator).get();
-+			auto info = session.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo();
++			/* The shape info borrows from the type info: keep it alive */
++			Ort::TypeInfo typeInfo = session.GetInputTypeInfo(i);
++			auto info = typeInfo.GetTensorTypeAndShapeInfo();
 +			const std::vector<int64_t> shape = info.GetShape();
 +			impl_->inputNames[i] = name;
 +
@@ -289,7 +291,8 @@ index 000000000..6018bb9fd
 +			return false;
 +		}
 +
-+		auto outInfo = session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
++		Ort::TypeInfo outType = session.GetOutputTypeInfo(0);
++		auto outInfo = outType.GetTensorTypeAndShapeInfo();
 +		if (outInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
 +		    elementCount(outInfo.GetShape()) != 2) {
 +			LOG(IPASoftAwb, Warning)
