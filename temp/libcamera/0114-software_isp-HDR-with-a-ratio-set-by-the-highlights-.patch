@@ -1,4 +1,4 @@
-From 80bbb2c6da2e5cc3838fe7d3f57bbbbbc4de3171 Mon Sep 17 00:00:00 2001
+From f9b300a6351f9dfc07f78c6b9292b94136493220 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -105,7 +105,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..cc77a4dc3 100644
+index ae99e98a8..1841e0f31 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -99,15 +99,28 @@ static constexpr double kMeanAcquire = 0.6;
@@ -134,8 +134,8 @@ index ae99e98a8..cc77a4dc3 100644
 + * The fractions of clipped pixels over which the ratio wanted grows, by
 + * kHdrGrow a time, and over which it is held
 + */
-+static constexpr double kHdrClipHigh = 0.004;
-+static constexpr double kHdrClipLow = 0.0005;
++static constexpr double kHdrClipHigh = 0.001;
++static constexpr double kHdrClipLow = 0.0002;
 +static constexpr double kHdrGrow = 1.15;
 +/* The frames the ratio wanted must stay below kHdrOff for, before HDR stops */
  static constexpr unsigned int kHdrHold = 30;
