@@ -1,4 +1,4 @@
-From c51b108b929f687a60c48acae0b9bf518c4a4fd4 Mon Sep 17 00:00:00 2001
+From a048feb8c99484e4287a68a646405cb9381db38c Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -24,14 +24,14 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/ipa_context.h                    |  11 +
  src/ipa/soft/soft_simple.cpp                  |  89 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
- src/libcamera/shaders/bayer_1x_packed.frag    | 101 ++++--
+ src/libcamera/shaders/bayer_1x_packed.frag    | 111 +++++--
  src/libcamera/shaders/bayer_cells_bin.frag    |  70 ++--
  src/libcamera/shaders/bayer_cells_ratio.frag  |  70 ++++
  src/libcamera/shaders/identity.vert           |  15 +
  src/libcamera/shaders/meson.build             |   1 +
  src/libcamera/software_isp/debayer_egl.cpp    | 310 ++++++++++++++----
  src/libcamera/software_isp/debayer_egl.h      |  47 ++-
- 14 files changed, 749 insertions(+), 167 deletions(-)
+ 14 files changed, 758 insertions(+), 168 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
 diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
@@ -558,7 +558,7 @@ index 398e89d30..d661a29e9 100644
  		csi_->sensor()->setControls(&ctrls);
  	}
 diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
-index 046cb626f..74d9c75e9 100644
+index 046cb626f..3ac9df079 100644
 --- a/src/libcamera/shaders/bayer_1x_packed.frag
 +++ b/src/libcamera/shaders/bayer_1x_packed.frag
 @@ -235,8 +235,52 @@ vec4 finish(vec3 rgb)
@@ -623,7 +623,7 @@ index 046cb626f..74d9c75e9 100644
  	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
  
  	vec3 level = max(c - blacklevel * 1020.0, 0.0);
-@@ -252,30 +295,40 @@ void main(void)
+@@ -252,30 +295,48 @@ void main(void)
  		     vec3(1.0, 0.70710678, 1.0);
  	vec3 width = mix(width_lo, width_hi,
  			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
@@ -675,14 +675,23 @@ index 046cb626f..74d9c75e9 100644
 +	const float ring_norm = 0.25;
  
  	vec3 shading = lens_shading(textureOut);
- 	vec3 lin = linear_stage(sum / weights / 1020.0, shading);
+-	vec3 lin = linear_stage(sum / weights / 1020.0, shading);
++	vec3 average = sum / weights;
++	vec3 lin = linear_stage(average / 1020.0, shading);
 +#if defined(HDR)
 +	lin = hdr_tonemap(lin);
++	/*
++	 * What clipped even in the short exposure has lost its colour: a clipped
++	 * channel is scaled by the white balance past the others, and tints it
++	 * (pink, usually), so it fades to its luma.
++	 */
++	float clipped = smoothstep(840.0, 1000.0, max(max(average.r, average.g), average.b));
++	lin = mix(lin, vec3(dot(lin, vec3(0.299, 0.587, 0.114))), clipped);
 +#endif
  	vec3 rgb = tone_chroma(lin);
  
  	if (sharpen.w > 0.0) {
-@@ -285,8 +338,12 @@ void main(void)
+@@ -285,8 +346,12 @@ void main(void)
  		 * linear luma of the filtered pixel and of the taps' mean
  		 * (after the same colour processing), each toned.
  		 */
