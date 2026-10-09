@@ -1,0 +1,60 @@
+From 244157a59fa5fbc1091d87452a97c732b4dca296 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 19:01:32 +0000
+Subject: pipeline: camss: Advertise a short list of sizes for the soft ISP
+
+The soft ISP can scale to any size, so the stream formats offered were
+one range of sizes, and PipeWire's libcamera plugin enumerates every
+(format, size) pair it is given, each of which costs a configure and
+validate round of the pipeline. Offer a list of the usual sizes that
+fit the sensor's instead, and the range's largest one as before.
+
+Measured from the connect to the first frame of PipeWire's client, the
+mean over reconnects went from about 1.37 s to about 650 ms, and a
+fresh start from 745 to 542 ms.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../pipeline/camss/camss_isp_soft.cpp         | 29 ++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index 6cd1e6998..4d2c89d55 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -105,7 +105,34 @@ StreamConfiguration CamssIspSoft::generateConfiguration(const StreamConfiguratio
+ 	if (sizes.max.isNull() || pixelFormats.empty())
+ 		return {};
+ 
+-	std::vector<SizeRange> sizesVector = { sizes };
++	/*
++	 * Advertise a short list of sizes, as a webcam does, rather than the
++	 * range, which StreamFormats::sizes() turns into every size of its
++	 * table that is in it (53 for these cameras, with 4 formats). The
++	 * PipeWire plugin builds a parameter for each of those, several times
++	 * in a negotiation, and a negotiation happens twice when a client
++	 * connects to a camera that is idle: that was 0.7 s of the 1.4 s from
++	 * connecting to the first frame, when measured. The range is still
++	 * what validate() accepts, so a client that asks for another size
++	 * directly gets it.
++	 */
++	static const Size commonSizes[] = {
++		Size(320, 240), Size(640, 360), Size(640, 480), Size(800, 600),
++		Size(1024, 768), Size(1280, 720), Size(1280, 960), Size(1600, 1200),
++		Size(1920, 1080), Size(2048, 1536), Size(2560, 1440), Size(2560, 1920),
++		Size(3264, 2448), Size(3840, 2160),
++	};
++
++	std::vector<SizeRange> sizesVector;
++	for (const Size &size : commonSizes) {
++		if (size.width <= sizes.max.width && size.height <= sizes.max.height &&
++		    size.width >= sizes.min.width && size.height >= sizes.min.height &&
++		    size != sizes.max)
++			sizesVector.emplace_back(size);
++	}
++	/* The largest, which is the default */
++	sizesVector.emplace_back(sizes.max);
++
+ 	std::map<PixelFormat, std::vector<SizeRange>> formats;
+ 
+ 	for (unsigned int i = 0; i < pixelFormats.size(); i++)

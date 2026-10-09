@@ -1,0 +1,29 @@
+From 8326e540654a12e75312711b5ed06e54a6376053 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 21:22:14 +0000
+Subject: ipa: libipa: camera_sensor_helper: S5KJN1 gain is the code in 1/32
+ steps
+
+The s5kjn1 driver's analogue gain control is now the sensor's gain code,
+32 for unity gain, instead of whole multiples.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 389342ffd..bff99ea45 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -963,8 +963,8 @@ public:
+ 		 * demuxblklevel14, 252 at 12 bits), matching raw frames.
+ 		 */
+ 		blackLevel_ = 4032;
+-		/* The driver's analogue gain control is the real gain. */
+-		gain_ = AnalogueGainLinear{ 1, 0, 0, 1 };
++		/* The analogue gain code is the gain in 1/32 steps. */
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
+ 
+ 		/*
+ 		 * The phase detection stream of the 4080x3072 mode, as

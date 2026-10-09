@@ -1,4 +1,4 @@
-From e589ffbd4ee051548e311571d5135064a51848f6 Mon Sep 17 00:00:00 2001
+From be27150459ed2d1900538a32b99ae0ead709f486 Mon Sep 17 00:00:00 2001
 From: Hans de Goede <johannes.goede@oss.qualcomm.com>
 Date: Thu, 19 Feb 2026 16:10:20 +0100
 Subject: camss: Add camss pipeline handler
@@ -23,23 +23,23 @@ a candidate for later being factored out into a generic helper class which
 could be shared between the IPU3, CAMSS and simple pipeline handlers.
 
 Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
-(cherry picked from commit 502ae37373ed2ab90958da0356ec55eacac8d034)
 ---
+ include/libcamera/ipa/meson.build             |   1 +
  meson.build                                   |   1 +
  meson_options.txt                             |   1 +
  src/ipa/meson.build                           |   1 +
- src/libcamera/pipeline/camss/camss.cpp        | 689 ++++++++++++++++++
+ src/libcamera/pipeline/camss/camss.cpp        | 690 ++++++++++++++++++
  src/libcamera/pipeline/camss/camss_csi.cpp    | 570 +++++++++++++++
  src/libcamera/pipeline/camss/camss_csi.h      | 131 ++++
  src/libcamera/pipeline/camss/camss_frames.cpp | 155 ++++
  src/libcamera/pipeline/camss/camss_frames.h   |  71 ++
  src/libcamera/pipeline/camss/camss_isp.cpp    |  26 +
- src/libcamera/pipeline/camss/camss_isp.h      |  62 ++
- .../pipeline/camss/camss_isp_soft.cpp         | 226 ++++++
- src/libcamera/pipeline/camss/camss_isp_soft.h |  56 ++
+ src/libcamera/pipeline/camss/camss_isp.h      |  64 ++
+ .../pipeline/camss/camss_isp_soft.cpp         | 227 ++++++
+ src/libcamera/pipeline/camss/camss_isp_soft.h |  57 ++
  src/libcamera/pipeline/camss/meson.build      |  10 +
  src/libcamera/pipeline/simple/simple.cpp      |   1 -
- 14 files changed, 1999 insertions(+), 1 deletion(-)
+ 15 files changed, 2005 insertions(+), 1 deletion(-)
  create mode 100644 src/libcamera/pipeline/camss/camss.cpp
  create mode 100644 src/libcamera/pipeline/camss/camss_csi.cpp
  create mode 100644 src/libcamera/pipeline/camss/camss_csi.h
@@ -51,6 +51,18 @@ Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
  create mode 100644 src/libcamera/pipeline/camss/camss_isp_soft.h
  create mode 100644 src/libcamera/pipeline/camss/meson.build
 
+diff --git a/include/libcamera/ipa/meson.build b/include/libcamera/ipa/meson.build
+index fb518526a..a8337a0e1 100644
+--- a/include/libcamera/ipa/meson.build
++++ b/include/libcamera/ipa/meson.build
+@@ -63,6 +63,7 @@ libcamera_ipa_headers += custom_target('core_ipa_serializer_h',
+ 
+ # Mapping from pipeline handler name to mojom file
+ pipeline_ipa_mojom_mapping = {
++    'camss': 'softisp.mojom',
+     'ipu3': 'ipu3.mojom',
+     'mali-c55': 'mali-c55.mojom',
+     'rkisp1': 'rkisp1.mojom',
 diff --git a/meson.build b/meson.build
 index 37fe9ce4f..efd93938f 100644
 --- a/meson.build
@@ -76,23 +88,23 @@ index e829ebe60..845765103 100644
              'ipu3',
              'mali-c55',
 diff --git a/src/ipa/meson.build b/src/ipa/meson.build
-index ab4a1897f..925356d84 100644
+index ab4a1897f..77a7a5455 100644
 --- a/src/ipa/meson.build
 +++ b/src/ipa/meson.build
 @@ -25,6 +25,7 @@ subdir('libipa')
  ipa_sign = files('ipa-sign.sh')
  
  supported_ipas = {
-+    'camss':      'simple',
++    'camss':      'softisp',
      'ipu3':       'ipu3',
      'mali-c55':   'mali-c55',
      'rkisp1':     'rkisp1',
 diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
 new file mode 100644
-index 000000000..371d4f8a2
+index 000000000..6ab50b9ce
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss.cpp
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,690 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Pipeline handler for Qualcomm CAMSS
@@ -193,7 +205,7 @@ index 000000000..371d4f8a2
 +	PipelineHandlerCamss(CameraManager *manager);
 +
 +	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
-+								   Span<const StreamRole> roles) override;
++								   std::span<const StreamRole> roles) override;
 +	int configure(Camera *camera, CameraConfiguration *config) override;
 +
 +	int exportFrameBuffers(Camera *camera, Stream *stream,
@@ -387,7 +399,7 @@ index 000000000..371d4f8a2
 +}
 +
 +std::unique_ptr<CameraConfiguration>
-+PipelineHandlerCamss::generateConfiguration(Camera *camera, Span<const StreamRole> roles)
++PipelineHandlerCamss::generateConfiguration(Camera *camera, std::span<const StreamRole> roles)
 +{
 +	CamssCameraData *data = cameraData(camera);
 +	std::unique_ptr<CamssCameraConfiguration> config =
@@ -441,7 +453,8 @@ index 000000000..371d4f8a2
 +	if (ret)
 +		return ret;
 +
-+	return data->isp_->configure(config->csiConfig_, config->ispConfig_);
++	return data->isp_->configure(config->csiConfig_, config->ispConfig_,
++				     &data->controlInfo_);
 +}
 +
 +int PipelineHandlerCamss::exportFrameBuffers(Camera *camera, Stream *stream,
@@ -1767,10 +1780,10 @@ index 000000000..c452568d6
 +} /* namespace libcamera */
 diff --git a/src/libcamera/pipeline/camss/camss_isp.h b/src/libcamera/pipeline/camss/camss_isp.h
 new file mode 100644
-index 000000000..36adf99cc
+index 000000000..55e967b36
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_isp.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,64 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS ISP virtual base class
@@ -1790,6 +1803,7 @@ index 000000000..36adf99cc
 +
 +namespace libcamera {
 +
++class ControlInfoMap;
 +class ControlList;
 +class FrameBuffer;
 +struct StreamConfiguration;
@@ -1806,7 +1820,8 @@ index 000000000..36adf99cc
 +	virtual StreamConfiguration generateConfiguration(const StreamConfiguration &raw) const = 0;
 +	virtual StreamConfiguration validate(const StreamConfiguration &raw, const StreamConfiguration &req) const = 0;
 +	virtual int configure(const StreamConfiguration &inputCfg,
-+			      const StreamConfiguration &outputCfg) = 0;
++			      const StreamConfiguration &outputCfg,
++			      ControlInfoMap *ispControls) = 0;
 +
 +	virtual int allocateBuffers(unsigned int bufferCount) = 0;
 +	virtual void freeBuffers() = 0;
@@ -1835,10 +1850,10 @@ index 000000000..36adf99cc
 +} /* namespace libcamera */
 diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
 new file mode 100644
-index 000000000..ed81c0790
+index 000000000..113ba7621
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,227 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS softISP class
@@ -2007,7 +2022,8 @@ index 000000000..ed81c0790
 +}
 +
 +int CamssIspSoft::configure(const StreamConfiguration &inputCfg,
-+			    const StreamConfiguration &outputCfg)
++			    const StreamConfiguration &outputCfg,
++			    ControlInfoMap *ispControls)
 +{
 +	std::vector<std::reference_wrapper<const StreamConfiguration>> outputCfgs;
 +	outputCfgs.push_back(outputCfg);
@@ -2016,7 +2032,7 @@ index 000000000..ed81c0790
 +	ipa::softisp::IPAConfigInfo configInfo;
 +	configInfo.sensorControls = sensor_->controls();
 +
-+	return swIsp_->configure(inputCfg, outputCfgs, configInfo);
++	return swIsp_->configure(inputCfg, outputCfgs, configInfo, ispControls);
 +}
 +
 +int CamssIspSoft::allocateBuffers([[maybe_unused]] unsigned int bufferCount)
@@ -2067,10 +2083,10 @@ index 000000000..ed81c0790
 +} /* namespace libcamera */
 diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
 new file mode 100644
-index 000000000..8adc6c59c
+index 000000000..a05545f54
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,57 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS softISP class
@@ -2106,7 +2122,8 @@ index 000000000..8adc6c59c
 +	StreamConfiguration generateConfiguration(const StreamConfiguration &raw) const override;
 +	StreamConfiguration validate(const StreamConfiguration &raw, const StreamConfiguration &req) const override;
 +	int configure(const StreamConfiguration &inputCfg,
-+		      const StreamConfiguration &outputCfg) override;
++		      const StreamConfiguration &outputCfg,
++		      ControlInfoMap *ispControls) override;
 +
 +	int allocateBuffers(unsigned int bufferCount) override;
 +	void freeBuffers() override;

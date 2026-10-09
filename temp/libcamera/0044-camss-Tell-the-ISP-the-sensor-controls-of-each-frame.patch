@@ -1,0 +1,121 @@
+From d5a189838ee749cdb4b0c4959bd2c5ce9a2cffb0 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 19:57:15 +0000
+Subject: camss: Tell the ISP the sensor controls of each frame it processes
+
+Pass the delayed controls in effect for a frame, as its statistics get
+them, to the ISP with the frame, for the IPA's computeParams().
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp          | 3 ++-
+ src/libcamera/pipeline/camss/camss_isp.h        | 4 +++-
+ src/libcamera/pipeline/camss/camss_isp_ope.cpp  | 5 +++--
+ src/libcamera/pipeline/camss/camss_isp_ope.h    | 3 ++-
+ src/libcamera/pipeline/camss/camss_isp_soft.cpp | 5 +++--
+ src/libcamera/pipeline/camss/camss_isp_soft.h   | 3 ++-
+ 6 files changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index a90aaad4e..84f25c0a7 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -852,7 +852,8 @@ void CamssCameraData::csiBufferReady(FrameBuffer *buffer)
+ 	if (request->findBuffer(&csi_->rawStream_))
+ 		pipe()->completeBuffer(request, buffer);
+ 
+-	isp_->queueBuffers(request, buffer);
++	/* With the controls in effect for the frame, as for its statistics */
++	isp_->queueBuffers(request, buffer, delayedCtrls_->get(request->sequence()));
+ }
+ 
+ /*
+diff --git a/src/libcamera/pipeline/camss/camss_isp.h b/src/libcamera/pipeline/camss/camss_isp.h
+index 3ac38b4b8..bb12348cd 100644
+--- a/src/libcamera/pipeline/camss/camss_isp.h
++++ b/src/libcamera/pipeline/camss/camss_isp.h
+@@ -44,7 +44,9 @@ public:
+ 	virtual int exportOutputBuffers([[maybe_unused]] const Stream *stream,
+ 					[[maybe_unused]] unsigned int count,
+ 					[[maybe_unused]] std::vector<std::unique_ptr<FrameBuffer>> *buffers) { return 0; }
+-	virtual void queueBuffers(Request *request, FrameBuffer *input) = 0;
++	/* sensorControls: the controls the sensor used for the input frame */
++	virtual void queueBuffers(Request *request, FrameBuffer *input,
++				  const ControlList &sensorControls) = 0;
+ 
+ 	virtual void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 				  const ControlList &sensorControls) = 0;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index 1fabfbdc1..d76adcbe4 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -563,7 +563,8 @@ int CamssIspOpe::exportOutputBuffers([[maybe_unused]] const Stream *stream, unsi
+ 	return output_->exportBuffers(count, buffers);
+ }
+ 
+-void CamssIspOpe::queueBuffers(Request *request, FrameBuffer *inputBuffer)
++void CamssIspOpe::queueBuffers(Request *request, FrameBuffer *inputBuffer,
++			       const ControlList &sensorControls)
+ {
+ 	uint32_t frame = request->sequence();
+ 
+@@ -577,7 +578,7 @@ void CamssIspOpe::queueBuffers(Request *request, FrameBuffer *inputBuffer)
+ 
+ 	ipa_->queueRequest(frame, request->controls());
+ 	stats_->processFrame(frame, 0, input);
+-	ipa_->computeParams(frame);
++	ipa_->computeParams(frame, sensorControls);
+ 	/* paramsComputed() will queue all the buffers once the params are known. */
+ }
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.h b/src/libcamera/pipeline/camss/camss_isp_ope.h
+index fefab7825..041e30e5f 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.h
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.h
+@@ -60,7 +60,8 @@ public:
+ 	void freeBuffers() override;
+ 	int exportOutputBuffers(const Stream *stream, unsigned int count,
+ 				std::vector<std::unique_ptr<FrameBuffer>> *buffers) override;
+-	void queueBuffers(Request *request, FrameBuffer *input) override;
++	void queueBuffers(Request *request, FrameBuffer *input,
++			  const ControlList &sensorControls) override;
+ 
+ 	void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 			  const ControlList &sensorControls) override;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index 0b0616f1d..f7221e9e0 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -203,7 +203,8 @@ int CamssIspSoft::exportOutputBuffers(const Stream *stream, unsigned int count,
+ 	return swIsp_->exportBuffers(stream, count, buffers);
+ }
+ 
+-void CamssIspSoft::queueBuffers(Request *request, FrameBuffer *input)
++void CamssIspSoft::queueBuffers(Request *request, FrameBuffer *input,
++				const ControlList &sensorControls)
+ {
+ 	std::map<const Stream *, FrameBuffer *> outputs;
+ 	for (const auto &[stream, outbuffer] : request->buffers()) {
+@@ -212,7 +213,7 @@ void CamssIspSoft::queueBuffers(Request *request, FrameBuffer *input)
+ 	}
+ 
+ 	swIsp_->queueRequest(request->sequence(), request->controls());
+-	swIsp_->queueBuffers(request->sequence(), input, outputs);
++	swIsp_->queueBuffers(request->sequence(), input, outputs, sensorControls);
+ }
+ 
+ void CamssIspSoft::processStats(const uint32_t frame, const uint32_t statsBufferId,
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
+index 3f8c4713b..6563983bb 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.h
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
+@@ -40,7 +40,8 @@ public:
+ 	void freeBuffers() override;
+ 	int exportOutputBuffers(const Stream *stream, unsigned int count,
+ 				std::vector<std::unique_ptr<FrameBuffer>> *buffers) override;
+-	void queueBuffers(Request *request, FrameBuffer *input) override;
++	void queueBuffers(Request *request, FrameBuffer *input,
++			  const ControlList &sensorControls) override;
+ 
+ 	void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 			  const ControlList &sensorControls) override;

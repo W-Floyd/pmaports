@@ -1,0 +1,95 @@
+From 5e58b2fc8fbce7fc9d9519442912554ea790165b Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 20:33:34 +0000
+Subject: pipeline: camss: Complete in-flight requests on stop
+
+With the software ISP a request completes when its buffers are done and
+the IPA has reported the frame's metadata. Stopping cancels the buffers
+of frames in flight, but the stopped IPA reports nothing more for them,
+so their requests stayed queued and PipelineHandler::stop() asserted
+that none were.
+
+Once everything has stopped, cancel and complete the requests still in
+flight.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp        | 16 ++++++++++++++++
+ src/libcamera/pipeline/camss/camss_frames.cpp | 10 ++++++++++
+ src/libcamera/pipeline/camss/camss_frames.h   |  1 +
+ 3 files changed, 27 insertions(+)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index 84f25c0a7..f06a528f3 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -68,6 +68,7 @@ public:
+ 
+ 	void queuePendingRequests();
+ 	void cancelPendingRequests();
++	void cancelInFlightRequests();
+ 	void parkFocusLens();
+ 
+ 	void startPdaf();
+@@ -466,6 +467,7 @@ void PipelineHandlerCamss::stopDevice(Camera *camera)
+ 	data->parkFocusLens();
+ 	data->csi_->stop();
+ 	data->stopPdaf();
++	data->cancelInFlightRequests();
+ 
+ 	freeBuffers(camera);
+ }
+@@ -605,6 +607,20 @@ void CamssCameraData::cancelPendingRequests()
+ 	}
+ }
+ 
++/*
++ * Complete the requests still in flight once everything has stopped. Their
++ * buffers came back cancelled, but a frame the IPA had not reported on
++ * waits for metadata that will not come now.
++ */
++void CamssCameraData::cancelInFlightRequests()
++{
++	for (Request *request : frameInfos_.requests()) {
++		frameInfos_.remove(frameInfos_.find(request->sequence()));
++		request->_d()->cancel();
++		pipe()->completeRequest(request);
++	}
++}
++
+ void CamssCameraData::queuePendingRequests()
+ {
+ 	while (!pendingRequests_.empty()) {
+diff --git a/src/libcamera/pipeline/camss/camss_frames.cpp b/src/libcamera/pipeline/camss/camss_frames.cpp
+index 3daaaff10..a33af4a1f 100644
+--- a/src/libcamera/pipeline/camss/camss_frames.cpp
++++ b/src/libcamera/pipeline/camss/camss_frames.cpp
+@@ -93,6 +93,16 @@ CamssFrames::Info *CamssFrames::create(Request *request)
+ 	return &info;
+ }
+ 
++/* The requests of the frames in flight, oldest first */
++std::vector<Request *> CamssFrames::requests() const
++{
++	std::vector<Request *> requests;
++	for (const auto &[id, info] : frameInfo_)
++		requests.push_back(info.request);
++
++	return requests;
++}
++
+ void CamssFrames::remove(CamssFrames::Info *info)
+ {
+ 	/* Return params and stat buffer for reuse. */
+diff --git a/src/libcamera/pipeline/camss/camss_frames.h b/src/libcamera/pipeline/camss/camss_frames.h
+index 936b907e4..ca9c11243 100644
+--- a/src/libcamera/pipeline/camss/camss_frames.h
++++ b/src/libcamera/pipeline/camss/camss_frames.h
+@@ -51,6 +51,7 @@ public:
+ 	Info *create(Request *request);
+ 	void remove(Info *info);
+ 	bool tryComplete(Info *info);
++	std::vector<Request *> requests() const;
+ 
+ 	Info *find(unsigned int id);
+ 	Info *find(FrameBuffer *buffer);

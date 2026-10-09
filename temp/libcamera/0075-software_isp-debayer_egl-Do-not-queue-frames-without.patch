@@ -1,0 +1,99 @@
+From fb6d0a08ff0b18239e081ecbc11f71ae02aa0089 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 17:11:36 +0000
+Subject: software_isp: debayer_egl: Do not queue frames without statistics
+ behind those with
+
+The thread that gathers the CPU statistics runs the frames' jobs in
+order, and one frame in four has statistics, which take 41 to 49 ms. A
+frame without any only had to say so (the IPA takes whether a frame has
+statistics from its number) and give its input buffer back, but its job
+queued behind the one before it, so the raw buffer was held that much
+longer: the capture ran out of buffers and dropped frames, and the
+metadata of the frame was late too.
+
+Do that on the debayer thread, once the GPU has finished with the
+buffer (syncOutput): returned any earlier the camera could write over
+it while the GPU still reads it, and the pipeline then lost track of
+the frame. The input buffers come back in a different order than they
+were queued, which SoftwareIsp only asserted, not needed.
+
+On the rear camera of a Moto G Play (2024) at 1920x1080, 30 fps, the
+timestamps of 300 frames had 7 to 9 gaps of over 45 ms (a dropped frame)
+with 0 to 1 after, and the time from a frame's timestamp to its request
+completing stayed at a median of 33 to 34 ms.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/debayer_egl.cpp  | 17 +++++++++++++----
+ src/libcamera/software_isp/software_isp.cpp | 13 ++++++++++---
+ 2 files changed, 23 insertions(+), 7 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 11e07c6e3..8c0e5604d 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -996,10 +996,14 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 	 * thread returns the input buffer when it is done with it.
+ 	 */
+ 	if (frame % SwStatsCpu::kStatPerNumFrames) {
+-		statsThread_.post([this, frame, input] {
+-			stats_->finishFrame(frame, 0);
+-			inputBufferReady.emit(input);
+-		});
++		/*
++		 * A frame without statistics has nothing to wait for: it only
++		 * says so, and gives its buffer back, without queueing behind
++		 * the statistics of the frame before it, which take several
++		 * frames' time (the buffer would be held, and the metadata of
++		 * the frame late, by that much).
++		 */
++		/* Below, once the GPU has read the buffer */
+ 	} else {
+ 		if (!inMapped) {
+ 			/*
+@@ -1027,6 +1031,11 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 	egl_.syncOutput();
+ 	bench_.finishFrame();
+ 
++	if (frame % SwStatsCpu::kStatPerNumFrames) {
++		stats_->finishFrame(frame, 0);
++		inputBufferReady.emit(input);
++	}
++
+ 	outputBufferReady.emit(output);
+ 
+ 	return;
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 1b7023aa4..56cadad50 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -7,9 +7,10 @@
+ 
+ #include "libcamera/internal/software_isp/software_isp.h"
+ 
+-#include <span>
++#include <algorithm>
+ #include <memory>
+ #include <optional>
++#include <span>
+ #include <stdint.h>
+ #include <string>
+ #include <sys/mman.h>
+@@ -577,8 +578,14 @@ void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)
+ 
+ void SoftwareIsp::inputReady(FrameBuffer *input)
+ {
+-	ASSERT(queuedInputBuffers_.front() == input);
+-	queuedInputBuffers_.pop_front();
++	/*
++	 * Not always in the order they were queued: a frame without statistics
++	 * gives its buffer back at once, ahead of the ones before it that wait
++	 * for theirs.
++	 */
++	auto it = std::find(queuedInputBuffers_.begin(), queuedInputBuffers_.end(), input);
++	ASSERT(it != queuedInputBuffers_.end());
++	queuedInputBuffers_.erase(it);
+ 	inputBufferReady.emit(input);
+ }
+ 

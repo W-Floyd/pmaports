@@ -1,0 +1,97 @@
+From 23e1ea60dba06dd5c4b7bf1b85bc320234c7c2f7 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <johannes.goede@oss.qualcomm.com>
+Date: Fri, 3 Apr 2026 16:20:38 +0200
+Subject: libcamera: media_object: Add MediaEntity::disableLinks()
+
+Some pipeline-handlers may want finer-grained control over disabling
+links then MediaDevice::disableLinks() which simply disables all
+links on a media-device.
+
+Add a new MediaEntity::disableLinks() method which disables the links
+on a single MediaEntity and use that in MediaDevice::disableLinks()
+to avoid code duplication.
+
+Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
+---
+ include/libcamera/internal/media_object.h |  1 +
+ src/libcamera/media_device.cpp            | 16 +++-----------
+ src/libcamera/media_object.cpp            | 27 +++++++++++++++++++++++
+ 3 files changed, 31 insertions(+), 13 deletions(-)
+
+diff --git a/include/libcamera/internal/media_object.h b/include/libcamera/internal/media_object.h
+index 54e2e5cef..121e80bac 100644
+--- a/include/libcamera/internal/media_object.h
++++ b/include/libcamera/internal/media_object.h
+@@ -118,6 +118,7 @@ public:
+ 	const MediaPad *getPadById(unsigned int id) const;
+ 
+ 	int setDeviceNode(const std::string &deviceNode);
++	int disableLinks() const;
+ 
+ private:
+ 	LIBCAMERA_DISABLE_COPY_AND_MOVE(MediaEntity)
+diff --git a/src/libcamera/media_device.cpp b/src/libcamera/media_device.cpp
+index 3f974eaab..4833d4bba 100644
+--- a/src/libcamera/media_device.cpp
++++ b/src/libcamera/media_device.cpp
+@@ -463,19 +463,9 @@ MediaLink *MediaDevice::link(const MediaPad *source, const MediaPad *sink)
+ int MediaDevice::disableLinks()
+ {
+ 	for (MediaEntity *entity : entities_) {
+-		for (MediaPad *pad : entity->pads()) {
+-			if (!(pad->flags() & MEDIA_PAD_FL_SOURCE))
+-				continue;
+-
+-			for (MediaLink *link : pad->links()) {
+-				if (link->flags() & MEDIA_LNK_FL_IMMUTABLE)
+-					continue;
+-
+-				int ret = link->setEnabled(false);
+-				if (ret)
+-					return ret;
+-			}
+-		}
++		int ret = entity->disableLinks();
++		if (ret)
++			return ret;
+ 	}
+ 
+ 	return 0;
+diff --git a/src/libcamera/media_object.cpp b/src/libcamera/media_object.cpp
+index 3e3772a62..82ba5f4b2 100644
+--- a/src/libcamera/media_object.cpp
++++ b/src/libcamera/media_object.cpp
+@@ -428,6 +428,33 @@ int MediaEntity::setDeviceNode(const std::string &deviceNode)
+ 	return 0;
+ }
+ 
++/**
++ * \brief Disable all links on the media entity
++ *
++ * Disable all the media entity links, clearing the MEDIA_LNK_FL_ENABLED flag
++ * on links which are not flagged as IMMUTABLE.
++ *
++ * \return 0 on success or a negative error code otherwise
++ */
++int MediaEntity::disableLinks() const
++{
++	for (MediaPad *pad : pads_) {
++		if (!(pad->flags() & MEDIA_PAD_FL_SOURCE))
++			continue;
++
++		for (MediaLink *link : pad->links()) {
++			if (link->flags() & MEDIA_LNK_FL_IMMUTABLE)
++				continue;
++
++			int ret = link->setEnabled(false);
++			if (ret)
++				return ret;
++		}
++	}
++
++	return 0;
++}
++
+ /**
+  * \brief Construct a MediaEntity
+  * \param[in] dev The media device this entity belongs to

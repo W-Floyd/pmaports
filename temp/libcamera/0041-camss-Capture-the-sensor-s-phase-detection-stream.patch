@@ -1,0 +1,693 @@
+From e956f5150536aa47414f9050f73ae03f63473896 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 17:07:52 +0000
+Subject: camss: Capture the sensor's phase detection stream
+
+A sensor with a metadata stream beside the image, found by CameraSensorRaw
+(on this platform, a phase detection stream), gets a second capture path:
+the CSI phy and the CSI decoder route it, with the V4L2 streams API, from
+the decoder's second source pad to the next RDI of the same VFE, whose
+video node captures it as metadata (opened for META_CAPTURE, as the node
+also offers video capture). The image keeps the default route, so its
+path is configured as before. Where the kernel cannot route the stream,
+the camera runs without it.
+
+The pipeline allocates the PD buffers, shares them with the ISP's IPA and
+hands it each completed buffer with its sequence number, queueing it
+again once the IPA is done. Phase detection is optional throughout: if
+the IPA cannot use the stream, it is not started. The soft ISP and the
+OPE forward the calls to the soft IPA, which logs each buffer's combined
+phase at debug level.
+
+Also log receiver-unsupported media bus codes at debug level: sensors on
+the common raw sensor model offer generic raw codes that CAMSS cannot
+capture, next to the Bayer ones it can.
+
+The IPA measures the phase in the thread that also processes the
+statistics. Queueing every PD buffer to it lets a backlog build up
+whenever measuring takes longer than a frame, delaying exposure, white
+balance and focus behind results that are stale by then. Hand it a
+buffer only when it has none, and queue the ones that complete meanwhile
+straight back to the device.
+
+Autofocus waits a few frames for the lens to settle after each move, so
+a phase per frame buys nothing, while measuring it costs about a fifth
+of a Cortex-A53 core at 15 fps and twice that at 30. Hand the IPA every
+second PD buffer.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp        |  96 ++++++++
+ src/libcamera/pipeline/camss/camss_csi.cpp    | 227 +++++++++++++++++-
+ src/libcamera/pipeline/camss/camss_csi.h      |  31 +++
+ src/libcamera/pipeline/camss/camss_isp.h      |  15 ++
+ .../pipeline/camss/camss_isp_ope.cpp          |  35 +++
+ src/libcamera/pipeline/camss/camss_isp_ope.h  |   5 +
+ .../pipeline/camss/camss_isp_soft.cpp         |  20 ++
+ src/libcamera/pipeline/camss/camss_isp_soft.h |   5 +
+ 8 files changed, 432 insertions(+), 2 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index 427fa21a0..a90aaad4e 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -70,6 +70,11 @@ public:
+ 	void cancelPendingRequests();
+ 	void parkFocusLens();
+ 
++	void startPdaf();
++	void stopPdaf();
++	void pdafBufferReady(FrameBuffer *buffer);
++	void pdafProcessed(unsigned int bufferId);
++
+ 	std::unique_ptr<CamssCsiCamera> csi_;
+ 	std::unique_ptr<CamssIsp> isp_;
+ 	std::unique_ptr<DelayedControls> delayedCtrls_;
+@@ -78,6 +83,10 @@ public:
+ 	/* The last focus position sent to the lens, for parking it at stop. */
+ 	std::optional<int32_t> lastFocusPosition_;
+ 
++	/* A PD buffer is with the IPA: newer ones are skipped meanwhile. */
++	bool pdafInFlight_ = false;
++	unsigned int pdafFrames_ = 0;
++
+ 	/* Requests for which no buffer has been queued to the CSI receiver yet. */
+ 	std::queue<Request *> pendingRequests_;
+ };
+@@ -424,6 +433,9 @@ int PipelineHandlerCamss::start(Camera *camera, [[maybe_unused]] const ControlLi
+ 
+ 	data->delayedCtrls_->reset();
+ 
++	/* Before the image, so that the sensor's streams start together. */
++	data->startPdaf();
++
+ 	ret = data->csi_->start();
+ 	if (ret)
+ 		goto freebuffers;
+@@ -437,6 +449,7 @@ int PipelineHandlerCamss::start(Camera *camera, [[maybe_unused]] const ControlLi
+ stop:
+ 	data->csi_->stop();
+ freebuffers:
++	data->stopPdaf();
+ 	freeBuffers(camera);
+ 
+ 	LOG(Camss, Error) << "Failed to start camera " << camera->id();
+@@ -452,10 +465,91 @@ void PipelineHandlerCamss::stopDevice(Camera *camera)
+ 	data->isp_->stop();
+ 	data->parkFocusLens();
+ 	data->csi_->stop();
++	data->stopPdaf();
+ 
+ 	freeBuffers(camera);
+ }
+ 
++/*
++ * Capture the sensor's phase detection stream, when the CSI side could route
++ * it, for an ISP whose IPA can use it. Phase detection is optional: any
++ * failure leaves the camera running without it.
++ */
++void CamssCameraData::startPdaf()
++{
++	if (!csi_->pdafConfigured())
++		return;
++
++	int ret = csi_->allocatePdafBuffers();
++	if (ret < 0) {
++		LOG(Camss, Warning) << "No PD buffers: " << strerror(-ret);
++		return;
++	}
++
++	const V4L2DeviceFormat &format = csi_->pdafFormat();
++	ret = isp_->mapPdafBuffers(csi_->pdafBuffers(), format.size,
++				   format.planes[0].bpl);
++	if (ret) {
++		LOG(Camss, Debug) << "The ISP does not use the PD stream";
++		csi_->freePdafBuffers();
++		return;
++	}
++
++	ret = csi_->startPdaf();
++	if (ret) {
++		LOG(Camss, Warning) << "PD stream start failed: " << strerror(-ret);
++		csi_->stopPdafStream();
++		isp_->unmapPdafBuffers(csi_->pdafBuffers());
++		csi_->freePdafBuffers();
++	}
++}
++
++void CamssCameraData::stopPdaf()
++{
++	if (csi_->pdafBuffers().empty())
++		return;
++
++	/*
++	 * The IPA processes requests in order, so by the time the unmap
++	 * returns it is done with every buffer it was given.
++	 */
++	csi_->stopPdafStream();
++	isp_->unmapPdafBuffers(csi_->pdafBuffers());
++	csi_->freePdafBuffers();
++	pdafInFlight_ = false;
++	pdafFrames_ = 0;
++}
++
++/*
++ * The IPA gets one PD buffer at a time, the newest: one that completes while
++ * it is still busy is skipped. Measuring the phase is costly, and a backlog
++ * would delay the statistics the IPA processes in the same thread, and with
++ * them exposure and white balance, for results that are stale anyway.
++ *
++ * It also gets only every kPdafEvery-th buffer: autofocus waits a few frames
++ * for the lens to settle after each move, so a phase per frame is not needed,
++ * while it costs a good part of a CPU core.
++ */
++static constexpr unsigned int kPdafEvery = 2;
++
++void CamssCameraData::pdafBufferReady(FrameBuffer *buffer)
++{
++	if (buffer->metadata().status != FrameMetadata::FrameSuccess ||
++	    pdafInFlight_ || pdafFrames_++ % kPdafEvery) {
++		csi_->queuePdafBuffer(buffer->cookie());
++		return;
++	}
++
++	pdafInFlight_ = true;
++	isp_->processPdaf(buffer->metadata().sequence, buffer->cookie());
++}
++
++void CamssCameraData::pdafProcessed(unsigned int bufferId)
++{
++	pdafInFlight_ = false;
++	csi_->queuePdafBuffer(bufferId);
++}
++
+ /*
+  * Park the focus lens. The lens subdevice stays open for as long as the
+  * camera manager lives, so a VCM driver never runtime-suspends and a lens
+@@ -611,6 +705,8 @@ bool PipelineHandlerCamss::match(DeviceEnumerator *enumerator)
+ 		data->isp_->statsReady.connect(data.get(), &CamssCameraData::statsReady);
+ 		data->isp_->metadataReady.connect(data.get(), &CamssCameraData::metadataReady);
+ 		data->isp_->setSensorControls.connect(data.get(), &CamssCameraData::setSensorControls);
++		data->isp_->pdafProcessed.connect(data.get(), &CamssCameraData::pdafProcessed);
++		data->csi_->pdafBufferReady.connect(data.get(), &CamssCameraData::pdafBufferReady);
+ 
+ 		data->csi_->setIsp(data->isp_.get());
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_csi.cpp b/src/libcamera/pipeline/camss/camss_csi.cpp
+index 2af54d287..951abb76b 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.cpp
++++ b/src/libcamera/pipeline/camss/camss_csi.cpp
+@@ -13,9 +13,16 @@
+ #include "camss_csi.h"
+ 
+ #include <cmath>
++#include <fcntl.h>
+ #include <limits>
++#include <optional>
+ 
+ #include <linux/media-bus-format.h>
++#include <linux/videodev2.h>
++
++#include <libcamera/base/shared_fd.h>
++#include <libcamera/base/unique_fd.h>
++#include <libcamera/base/utils.h>
+ 
+ #include <libcamera/formats.h>
+ #include <libcamera/geometry.h>
+@@ -51,9 +58,13 @@ V4L2PixelFormat CamssCsiCamera::mbusCodeToV4L2PixelFormat(unsigned int code) con
+ {
+ 	V4L2VideoDevice::Formats formats = output_->formats(code);
+ 
++	/*
++	 * Not an error: a sensor may offer codes the receiver cannot capture,
++	 * such as the generic raw codes next to the Bayer ones.
++	 */
+ 	if (formats.empty()) {
+-		LOG(Camss, Error)
+-			<< "No formats for media bus code " << code;
++		LOG(Camss, Debug)
++			<< "No formats for media bus code " << utils::hex(code);
+ 		return V4L2PixelFormat();
+ 	}
+ 
+@@ -307,6 +318,14 @@ int CamssCsiCamera::configure(const StreamConfiguration &cfg, const Transform &t
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * Routing first: setting routes resets the formats of the streams
++	 * they carry, including the image's, which the loop below sets.
++	 */
++	ret = configurePdaf();
++	if (ret)
++		return ret;
++
+ 	for (auto &link : links_) {
+ 		if (!(link.link->flags() & MEDIA_LNK_FL_ENABLED)) {
+ 			ret = link.link->setEnabled(true);
+@@ -338,6 +357,158 @@ int CamssCsiCamera::configure(const StreamConfiguration &cfg, const Transform &t
+ 	return 0;
+ }
+ 
++/*
++ * Route the sensor's phase detection stream, next to the image, through the
++ * CSI phy and the CSI decoder to the second RDI, and set its formats. The
++ * image keeps stream 0 of the decoder's first source pad, which is where the
++ * default routing puts it, so the image path is configured as without PD.
++ */
++int CamssCsiCamera::configurePdaf()
++{
++	pdaf_.configured = false;
++
++	if (!pdaf_.link)
++		return 0;
++
++	std::optional<V4L2Subdevice::Stream> meta = sensor_->embeddedDataStream();
++	V4L2SubdeviceFormat metaFormat = sensor_->embeddedDataFormat();
++	if (!meta || !metaFormat.code || metaFormat.size.isNull())
++		return 0;
++
++	uint32_t fourcc;
++	switch (metaFormat.code) {
++	case MEDIA_BUS_FMT_META_8:
++		fourcc = V4L2_META_FMT_GENERIC_8;
++		break;
++	case MEDIA_BUS_FMT_META_10:
++		fourcc = V4L2_META_FMT_GENERIC_CSI2_10;
++		break;
++	case MEDIA_BUS_FMT_META_12:
++		fourcc = V4L2_META_FMT_GENERIC_CSI2_12;
++		break;
++	default:
++		LOG(Camss, Warning)
++			<< "Unsupported PD stream format " << metaFormat;
++		return 0;
++	}
++
++	V4L2Subdevice *phy = links_[SensorPhyLink].sinkSubdev.get();
++	V4L2Subdevice *csid = links_[PhyCsidLink].sinkSubdev.get();
++	const unsigned int phySink = links_[SensorPhyLink].link->sink()->index();
++	const unsigned int phySource = links_[PhyCsidLink].link->source()->index();
++	const unsigned int csidSink = links_[PhyCsidLink].link->sink()->index();
++	const unsigned int csidImage = links_[CsidVfeLink].link->source()->index();
++	const unsigned int csidPdaf = pdaf_.link->source()->index();
++	const unsigned int image = sensor_->imageStream().stream;
++	const uint32_t active = V4L2_SUBDEV_ROUTE_FL_ACTIVE;
++
++	V4L2Subdevice::Routing phyRouting = {
++		{ { phySink, image }, { phySource, image }, active },
++		{ { phySink, meta->stream }, { phySource, meta->stream }, active },
++	};
++	V4L2Subdevice::Routing csidRouting = {
++		{ { csidSink, image }, { csidImage, 0 }, active },
++		{ { csidSink, meta->stream }, { csidPdaf, 0 }, active },
++	};
++
++	int ret = phy->setRouting(&phyRouting);
++	if (!ret)
++		ret = csid->setRouting(&csidRouting);
++	if (ret) {
++		LOG(Camss, Warning)
++			<< "Cannot route the PD stream, phase detection disabled";
++		return 0;
++	}
++
++	ret = phy->setFormat({ phySink, meta->stream }, &metaFormat);
++	if (!ret)
++		ret = csid->setFormat({ csidSink, meta->stream }, &metaFormat);
++	if (!ret)
++		ret = pdaf_.vfe->setFormat(pdaf_.link->sink()->index(), &metaFormat);
++	if (ret)
++		return ret;
++
++	if (!(pdaf_.link->flags() & MEDIA_LNK_FL_ENABLED)) {
++		ret = pdaf_.link->setEnabled(true);
++		if (ret)
++			return ret;
++	}
++
++	V4L2DeviceFormat format;
++	format.fourcc = V4L2PixelFormat(fourcc);
++	format.size = metaFormat.size;
++	format.planesCount = 1;
++	ret = pdaf_.output->setFormat(&format);
++	if (ret)
++		return ret;
++
++	pdaf_.format = format;
++	pdaf_.configured = true;
++
++	LOG(Camss, Debug)
++		<< "PD stream " << metaFormat << " -> " << format;
++
++	return 0;
++}
++
++int CamssCsiCamera::allocatePdafBuffers()
++{
++	return pdaf_.output->allocateBuffers(kPdafBufferCount, &pdaf_.buffers);
++}
++
++int CamssCsiCamera::startPdaf()
++{
++	for (const std::unique_ptr<FrameBuffer> &buffer : pdaf_.buffers) {
++		int ret = pdaf_.output->queueBuffer(buffer.get());
++		if (ret)
++			return ret;
++	}
++
++	int ret = pdaf_.output->streamOn();
++	if (ret)
++		return ret;
++
++	pdaf_.streaming = true;
++	return 0;
++}
++
++void CamssCsiCamera::stopPdafStream()
++{
++	/*
++	 * Clear the flag first: stream off returns the queued buffers, which
++	 * must not be handed on for processing and queued again.
++	 */
++	const bool streaming = pdaf_.streaming;
++	pdaf_.streaming = false;
++
++	if (streaming && pdaf_.output->streamOff())
++		LOG(Camss, Error) << "PD stream off failed";
++}
++
++void CamssCsiCamera::freePdafBuffers()
++{
++	pdaf_.buffers.clear();
++	if (pdaf_.output && pdaf_.output->releaseBuffers())
++		LOG(Camss, Error) << "Failed to release PD buffers";
++}
++
++void CamssCsiCamera::queuePdafBuffer(unsigned int cookie)
++{
++	if (!pdaf_.streaming || cookie >= pdaf_.buffers.size())
++		return;
++
++	pdaf_.output->queueBuffer(pdaf_.buffers[cookie].get());
++}
++
++void CamssCsiCamera::pdafOutputReady(FrameBuffer *buffer)
++{
++	/* Buffers returned by stream off need not go anywhere */
++	if (!pdaf_.streaming)
++		return;
++
++	pdafBufferReady.emit(buffer);
++}
++
+ int CamssCsiCamera::exportBuffers(unsigned int count,
+ 				  std::vector<std::unique_ptr<FrameBuffer>> *buffers)
+ {
+@@ -574,9 +745,61 @@ std::unique_ptr<CamssCsiCamera> CamssCsi::enumCamera(MediaEntity *phy)
+ 		<< " decoder " << csid->name()
+ 		<< " VFE " << vfe->name();
+ 
++	enumPdaf(cam.get(), csid, vfe);
++
+ 	csids_.erase(csids_.begin());
+ 	vfes_.erase(vfes_.begin());
+ 	return cam;
+ }
+ 
++/*
++ * A sensor with a metadata stream (on this platform, a phase detection
++ * stream) gets a second capture path for it: the CSI decoder's second source
++ * pad to the next RDI of the same VFE, whose video node captures metadata
++ * when opened for it.
++ */
++void CamssCsi::enumPdaf(CamssCsiCamera *cam, MediaEntity *csid, MediaEntity *vfe)
++{
++	if (!cam->sensor_->embeddedDataStream() || csid->pads().size() < 3)
++		return;
++
++	std::string name = vfe->name();
++	if (name.size() < 4 || name.compare(name.size() - 4, 4, "rdi0"))
++		return;
++	name.back() = '1';
++
++	MediaEntity *rdi = camssMediaDev_->getEntityByName(name);
++	if (!rdi || rdi->pads().size() < 2 || rdi->pads()[1]->links().empty())
++		return;
++
++	MediaLink *link = camssMediaDev_->link(csid, 2, rdi, 0);
++	if (!link)
++		return;
++
++	auto subdev = std::make_unique<V4L2Subdevice>(rdi);
++	if (subdev->open())
++		return;
++
++	MediaEntity *node = rdi->pads()[1]->links()[0]->sink()->entity();
++	UniqueFD fd(::open(node->deviceNode().c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC));
++	if (!fd.isValid())
++		return;
++
++	auto output = std::make_unique<V4L2VideoDevice>(node);
++	if (output->open(SharedFD(std::move(fd)), V4L2_BUF_TYPE_META_CAPTURE)) {
++		LOG(Camss, Debug) << node->name() << " cannot capture metadata";
++		return;
++	}
++
++	output->bufferReady.connect(cam, &CamssCsiCamera::pdafOutputReady);
++
++	cam->pdaf_.link = link;
++	cam->pdaf_.vfe = std::move(subdev);
++	cam->pdaf_.output = std::move(output);
++
++	LOG(Camss, Info)
++		<< "Sensor " << cam->sensor_->entity()->name()
++		<< " metadata stream on " << rdi->name();
++}
++
+ } /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/camss/camss_csi.h b/src/libcamera/pipeline/camss/camss_csi.h
+index 81d87c3d6..8ee63e61a 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.h
++++ b/src/libcamera/pipeline/camss/camss_csi.h
+@@ -64,6 +64,22 @@ public:
+ 	FrameBuffer *queueBuffer(Request *request, FrameBuffer *rawBuffer);
+ 	void tryReturnBuffer(FrameBuffer *buffer);
+ 	Signal<FrameBuffer *> &bufferReady() { return output_->bufferReady; }
++
++	/*
++	 * The sensor's phase detection stream, captured on a second RDI when
++	 * the sensor has one and the CSI decoder can route it (the V4L2
++	 * streams API). Configured with the image; allocatePdafBuffers()
++	 * before startPdaf(), and the buffers are internal.
++	 */
++	bool pdafConfigured() const { return pdaf_.configured; }
++	const V4L2DeviceFormat &pdafFormat() const { return pdaf_.format; }
++	int allocatePdafBuffers();
++	const std::vector<std::unique_ptr<FrameBuffer>> &pdafBuffers() const { return pdaf_.buffers; }
++	int startPdaf();
++	void stopPdafStream();
++	void freePdafBuffers();
++	void queuePdafBuffer(unsigned int cookie);
++	Signal<FrameBuffer *> pdafBufferReady;
+ 	/*
+ 	 * \todo camss kernel driver does not support this atm. Once supported
+ 	 * this needs to take frameStart signal from the csi-decoder.
+@@ -78,6 +94,7 @@ private:
+ 	friend class CamssCsi;
+ 
+ 	static constexpr unsigned int kBufferCount = 4;
++	static constexpr unsigned int kPdafBufferCount = 4;
+ 
+ 	/* 3 links: sensor -> phy, phy -> csid, csid->vfe */
+ 	enum LinkIndex {
+@@ -98,12 +115,25 @@ private:
+ 					    bool useIspMargins = false) const;
+ 	int tryFormat(const V4L2SubdeviceFormat &sensorFormat, StreamConfiguration &cfg) const;
+ 	void freeBuffers();
++	int configurePdaf();
++	void pdafOutputReady(FrameBuffer *buffer);
+ 
+ 	std::unique_ptr<CameraSensor> sensor_;
+ 	std::unique_ptr<V4L2VideoDevice> output_;
+ 	std::array<linkInfo, LinkCount> links_;
+ 	CamssIsp *isp_;
+ 
++	struct {
++		/* CSI decoder source pad 2 -> the next RDI of the same VFE */
++		MediaLink *link = nullptr;
++		std::unique_ptr<V4L2Subdevice> vfe;
++		std::unique_ptr<V4L2VideoDevice> output;
++		V4L2DeviceFormat format;
++		std::vector<std::unique_ptr<FrameBuffer>> buffers;
++		bool configured = false;
++		bool streaming = false;
++	} pdaf_;
++
+ 	std::vector<std::unique_ptr<FrameBuffer>> buffers_;
+ 	std::queue<FrameBuffer *> availableBuffers_;
+ 	unsigned int bufferCount_;
+@@ -119,6 +149,7 @@ public:
+ private:
+ 	void getEntities(std::vector<MediaEntity *> &ents, const char *fmt, unsigned int max);
+ 	std::unique_ptr<CamssCsiCamera> enumCamera(MediaEntity *phy);
++	void enumPdaf(CamssCsiCamera *cam, MediaEntity *csid, MediaEntity *vfe);
+ 
+ 	static constexpr unsigned int kMaxCsiPhys = 5;
+ 	static constexpr unsigned int kMinCsiDecoders = 2;
+diff --git a/src/libcamera/pipeline/camss/camss_isp.h b/src/libcamera/pipeline/camss/camss_isp.h
+index 94d3c5cd2..3ac38b4b8 100644
+--- a/src/libcamera/pipeline/camss/camss_isp.h
++++ b/src/libcamera/pipeline/camss/camss_isp.h
+@@ -7,6 +7,8 @@
+ 
+ #pragma once
+ 
++#include <errno.h>
++#include <memory>
+ #include <stdint.h>
+ #include <vector>
+ 
+@@ -47,6 +49,18 @@ public:
+ 	virtual void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 				  const ControlList &sensorControls) = 0;
+ 
++	/*
++	 * The sensor's phase detection stream, for ISPs whose IPA measures
++	 * the phase. Buffers are identified by cookie; each processPdaf() is
++	 * answered by pdafProcessed once the buffer can be queued again.
++	 */
++	virtual int mapPdafBuffers([[maybe_unused]] const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++				   [[maybe_unused]] const Size &size,
++				   [[maybe_unused]] unsigned int bytesPerLine) { return -ENOTSUP; }
++	virtual void unmapPdafBuffers([[maybe_unused]] const std::vector<std::unique_ptr<FrameBuffer>> &buffers) {}
++	virtual void processPdaf([[maybe_unused]] uint32_t frame,
++				 [[maybe_unused]] unsigned int bufferId) {}
++
+ 	virtual int start() = 0;
+ 	virtual void stop() = 0;
+ 
+@@ -59,6 +73,7 @@ public:
+ 	Signal<uint32_t, const ControlList &> metadataReady;
+ 	/* Sensor, focus lens and iris controls, in that order. */
+ 	Signal<const ControlList &, const ControlList &, const ControlList &> setSensorControls;
++	Signal<unsigned int> pdafProcessed;
+ 	Stream outStream_;
+ };
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index b9a5d0399..1fabfbdc1 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -151,6 +151,41 @@ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> ope
+ 								       lensControls,
+ 								       irisControls);
+ 					});
++	ipa_->pdafProcessed.connect(this,
++				    [&](uint32_t bufferId) {
++					    pdafProcessed.emit(bufferId);
++				    });
++}
++
++int CamssIspOpe::mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++				const Size &size, unsigned int bytesPerLine)
++{
++	std::vector<IPABuffer> ipaBuffers;
++
++	for (unsigned int i = 0; i < buffers.size(); i++) {
++		Span<const FrameBuffer::Plane> planes = buffers[i]->planes();
++
++		buffers[i]->setCookie(i);
++		ipaBuffers.emplace_back(i, std::vector<FrameBuffer::Plane>(planes.begin(),
++									  planes.end()));
++	}
++
++	return ipa_->mapPdafBuffers(ipaBuffers, size.width, size.height, bytesPerLine);
++}
++
++void CamssIspOpe::unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers)
++{
++	std::vector<unsigned int> ids;
++
++	for (const std::unique_ptr<FrameBuffer> &buffer : buffers)
++		ids.push_back(buffer->cookie());
++
++	ipa_->unmapPdafBuffers(ids);
++}
++
++void CamssIspOpe::processPdaf(uint32_t frame, unsigned int bufferId)
++{
++	ipa_->processPdaf(frame, bufferId);
+ }
+ 
+ CamssIspOpe::~CamssIspOpe() = default;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.h b/src/libcamera/pipeline/camss/camss_isp_ope.h
+index 0a1c36cef..fefab7825 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.h
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.h
+@@ -65,6 +65,11 @@ public:
+ 	void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 			  const ControlList &sensorControls) override;
+ 
++	int mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++			   const Size &size, unsigned int bytesPerLine) override;
++	void unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers) override;
++	void processPdaf(uint32_t frame, unsigned int bufferId) override;
++
+ 	void paramsComputed(uint32_t frame);
+ 	void parameterBufferReady(FrameBuffer *f);
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index f852213a8..0b0616f1d 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -64,6 +64,10 @@ CamssIspSoft::CamssIspSoft(PipelineHandler *pipe, CameraSensor *sensor,
+ 									 lensControls,
+ 									 irisControls);
+ 					  });
++	swIsp_->pdafProcessed.connect(this,
++				      [&](unsigned int bufferId) {
++					      pdafProcessed.emit(bufferId);
++				      });
+ }
+ 
+ CamssIspSoft::~CamssIspSoft() = default;
+@@ -217,6 +221,22 @@ void CamssIspSoft::processStats(const uint32_t frame, const uint32_t statsBuffer
+ 	swIsp_->processStats(frame, statsBufferId, sensorControls);
+ }
+ 
++int CamssIspSoft::mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++				 const Size &size, unsigned int bytesPerLine)
++{
++	return swIsp_->mapPdafBuffers(buffers, size, bytesPerLine);
++}
++
++void CamssIspSoft::unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers)
++{
++	swIsp_->unmapPdafBuffers(buffers);
++}
++
++void CamssIspSoft::processPdaf(uint32_t frame, unsigned int bufferId)
++{
++	swIsp_->processPdaf(frame, bufferId);
++}
++
+ int CamssIspSoft::start()
+ {
+ 	return swIsp_->start();
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
+index 2dd1e31a4..3f8c4713b 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.h
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
+@@ -45,6 +45,11 @@ public:
+ 	void processStats(const uint32_t frame, const uint32_t statsBufferId,
+ 			  const ControlList &sensorControls) override;
+ 
++	int mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers,
++			   const Size &size, unsigned int bytesPerLine) override;
++	void unmapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>> &buffers) override;
++	void processPdaf(uint32_t frame, unsigned int bufferId) override;
++
+ 	int start() override;
+ 	void stop() override;
+ 

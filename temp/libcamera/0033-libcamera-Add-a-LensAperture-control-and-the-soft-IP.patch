@@ -1,0 +1,1131 @@
+From d576c0451c61bde56d3a0c18cfa566901ca96fc9 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 9 Sep 2026 17:29:50 +0000
+Subject: libcamera: Add a LensAperture control and the soft IPA's Aperture
+ algorithm
+
+Cameras with a controllable aperture come in two kinds and libcamera
+could express neither: there was no aperture control at all, and
+CameraLens rejected any lens entity that did not implement
+V4L2_CID_FOCUS_ABSOLUTE.
+
+Add controls::LensAperture, an f-number. One control covers both kinds
+of hardware because ControlInfo can already describe either: a
+continuously variable iris reports a min/max range, while a mechanism
+with a fixed set of detents reports them in values(). An application can
+tell which it is by looking at values(), and a camera with a fixed
+aperture advertises nothing at all.
+
+Teach CameraLens about V4L2_CID_IRIS_ABSOLUTE, and require a lens to
+implement focus or iris rather than focus specifically. A phone module
+with a variable aperture typically wires the blade mechanism as its own
+device, separate from the focus actuator, so demanding focus would
+reject it.
+
+Since a sensor can now have two useful lens entities, sort them by what
+they can do instead of assuming the first one found is the focus lens.
+One entity may be both, so the two pointers may alias, and ownership
+moves to a vector.
+
+Carry the iris lens's controls to the IPA and its chosen iris position
+back, alongside the existing focus path. As with focus, the ControlInfoMap
+is handed over at init() as well as configure(), so that an algorithm can
+decide while registering controls whether an aperture exists at all.
+
+The iris is passed as its own ControlInfoMap rather than merged into
+lensControls. A ControlInfoMap only borrows its ControlIdMap, every V4L2
+device owns its own, and the IPA keeps a copy of the map beyond the call,
+so a merged map built from two sub-devices would leave a dangling idmap.
+Keeping them separate also keeps the returned ControlLists valid, since a
+ControlList is likewise tied to one idmap.
+
+While here, only set V4L2_CID_FOCUS_ABSOLUTE when the lens actually has
+it. The old test was that the map was non-empty, which would set focus on
+an iris-only lens.
+
+Map controls::LensAperture onto the iris actuator, supporting both kinds
+of hardware from one tuning description.
+
+A camera whose iris sits at a few detents lists them as f-number and
+actuator code pairs, and the algorithm advertises exactly that set
+through ControlInfo::values() so an application draws a set of choices.
+A request that falls between two of them selects the nearest, and the
+metadata reports what was actually selected rather than what was asked
+for.
+
+A camera with a continuously variable iris instead gives a piecewise
+linear map from f-number to actuator code, in the same flat form the Af
+algorithm already uses, and gets a plain min/max range.
+
+A camera with no iris registers no control, so applications hide their
+aperture UI rather than offering one that moves nothing.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ include/libcamera/internal/camera_lens.h      |   7 +
+ include/libcamera/internal/camera_sensor.h    |   1 +
+ .../internal/software_isp/software_isp.h      |   6 +-
+ include/libcamera/ipa/softisp.mojom           |   8 +-
+ src/apps/cam/camera_session.cpp               |  20 +-
+ src/ipa/softisp/algorithms/aperture.cpp       | 302 ++++++++++++++++++
+ src/ipa/softisp/algorithms/aperture.h         |  72 +++++
+ src/ipa/softisp/algorithms/meson.build        |   1 +
+ src/ipa/softisp/ipa_context.h                 |  13 +
+ src/ipa/softisp/softisp.cpp                   |  41 ++-
+ src/libcamera/camera_lens.cpp                 |  59 +++-
+ src/libcamera/control_ids_core.yaml           |  37 +++
+ src/libcamera/pipeline/simple/simple.cpp      |  15 +-
+ src/libcamera/sensor/camera_sensor_legacy.cpp |  48 ++-
+ src/libcamera/sensor/camera_sensor_raw.cpp    |  48 ++-
+ src/libcamera/software_isp/software_isp.cpp   |  17 +-
+ 16 files changed, 655 insertions(+), 40 deletions(-)
+ create mode 100644 src/ipa/softisp/algorithms/aperture.cpp
+ create mode 100644 src/ipa/softisp/algorithms/aperture.h
+
+diff --git a/include/libcamera/internal/camera_lens.h b/include/libcamera/internal/camera_lens.h
+index f347c5e0a..1029417c1 100644
+--- a/include/libcamera/internal/camera_lens.h
++++ b/include/libcamera/internal/camera_lens.h
+@@ -28,6 +28,10 @@ public:
+ 
+ 	int init();
+ 	int setFocusPosition(int32_t position);
++	int setIrisPosition(int32_t position);
++
++	bool hasFocus() const { return hasFocus_; }
++	bool hasIris() const { return hasIris_; }
+ 
+ 	const std::string &model() const { return model_; }
+ 
+@@ -45,6 +49,9 @@ private:
+ 	std::unique_ptr<V4L2Subdevice> subdev_;
+ 
+ 	std::string model_;
++
++	bool hasFocus_ = false;
++	bool hasIris_ = false;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/include/libcamera/internal/camera_sensor.h b/include/libcamera/internal/camera_sensor.h
+index 2a2f1f2c9..caefd69e8 100644
+--- a/include/libcamera/internal/camera_sensor.h
++++ b/include/libcamera/internal/camera_sensor.h
+@@ -48,6 +48,7 @@ public:
+ 	virtual V4L2Subdevice *device() = 0;
+ 
+ 	virtual CameraLens *focusLens() = 0;
++	virtual CameraLens *irisLens() = 0;
+ 
+ 	virtual const std::vector<unsigned int> &mbusCodes() const = 0;
+ 	virtual std::vector<Size> sizes(unsigned int mbusCode) const = 0;
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 1c2c02ca9..e0220711c 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -86,11 +86,13 @@ public:
+ 	Signal<FrameBuffer *> outputBufferReady;
+ 	Signal<uint32_t, uint32_t> ispStatsReady;
+ 	Signal<uint32_t, const ControlList &> metadataReady;
+-	Signal<const ControlList &, const ControlList &> setSensorControls;
++	Signal<const ControlList &, const ControlList &, const ControlList &> setSensorControls;
+ 
+ private:
+ 	void saveIspParams();
+-	void setSensorCtrls(const ControlList &sensorControls, const ControlList &lensControls);
++	void setSensorCtrls(const ControlList &sensorControls,
++			    const ControlList &lensControls,
++			    const ControlList &irisControls);
+ 	void statsReady(uint32_t frame, uint32_t bufferId);
+ 	void inputReady(FrameBuffer *input);
+ 	void outputReady(FrameBuffer *output);
+diff --git a/include/libcamera/ipa/softisp.mojom b/include/libcamera/ipa/softisp.mojom
+index 83cf96fad..0a9ce53f2 100644
+--- a/include/libcamera/ipa/softisp.mojom
++++ b/include/libcamera/ipa/softisp.mojom
+@@ -11,6 +11,7 @@ import "include/libcamera/ipa/core.mojom";
+ struct IPAConfigInfo {
+ 	libcamera.ControlInfoMap sensorControls;
+ 	libcamera.ControlInfoMap lensControls;
++	libcamera.ControlInfoMap irisControls;
+ };
+ 
+ interface IPASoftIspInterface {
+@@ -19,7 +20,8 @@ interface IPASoftIspInterface {
+ 	     libcamera.SharedFD fdParams,
+ 	     libcamera.IPACameraSensorInfo sensorInfo,
+ 	     libcamera.ControlInfoMap sensorControls,
+-	     libcamera.ControlInfoMap lensControls)
++	     libcamera.ControlInfoMap lensControls,
++	     libcamera.ControlInfoMap irisControls)
+ 		=> (int32 ret, libcamera.ControlInfoMap ipaControls, bool ccmEnabled);
+ 	start() => (int32 ret);
+ 	stop();
+@@ -34,7 +36,9 @@ interface IPASoftIspInterface {
+ };
+ 
+ interface IPASoftIspEventInterface {
+-	setSensorControls(libcamera.ControlList sensorControls, libcamera.ControlList lensControls);
++	setSensorControls(libcamera.ControlList sensorControls,
++			  libcamera.ControlList lensControls,
++			  libcamera.ControlList irisControls);
+ 	setIspParams();
+ 	metadataReady(uint32 frame, libcamera.ControlList metadata);
+ };
+diff --git a/src/apps/cam/camera_session.cpp b/src/apps/cam/camera_session.cpp
+index 17444a217..7d81e4d75 100644
+--- a/src/apps/cam/camera_session.cpp
++++ b/src/apps/cam/camera_session.cpp
+@@ -197,15 +197,31 @@ void CameraSession::listControls() const
+ 				  << id->vendor() << "::" << id->name() << ":"
+ 				  << std::endl;
+ 
++			/*
++			 * Only an integer control can name its values, so
++			 * anything else is listed by value alone. Reading a
++			 * float control's values as int32 asserts.
++			 */
++			bool enumerated = id->type() == ControlTypeInteger32;
++
+ 			std::optional<int32_t> def;
+-			if (!info.def().isNone())
++			if (enumerated && !info.def().isNone())
+ 				def = info.def().get<int32_t>();
+ 
+ 			for (const auto &value : info.values()) {
++				std::cout << "  - ";
++
++				if (!enumerated) {
++					std::cout << value.toString();
++					if (value == info.def())
++						std::cout << " [default]";
++					std::cout << std::endl;
++					continue;
++				}
++
+ 				int32_t val = value.get<int32_t>();
+ 				const auto &it = id->enumerators().find(val);
+ 
+-				std::cout << "  - ";
+ 				if (it == id->enumerators().end())
+ 					std::cout << "UNKNOWN";
+ 				else
+diff --git a/src/ipa/softisp/algorithms/aperture.cpp b/src/ipa/softisp/algorithms/aperture.cpp
+new file mode 100644
+index 000000000..09a3cfc70
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/aperture.cpp
+@@ -0,0 +1,302 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd <git@notmy.space>
++ *
++ * Lens aperture control
++ */
++
++#include "aperture.h"
++
++#include <algorithm>
++#include <cmath>
++#include <sstream>
++#include <stdint.h>
++#include <utility>
++#include <vector>
++
++#include <libcamera/base/log.h>
++
++#include "libipa/pwl.h"
++
++#include "control_ids.h"
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(IPASoftIspAperture)
++
++namespace ipa::softisp::algorithms {
++
++Aperture::Aperture()
++{
++}
++
++/**
++ * \brief Read the aperture description out of the tuning file
++ *
++ * Two shapes are accepted, matching the two kinds of hardware:
++ *
++ * A camera whose iris can only sit at a few detents, such as a phone module
++ * with a two-position blade mechanism, lists them:
++ *
++ * \code{.unparsed}
++ *   - Aperture:
++ *       apertures:
++ *         - aperture: 1.5
++ *           code: 0
++ *         - aperture: 2.4
++ *           code: 512
++ * \endcode
++ *
++ * A camera with a continuously variable iris gives a map from f-number to
++ * actuator code, in the same flat x,y form the Af algorithm uses:
++ *
++ * \code{.unparsed}
++ *   - Aperture:
++ *       map: [ 1.8, 0, 16.0, 1023 ]
++ * \endcode
++ */
++int Aperture::init(IPAContext &context, const ValueNode &tuningData)
++{
++	const int32_t codeMin = context.configuration.aperture.iris_min;
++	const int32_t codeMax = context.configuration.aperture.iris_max;
++
++	/*
++	 * Don't advertise an aperture control when the camera has no iris, so
++	 * that applications hide their aperture UI rather than offering a
++	 * control that cannot move anything.
++	 */
++	if (codeMax <= codeMin) {
++		LOG(IPASoftIspAperture, Info)
++			<< "No iris, not registering aperture controls";
++		return 0;
++	}
++
++	const ValueNode &list = tuningData["apertures"];
++	if (list.isList()) {
++		std::vector<std::pair<double, int32_t>> entries;
++
++		for (const auto &entry : list.asList()) {
++			auto f = entry["aperture"].get<double>();
++			auto code = entry["code"].get<int32_t>();
++
++			if (!f.has_value() || !code.has_value() || f.value() <= 0.0) {
++				LOG(IPASoftIspAperture, Error)
++					<< "Malformed aperture entry, needs a"
++					<< " positive 'aperture' and a 'code'";
++				return -EINVAL;
++			}
++
++			entries.emplace_back(f.value(),
++					     std::clamp(code.value(), codeMin, codeMax));
++		}
++
++		if (entries.empty()) {
++			LOG(IPASoftIspAperture, Error)
++				<< "Empty aperture list in the tuning file";
++			return -EINVAL;
++		}
++
++		/*
++		 * Sort by f-number so that min()/max() and the nearest-value
++		 * search below can assume ascending order, whatever order the
++		 * tuning file happened to list them in.
++		 */
++		std::sort(entries.begin(), entries.end(),
++			  [](const auto &a, const auto &b) {
++				  return a.first < b.first;
++			  });
++
++		for (const auto &[f, code] : entries) {
++			apertures_.push_back(f);
++			codes_.push_back(code);
++		}
++
++		discrete_ = true;
++		fNumberMin_ = apertures_.front();
++		fNumberMax_ = apertures_.back();
++		/* Default to the widest aperture, which is what stock does. */
++		fNumberDef_ = apertures_.front();
++	} else {
++		auto map = tuningData["map"].get<ipa::Pwl>();
++		if (!map.has_value() || map->empty()) {
++			LOG(IPASoftIspAperture, Warning)
++				<< "The camera has an iris but the tuning file"
++				<< " describes neither 'apertures' nor 'map';"
++				<< " not registering aperture controls";
++			return 0;
++		}
++
++		map_ = std::move(map.value());
++		discrete_ = false;
++		fNumberMin_ = map_.domain().start;
++		fNumberMax_ = map_.domain().end;
++		fNumberDef_ = fNumberMin_;
++	}
++
++	auto def = tuningData["default"].get<double>();
++	if (def.has_value())
++		fNumberDef_ = discrete_ ? nearestAperture(def.value())
++					: std::clamp(def.value(), fNumberMin_, fNumberMax_);
++
++	enabled_ = true;
++
++	if (discrete_) {
++		std::ostringstream os;
++		for (unsigned int i = 0; i < apertures_.size(); i++)
++			os << (i ? ", " : "") << "f/" << apertures_[i]
++			   << " (code " << codes_[i] << ")";
++		LOG(IPASoftIspAperture, Info)
++			<< "Discrete aperture: " << os.str()
++			<< ", default f/" << fNumberDef_;
++	} else {
++		LOG(IPASoftIspAperture, Info)
++			<< "Continuous aperture f/" << fNumberMin_
++			<< "..f/" << fNumberMax_
++			<< " (actuator codes " << irisCode(fNumberMin_)
++			<< ".." << irisCode(fNumberMax_) << ")"
++			<< ", default f/" << fNumberDef_;
++	}
++
++	if (discrete_) {
++		/*
++		 * List the exact stops. ControlInfo::values() is what tells an
++		 * application to offer a set of choices rather than a slider,
++		 * and it is the only route to the application: a static
++		 * property would not do, because the camera stack above
++		 * libcamera forwards controls generically but maps only a
++		 * hardcoded handful of properties.
++		 */
++		std::vector<ControlValue> values;
++		values.reserve(apertures_.size());
++		for (double f : apertures_)
++			values.push_back(ControlValue(static_cast<float>(f)));
++
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(Span<const ControlValue>(values),
++				    ControlValue(static_cast<float>(fNumberDef_)));
++	} else {
++		context.ctrlMap[&controls::LensAperture] =
++			ControlInfo(static_cast<float>(fNumberMin_),
++				    static_cast<float>(fNumberMax_),
++				    static_cast<float>(fNumberDef_));
++	}
++
++	return 0;
++}
++
++int Aperture::configure(IPAContext &context,
++			[[maybe_unused]] const IPAConfigInfo &configInfo)
++{
++	if (!enabled_)
++		return 0;
++
++	context.activeState.knobs.aperture = fNumberDef_;
++	return 0;
++}
++
++/**
++ * \brief Find the available aperture closest to a requested f-number
++ *
++ * Ties go to the wider (smaller f-number) of the two, which loses less light.
++ */
++double Aperture::nearestAperture(double fNumber) const
++{
++	double best = apertures_.front();
++	double bestDelta = std::abs(fNumber - best);
++
++	for (double f : apertures_) {
++		double delta = std::abs(fNumber - f);
++		if (delta < bestDelta) {
++			best = f;
++			bestDelta = delta;
++		}
++	}
++
++	return best;
++}
++
++/**
++ * \brief Convert an f-number to an actuator code
++ */
++int32_t Aperture::irisCode(double fNumber) const
++{
++	if (discrete_) {
++		/*
++		 * Match on the aperture value rather than the index, because
++		 * the caller may hold a value that has already been snapped.
++		 */
++		double f = nearestAperture(fNumber);
++		for (unsigned int i = 0; i < apertures_.size(); i++) {
++			if (apertures_[i] == f)
++				return codes_[i];
++		}
++		return codes_.front();
++	}
++
++	return static_cast<int32_t>(std::lround(map_.eval(map_.domain().clamp(fNumber))));
++}
++
++void Aperture::queueRequest(typename Module::Context &context,
++			    [[maybe_unused]] const uint32_t frame,
++			    [[maybe_unused]] typename Module::FrameContext &frameContext,
++			    const ControlList &controls)
++{
++	if (!enabled_)
++		return;
++
++	const auto &aperture = controls.get(controls::LensAperture);
++	if (!aperture.has_value())
++		return;
++
++	double requested = static_cast<double>(aperture.value());
++	double selected = discrete_
++				  ? nearestAperture(requested)
++				  : std::clamp(requested, fNumberMin_, fNumberMax_);
++
++	if (selected != requested)
++		LOG(IPASoftIspAperture, Debug)
++			<< "Requested f/" << requested
++			<< ", selected f/" << selected;
++
++	context.activeState.knobs.aperture = selected;
++}
++
++void Aperture::prepare(IPAContext &context,
++		       [[maybe_unused]] const uint32_t frame,
++		       IPAFrameContext &frameContext,
++		       [[maybe_unused]] DebayerParams *params)
++{
++	if (!enabled_)
++		return;
++
++	const double f = context.activeState.knobs.aperture.value_or(fNumberDef_);
++
++	frameContext.iris.iris_pos =
++		std::clamp(irisCode(f),
++			   context.configuration.aperture.iris_min,
++			   context.configuration.aperture.iris_max);
++}
++
++void Aperture::process([[maybe_unused]] IPAContext &context,
++		       [[maybe_unused]] const uint32_t frame,
++		       [[maybe_unused]] IPAFrameContext &frameContext,
++		       [[maybe_unused]] const SwIspStats *stats,
++		       ControlList &metadata)
++{
++	if (!enabled_)
++		return;
++
++	/*
++	 * Report the aperture actually selected, which for a discrete
++	 * mechanism is not necessarily the one that was requested.
++	 */
++	metadata.set(controls::LensAperture,
++		     static_cast<float>(context.activeState.knobs.aperture
++						.value_or(fNumberDef_)));
++}
++
++REGISTER_IPA_ALGORITHM(Aperture, "Aperture")
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/aperture.h b/src/ipa/softisp/algorithms/aperture.h
+new file mode 100644
+index 000000000..9cb0e3b41
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/aperture.h
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd <git@notmy.space>
++ *
++ * Lens aperture control
++ */
++
++#pragma once
++
++#include <stdint.h>
++#include <vector>
++
++#include "libipa/pwl.h"
++
++#include "algorithm.h"
++
++namespace libcamera {
++
++namespace ipa::softisp::algorithms {
++
++class Aperture : public Algorithm
++{
++public:
++	Aperture();
++	~Aperture() = default;
++
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
++	void queueRequest(typename Module::Context &context,
++			  const uint32_t frame,
++			  typename Module::FrameContext &frameContext,
++			  const ControlList &controls) override;
++	void prepare(IPAContext &context, const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     DebayerParams *params) override;
++	void process(IPAContext &context, const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     const SwIspStats *stats,
++		     ControlList &metadata) override;
++
++private:
++	int32_t irisCode(double fNumber) const;
++	double nearestAperture(double fNumber) const;
++
++	/*
++	 * Tuning data, kept here rather than in IPAContext::configuration
++	 * because configure() clears that whereas init(), which reads the
++	 * tuning file, runs only once.
++	 */
++
++	/*
++	 * A discrete mechanism lists the f-numbers it can actually select,
++	 * sorted ascending, each paired with the actuator code that selects
++	 * it. Empty for a continuously variable iris.
++	 */
++	std::vector<double> apertures_;
++	std::vector<int32_t> codes_;
++
++	/* Maps f-number to actuator code for a continuous iris. */
++	ipa::Pwl map_;
++
++	double fNumberMin_ = 0.0;
++	double fNumberMax_ = 0.0;
++	double fNumberDef_ = 0.0;
++
++	bool discrete_ = false;
++	bool enabled_ = false;
++};
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/meson.build b/src/ipa/softisp/algorithms/meson.build
+index 6015a8062..041294360 100644
+--- a/src/ipa/softisp/algorithms/meson.build
++++ b/src/ipa/softisp/algorithms/meson.build
+@@ -7,4 +7,5 @@ softisp_ipa_algorithms = files([
+     'blc.cpp',
+     'ccm.cpp',
+     'af.cpp',
++    'aperture.cpp',
+ ])
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index 9543fb4c8..dee417e3c 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -40,6 +40,13 @@ struct IPASessionConfiguration {
+ 		double start, stop, step;
+ 		uint32_t skip;
+ 	} focus;
++	struct {
++		/*
++		 * Range of the V4L2_CID_IRIS_ABSOLUTE control. iris_max <=
++		 * iris_min means the camera has no aperture mechanism.
++		 */
++		int32_t iris_min, iris_max;
++	} aperture;
+ };
+ 
+ struct IPAActiveState {
+@@ -72,6 +79,8 @@ struct IPAActiveState {
+ 		std::optional<bool> focus_sweep;
+ 		/* controls::AfModeEnum, defaults to AfModeContinuous */
+ 		std::optional<int32_t> af_mode;
++		/* Requested aperture as an f-number */
++		std::optional<double> aperture;
+ 	} knobs;
+ };
+ 
+@@ -87,6 +96,10 @@ struct IPAFrameContext : public FrameContext {
+ 		int32_t focus_pos;
+ 	} lens;
+ 
++	struct {
++		int32_t iris_pos;
++	} iris;
++
+ 	RGB<float> gains;
+ 
+ 	float gamma;
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index 600cac7bc..deb223925 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -58,6 +58,7 @@ public:
+ 		 const IPACameraSensorInfo &sensorInfo,
+ 		 const ControlInfoMap &sensorControls,
+ 		 const ControlInfoMap &lensControls,
++		 const ControlInfoMap &irisControls,
+ 		 ControlInfoMap *ipaControls,
+ 		 bool *ccmEnabled) override;
+ 	int configure(const IPAConfigInfo &configInfo) override;
+@@ -76,12 +77,14 @@ protected:
+ private:
+ 	void updateExposure(double exposureMSV);
+ 	void updateFocusRange();
++	void updateApertureRange();
+ 
+ 	DebayerParams *params_;
+ 	SwIspStats *stats_;
+ 	std::unique_ptr<CameraSensorHelper> camHelper_;
+ 	ControlInfoMap sensorInfoMap_;
+ 	ControlInfoMap lensInfoMap_;
++	ControlInfoMap irisInfoMap_;
+ 
+ 	/* Local parameter storage */
+ 	struct IPAContext context_;
+@@ -101,6 +104,7 @@ int IPASoftIsp::init(const IPASettings &settings,
+ 			const IPACameraSensorInfo &sensorInfo,
+ 			const ControlInfoMap &sensorControls,
+ 			const ControlInfoMap &lensControls,
++			const ControlInfoMap &irisControls,
+ 			ControlInfoMap *ipaControls,
+ 			bool *ccmEnabled)
+ {
+@@ -120,6 +124,10 @@ int IPASoftIsp::init(const IPASettings &settings,
+ 	lensInfoMap_ = lensControls;
+ 	updateFocusRange();
+ 
++	/* Likewise for the aperture, so Aperture::init() knows what exists. */
++	irisInfoMap_ = irisControls;
++	updateApertureRange();
++
+ 	/* Load the tuning data file */
+ 	File file(settings.configurationFile);
+ 	if (!file.open(File::OpenModeFlag::ReadOnly)) {
+@@ -235,10 +243,34 @@ void IPASoftIsp::updateFocusRange()
+ 			   << context_.configuration.focus.focus_max << "]";
+ }
+ 
++/*
++ * Record the range of the iris actuator, or a zero range when the camera has
++ * no aperture mechanism. Called from both init() and configure() for the same
++ * reason as updateFocusRange().
++ */
++void IPASoftIsp::updateApertureRange()
++{
++	const auto it = irisInfoMap_.find(V4L2_CID_IRIS_ABSOLUTE);
++
++	if (it == irisInfoMap_.end()) {
++		LOG(IPASoftIsp, Debug) << "No iris, aperture control disabled";
++		context_.configuration.aperture.iris_min = 0;
++		context_.configuration.aperture.iris_max = 0;
++		return;
++	}
++
++	context_.configuration.aperture.iris_min = it->second.min().get<int32_t>();
++	context_.configuration.aperture.iris_max = it->second.max().get<int32_t>();
++	LOG(IPASoftIsp, Info) << "Iris range ["
++			   << context_.configuration.aperture.iris_min << ", "
++			   << context_.configuration.aperture.iris_max << "]";
++}
++
+ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ {
+ 	sensorInfoMap_ = configInfo.sensorControls;
+ 	lensInfoMap_ = configInfo.lensControls;
++	irisInfoMap_ = configInfo.irisControls;
+ 
+ 	const ControlInfo &exposureInfo = sensorInfoMap_.find(V4L2_CID_EXPOSURE)->second;
+ 	const ControlInfo &gainInfo = sensorInfoMap_.find(V4L2_CID_ANALOGUE_GAIN)->second;
+@@ -254,6 +286,7 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 	 * the AF algorithm ends up mapping every position onto zero.
+ 	 */
+ 	updateFocusRange();
++	updateApertureRange();
+ 
+ 	context_.configuration.agc.lineDuration =
+ 		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
+@@ -381,10 +414,14 @@ void IPASoftIsp::processStats(const uint32_t frame,
+ 		  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
+ 
+ 	ControlList lensCtrls(lensInfoMap_);
+-	if (!lensInfoMap_.empty())
++	if (lensInfoMap_.count(V4L2_CID_FOCUS_ABSOLUTE))
+ 		lensCtrls.set(V4L2_CID_FOCUS_ABSOLUTE, frameContext.lens.focus_pos);
+ 
+-	setSensorControls.emit(ctrls, lensCtrls);
++	ControlList irisCtrls(irisInfoMap_);
++	if (irisInfoMap_.count(V4L2_CID_IRIS_ABSOLUTE))
++		irisCtrls.set(V4L2_CID_IRIS_ABSOLUTE, frameContext.iris.iris_pos);
++
++	setSensorControls.emit(ctrls, lensCtrls, irisCtrls);
+ }
+ 
+ std::string IPASoftIsp::logPrefix() const
+diff --git a/src/libcamera/camera_lens.cpp b/src/libcamera/camera_lens.cpp
+index ccc2a6a65..6c8cd6c31 100644
+--- a/src/libcamera/camera_lens.cpp
++++ b/src/libcamera/camera_lens.cpp
+@@ -86,6 +86,9 @@ int CameraLens::init()
+  */
+ int CameraLens::setFocusPosition(int32_t position)
+ {
++	if (!hasFocus_)
++		return -ENODEV;
++
+ 	ControlList lensCtrls(subdev_->controls());
+ 	lensCtrls.set(V4L2_CID_FOCUS_ABSOLUTE, static_cast<int32_t>(position));
+ 
+@@ -95,33 +98,57 @@ int CameraLens::setFocusPosition(int32_t position)
+ 	return 0;
+ }
+ 
+-int CameraLens::validateLensDriver()
++/**
++ * \brief Set the aperture of the lens to a specific position
++ * \param[in] position The iris position, in the units of the lens driver's
++ * V4L2_CID_IRIS_ABSOLUTE control
++ *
++ * The meaning of \a position is driver-specific. Mapping it to a physical
++ * f-number is the job of whoever holds the calibration, normally the IPA.
++ *
++ * \return 0 on success, -ENODEV if the lens has no iris, or -EINVAL otherwise
++ */
++int CameraLens::setIrisPosition(int32_t position)
+ {
+-	int ret = 0;
+-	static constexpr uint32_t mandatoryControls[] = {
+-		V4L2_CID_FOCUS_ABSOLUTE,
+-	};
++	if (!hasIris_)
++		return -ENODEV;
++
++	ControlList lensCtrls(subdev_->controls());
++	lensCtrls.set(V4L2_CID_IRIS_ABSOLUTE, static_cast<int32_t>(position));
++
++	if (subdev_->setControls(&lensCtrls))
++		return -EINVAL;
+ 
++	return 0;
++}
++
++int CameraLens::validateLensDriver()
++{
+ 	const ControlInfoMap &controls = subdev_->controls();
+-	for (uint32_t ctrl : mandatoryControls) {
+-		if (!controls.count(ctrl)) {
+-			LOG(CameraLens, Error)
+-				<< "Mandatory V4L2 control " << utils::hex(ctrl)
+-				<< " not available";
+-			ret = -EINVAL;
+-		}
+-	}
+ 
+-	if (ret) {
++	hasFocus_ = controls.count(V4L2_CID_FOCUS_ABSOLUTE);
++	hasIris_ = controls.count(V4L2_CID_IRIS_ABSOLUTE);
++
++	/*
++	 * A lens entity is useful if it can move focus, change the aperture,
++	 * or both. Requiring focus unconditionally would reject an aperture
++	 * mechanism that is a separate device from the focus actuator, which
++	 * is how phone modules with a variable aperture are usually wired.
++	 */
++	if (!hasFocus_ && !hasIris_) {
++		LOG(CameraLens, Error)
++			<< "Lens supports neither "
++			<< utils::hex(V4L2_CID_FOCUS_ABSOLUTE) << " (focus) nor "
++			<< utils::hex(V4L2_CID_IRIS_ABSOLUTE) << " (iris)";
+ 		LOG(CameraLens, Error)
+ 			<< "The lens kernel driver needs to be fixed";
+ 		LOG(CameraLens, Error)
+ 			<< "See Documentation/lens_driver_requirements.rst in"
+ 			<< " the libcamera sources for more information";
+-		return ret;
++		return -EINVAL;
+ 	}
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ /**
+diff --git a/src/libcamera/control_ids_core.yaml b/src/libcamera/control_ids_core.yaml
+index 89991d03d..4af6abd2d 100644
+--- a/src/libcamera/control_ids_core.yaml
++++ b/src/libcamera/control_ids_core.yaml
+@@ -1376,4 +1376,41 @@ controls:
+         The nominal range is [-180, 180], where 0° leaves hues unchanged and the
+         range wraps around continuously, with 180° == -180°.
+ 
++  - LensAperture:
++      type: float
++      direction: inout
++      description: |
++        Set and report the lens aperture, as an f-number.
++
++        The value is the ratio of the lens focal length to the diameter of the
++        entrance pupil, so smaller values admit more light. Setting a smaller
++        f-number opens the iris.
++
++        Cameras come in two kinds and both are reported through this one
++        control, which always advertises a min() and max() f-number.
++
++        \li A camera with a continuously variable iris honours any value in
++        that range.
++
++        \li A camera with a fixed set of apertures, such as a phone module
++        with a two-position blade mechanism, reports the smallest and largest
++        of its stops as the range. A request that falls between two stops
++        selects the nearest one.
++
++        In both cases the request metadata reports the aperture that was
++        actually selected, which for discrete hardware is not necessarily the
++        one that was requested. Applications that care should read it back
++        rather than assume the request was honoured exactly.
++
++        A camera whose aperture cannot be changed does not advertise this
++        control at all, so its absence, rather than a single-valued range,
++        means "no aperture control".
++
++        \todo The exact stops of a discrete mechanism are not currently
++        discoverable. They cannot be placed in ControlInfo::values(), because
++        consumers take a control carrying values() to be an int32
++        enumeration. Publishing them as a float array property, as Android's
++        android.lens.info.availableApertures does, would let an application
++        offer the real choices instead of a slider.
++
+ ...
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index a5cf8b584..9b23f7031 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -378,7 +378,8 @@ private:
+ 	void ispStatsReady(uint32_t frame, uint32_t bufferId);
+ 	void metadataReady(uint32_t frame, const ControlList &metadata);
+ 	void setSensorControls(const ControlList &sensorControls,
+-			       const ControlList &lensControls);
++			       const ControlList &lensControls,
++			       const ControlList &irisControls);
+ };
+ 
+ class SimpleCameraConfiguration : public CameraConfiguration
+@@ -1074,7 +1075,8 @@ void SimpleCameraData::metadataReady(uint32_t frame, const ControlList &metadata
+ }
+ 
+ void SimpleCameraData::setSensorControls(const ControlList &sensorControls,
+-					 const ControlList &lensControls)
++					 const ControlList &lensControls,
++					 const ControlList &irisControls)
+ {
+ 	delayedCtrls_->push(sensorControls);
+ 	/*
+@@ -1100,6 +1102,11 @@ void SimpleCameraData::setSensorControls(const ControlList &sensorControls,
+ 		lastFocusPosition_ = lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>();
+ 		focusLens->setFocusPosition(*lastFocusPosition_);
+ 	}
++
++	CameraLens *irisLens = sensor_->irisLens();
++	if (irisLens && irisControls.contains(V4L2_CID_IRIS_ABSOLUTE))
++		irisLens->setIrisPosition(
++			irisControls.get(V4L2_CID_IRIS_ABSOLUTE).get<int32_t>());
+ }
+ 
+ /* Retrieve all source pads connected to a sink pad through active routes. */
+@@ -1665,6 +1672,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			configInfo.lensControls = data->sensor_->focusLens()->controls();
+ 		else
+ 			configInfo.lensControls = ControlInfoMap();
++		if (data->sensor_->irisLens())
++			configInfo.irisControls = data->sensor_->irisLens()->controls();
++		else
++			configInfo.irisControls = ControlInfoMap();
+ 		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo);
+ 	}
+ }
+diff --git a/src/libcamera/sensor/camera_sensor_legacy.cpp b/src/libcamera/sensor/camera_sensor_legacy.cpp
+index bbe3f2e8f..fad30264d 100644
+--- a/src/libcamera/sensor/camera_sensor_legacy.cpp
++++ b/src/libcamera/sensor/camera_sensor_legacy.cpp
+@@ -67,7 +67,8 @@ public:
+ 	const MediaEntity *entity() const override { return entity_; }
+ 	V4L2Subdevice *device() override { return subdev_.get(); }
+ 
+-	CameraLens *focusLens() override { return focusLens_.get(); }
++	CameraLens *focusLens() override { return focusLens_; }
++	CameraLens *irisLens() override { return irisLens_; }
+ 
+ 	const std::vector<unsigned int> &mbusCodes() const override { return mbusCodes_; }
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+@@ -142,7 +143,14 @@ private:
+ 
+ 	ControlList properties_;
+ 
+-	std::unique_ptr<CameraLens> focusLens_;
++	/*
++	 * Lens entities are owned here; focusLens_ and irisLens_ point into
++	 * this vector and may point at the same entity when one device does
++	 * both jobs.
++	 */
++	std::vector<std::unique_ptr<CameraLens>> lenses_;
++	CameraLens *focusLens_ = nullptr;
++	CameraLens *irisLens_ = nullptr;
+ };
+ 
+ /**
+@@ -673,15 +681,43 @@ int CameraSensorLegacy::discoverAncillaryDevices()
+ 
+ 	for (MediaEntity *ancillary : entity_->ancillaryEntities()) {
+ 		switch (ancillary->function()) {
+-		case MEDIA_ENT_F_LENS:
+-			focusLens_ = std::make_unique<CameraLens>(ancillary);
+-			ret = focusLens_->init();
++		case MEDIA_ENT_F_LENS: {
++			/*
++			 * A sensor can have more than one lens entity: a focus
++			 * actuator and an aperture mechanism are separate
++			 * devices on some modules. Sort them by what they can
++			 * actually do rather than assuming the first one found
++			 * is the focus lens. A single entity may be both.
++			 */
++			std::unique_ptr<CameraLens> lens =
++				std::make_unique<CameraLens>(ancillary);
++			ret = lens->init();
+ 			if (ret) {
+ 				LOG(CameraSensor, Error)
+ 					<< "Lens initialisation failed, lens disabled";
+-				focusLens_.reset();
++				break;
++			}
++
++			CameraLens *l = lens.get();
++			bool used = false;
++
++			if (l->hasFocus() && !focusLens_) {
++				focusLens_ = l;
++				used = true;
++			}
++			if (l->hasIris() && !irisLens_) {
++				irisLens_ = l;
++				used = true;
+ 			}
++
++			if (used)
++				lenses_.push_back(std::move(lens));
++			else
++				LOG(CameraSensor, Warning)
++					<< "Ignoring extra lens entity "
++					<< ancillary->name();
+ 			break;
++		}
+ 
+ 		default:
+ 			LOG(CameraSensor, Warning)
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index c76541c21..ecbe75ede 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -68,7 +68,8 @@ public:
+ 	const MediaEntity *entity() const override { return entity_; }
+ 	V4L2Subdevice *device() override { return subdev_.get(); }
+ 
+-	CameraLens *focusLens() override { return focusLens_.get(); }
++	CameraLens *focusLens() override { return focusLens_; }
++	CameraLens *irisLens() override { return irisLens_; }
+ 
+ 	const std::vector<unsigned int> &mbusCodes() const override { return mbusCodes_; }
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+@@ -150,7 +151,14 @@ private:
+ 
+ 	ControlList properties_;
+ 
+-	std::unique_ptr<CameraLens> focusLens_;
++	/*
++	 * Lens entities are owned here; focusLens_ and irisLens_ point into
++	 * this vector and may point at the same entity when one device does
++	 * both jobs.
++	 */
++	std::vector<std::unique_ptr<CameraLens>> lenses_;
++	CameraLens *focusLens_ = nullptr;
++	CameraLens *irisLens_ = nullptr;
+ };
+ 
+ /**
+@@ -532,15 +540,43 @@ std::optional<int> CameraSensorRaw::init()
+ 	 */
+ 	for (MediaEntity *ancillary : entity_->ancillaryEntities()) {
+ 		switch (ancillary->function()) {
+-		case MEDIA_ENT_F_LENS:
+-			focusLens_ = std::make_unique<CameraLens>(ancillary);
+-			ret = focusLens_->init();
++		case MEDIA_ENT_F_LENS: {
++			/*
++			 * A sensor can have more than one lens entity: a focus
++			 * actuator and an aperture mechanism are separate
++			 * devices on some modules. Sort them by what they can
++			 * actually do rather than assuming the first one found
++			 * is the focus lens. A single entity may be both.
++			 */
++			std::unique_ptr<CameraLens> lens =
++				std::make_unique<CameraLens>(ancillary);
++			ret = lens->init();
+ 			if (ret) {
+ 				LOG(CameraSensor, Error)
+ 					<< "Lens initialisation failed, lens disabled";
+-				focusLens_.reset();
++				break;
+ 			}
++
++			CameraLens *l = lens.get();
++			bool used = false;
++
++			if (l->hasFocus() && !focusLens_) {
++				focusLens_ = l;
++				used = true;
++			}
++			if (l->hasIris() && !irisLens_) {
++				irisLens_ = l;
++				used = true;
++			}
++
++			if (used)
++				lenses_.push_back(std::move(lens));
++			else
++				LOG(CameraSensor, Warning)
++					<< "Ignoring extra lens entity "
++					<< ancillary->name();
+ 			break;
++		}
+ 
+ 		default:
+ 			LOG(CameraSensor, Warning)
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 069f3fdcf..7603641da 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -176,12 +176,23 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 	ControlInfoMap lensControls = focusLens ? focusLens->controls()
+ 					       : ControlInfoMap();
+ 
++	/*
++	 * The aperture mechanism is passed separately rather than merged into
++	 * lensControls: a ControlInfoMap only borrows its ControlIdMap, each
++	 * V4L2 device owns its own, and the IPA keeps the map past this call.
++	 * Merging maps from two sub-devices would leave a dangling idmap.
++	 */
++	CameraLens *irisLens = sensor->irisLens();
++	ControlInfoMap irisControls = irisLens ? irisLens->controls()
++					      : ControlInfoMap();
++
+ 	ret = ipa_->init(IPASettings{ ipaTuningFile, sensor->model() },
+ 			 debayer_->getStatsFD(),
+ 			 sharedParams_.fd(),
+ 			 sensorInfo,
+ 			 sensor->controls(),
+ 			 lensControls,
++			 irisControls,
+ 			 ipaControls,
+ 			 &ccmEnabled_);
+ 	if (ret) {
+@@ -462,9 +473,11 @@ void SoftwareIsp::saveIspParams([[maybe_unused]] uint32_t frame)
+ 	debayerParams_ = *sharedParams_;
+ }
+ 
+-void SoftwareIsp::setSensorCtrls(const ControlList &sensorControls, const ControlList &lensControls)
++void SoftwareIsp::setSensorCtrls(const ControlList &sensorControls,
++				 const ControlList &lensControls,
++				 const ControlList &irisControls)
+ {
+-	setSensorControls.emit(sensorControls, lensControls);
++	setSensorControls.emit(sensorControls, lensControls, irisControls);
+ }
+ 
+ void SoftwareIsp::statsReady(uint32_t frame, uint32_t bufferId)

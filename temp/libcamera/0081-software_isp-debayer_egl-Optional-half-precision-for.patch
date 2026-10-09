@@ -1,0 +1,74 @@
+From cbdfb911b7148c81dbc207267deca83f62e4014e Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 10 Oct 2026 05:22:51 +0000
+Subject: software_isp: debayer_egl: Optional half precision for the cells main
+ pass
+
+LIBCAMERA_SOFTISP_FP16=1 builds the cells path's main program with
+mediump arithmetic (the texture coordinates stay highp). On an
+Adreno 610 at 1920x1080 the pass then needs 4 registers and runs 12
+waves, in place of 9 and 5, and the rear camera's main pass goes from
+16.88 to 15.85 ms, interleaved runs.
+
+Half floats round at 11 bits where the output has 8, so the difference
+is under what the eye or the sensor's noise can show: between a frame
+with it and one without, the mean absolute difference was 3.7 to 3.9
+steps in a noisy scene, against 4.0 to 4.3 between two frames of the
+same precision. It is off by default.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/shaders/bayer_1x_packed.frag | 12 +++++++++++-
+ src/libcamera/software_isp/debayer_egl.cpp |  8 ++++++++
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index 538983358..2c1f0cdbf 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -20,7 +20,17 @@
+  */
+ 
+ #ifdef GL_ES
++/*
++ * MEDIUMP (the cells path only, from LIBCAMERA_SOFTISP_FP16): half precision
++ * arithmetic, which needs fewer registers. The texture coordinates stay full.
++ */
++#if defined(MEDIUMP) && defined(CELL_PATH)
++precision mediump float;
++#define HP highp
++#else
+ precision highp float;
++#define HP
++#endif
+ #endif
+ 
+ /*
+@@ -57,7 +67,7 @@ precision highp float;
+ #endif
+ 
+ 
+-varying vec2 textureOut;
++varying HP vec2 textureOut;
+ 
+ /* the texture size in pixels */
+ uniform vec2 tex_size;
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index c26462fed..6242d3f97 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -359,6 +359,14 @@ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+ 	/* The main program, with the other path's environment */
+ 	std::vector<std::string> mainEnv = shaderEnv;
+ 	egl_.pushEnv(mainEnv, "#define CELL_PATH");
++	/*
++	 * Half precision arithmetic: LIBCAMERA_SOFTISP_FP16=1. It rounds at 11
++	 * bits, where the output has 8, and uses fewer registers (4 in place of
++	 * 9 on an Adreno 610).
++	 */
++	const char *fp16 = utils::secure_getenv("LIBCAMERA_SOFTISP_FP16");
++	if (fp16 && fp16[0] == '1')
++		egl_.pushEnv(mainEnv, "#define MEDIUMP");
+ 
+ 	GLuint vertexShaderId = 0;
+ 	GLuint fragmentShaderId = 0;

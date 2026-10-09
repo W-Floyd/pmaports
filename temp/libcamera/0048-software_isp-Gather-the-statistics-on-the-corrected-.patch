@@ -1,0 +1,324 @@
+From 80da6d9ba1780fe5b072e6b6d2aaaeee032e1b5f Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 20:43:03 +0000
+Subject: software_isp: Gather the statistics on the corrected image
+
+The statistics are taken from the raw frame, before the GPU debayer
+applies lens shading correction, which lifts the image corners two to
+three times on a phone module. Exposure then judges bright areas near
+the edges at a fraction of the level they come out at, and lets them
+clip: a white table across half of the frame read as mid grey.
+
+Apply the frame's lens shading gains above the black level to each
+sample in the statistics, as the debayer does, when the GPU debayer
+applies them. The gains are interpolated once per sampled line; the
+CPU debayer does not apply lens shading, so its statistics stay as
+they were.
+
+The GPU debayer outputs a window of the input, centred when the output
+is smaller, but set the statistics window to that window's size at the
+origin, as the CPU debayer does. The CPU debayer hands the statistics
+only the lines it processes; the GPU debayer hands them the whole input
+buffer (SwStatsCpu::processFrame()), which then starts from the
+window's x and y. The statistics described the top left corner of the
+input: with a 1920x1080 output of a 4080x3072 sensor, a region that
+barely overlaps the image, so exposure brightened a scene whose top
+left corner was dark until what was shown clipped.
+
+Pass the window itself, as for quad Bayer input already.
+
+The GPU debayer scales the whole input to the output, cropping only
+quad Bayer input to the output's aspect ratio, but for ordinary Bayer
+input set the statistics window to a centred window of the output's
+size in the input: with a 1920x1080 output of a 4080x3072 sensor, the
+middle 47% x 35% of the image. Exposure and white balance then went
+by the centre alone: a lamp in the middle of a room darkened the whole
+frame, and the next frame, a little to its side, came out twice as
+bright.
+
+Take the whole input as the window for ordinary Bayer input, the part
+of it that is output.
+
+Fixes: 59db91b13 ("libcamera: software_isp: debayer_egl: Gather statistics on the output window")
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/debayer_params.h    |  6 ++
+ .../internal/software_isp/swstats_cpu.h       | 22 +++++
+ src/libcamera/software_isp/debayer_egl.cpp    | 29 +++---
+ src/libcamera/software_isp/swstats_cpu.cpp    | 98 +++++++++++++++++++
+ 4 files changed, 143 insertions(+), 12 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index 4aa82a2d1..49fd8a244 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -51,6 +51,12 @@ struct DebayerParams {
+ 						: static_cast<LscValue>(v);
+ 	}
+ 
++	static constexpr float lscDecode(LscValue v)
++	{
++		constexpr float max = std::numeric_limits<LscValue>::max();
++		return 1.0f + v / max * (kLscGainMax - 1.0f);
++	}
++
+ 	Matrix<float, 3, 3> combinedMatrix = { { 1.0, 0.0, 0.0,
+ 						 0.0, 1.0, 0.0,
+ 						 0.0, 0.0, 1.0 } };
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index dda4a66bc..e6fd44ea0 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -21,6 +21,7 @@
+ 
+ #include "libcamera/internal/bayer_format.h"
+ #include "libcamera/internal/shared_mem_object.h"
++#include "libcamera/internal/software_isp/debayer_params.h"
+ #include "libcamera/internal/software_isp/swisp_stats.h"
+ 
+ #include "benchmark.h"
+@@ -54,6 +55,7 @@ public:
+ 
+ 	int configure(const StreamConfiguration &inputCfg, unsigned int statsBufferCount = 1);
+ 	void setWindow(const Rectangle &window);
++	void setLensShading(const DebayerParams &params);
+ 	void startFrame(uint32_t frame);
+ 	void finishFrame(uint32_t frame, uint32_t bufferId);
+ 	void processFrame(uint32_t frame, uint32_t bufferId, MappedFrameBuffer &input);
+@@ -106,6 +108,12 @@ private:
+ 	void processBayerFrame2(MappedFrameBuffer &in);
+ 	void processQuadBayerFrame(MappedFrameBuffer &in);
+ 
++	/* A sample's lens shading gains, per channel */
++	struct LscGain {
++		float r, g, b;
++	};
++	void prepareLscLine(unsigned int row);
++
+ 	processFrameFn processFrame_;
+ 
+ 	/* Variables set by configure(), used every line */
+@@ -125,6 +133,20 @@ private:
+ 	bool quadBayer_;
+ 	BayerFormat::Order quadBayerOrder_ = BayerFormat::RGGB;
+ 
++	/*
++	 * Lens shading, set by setLensShading(): the grid's gains, and the
++	 * gains of each sample of the line being processed (null when none).
++	 */
++	bool lscEnabled_ = false;
++	decltype(DebayerParams::lsc) lscValues_{};
++	std::array<float, DebayerParams::kLscWidth * DebayerParams::kLscHeight * 3> lscGrid_{};
++	RGB<float> lscBlack_ = RGB<float>({ 0.0, 0.0, 0.0 });
++	Size inputSize_;
++	/* Per sample of a line: the grid column left of it, and the weight right */
++	std::vector<std::pair<unsigned int, float>> lscColumns_;
++	std::vector<LscGain> lscLineGains_;
++	const LscGain *lscLine_ = nullptr;
++
+ 	std::vector<SwIspStats> stats_;
+ 	SharedMemObject<SwIspStats> sharedStats_;
+ 	Benchmark bench_;
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 5994a75b0..7a32570b3 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -343,22 +343,26 @@ int DebayerEGL::configure(const StreamConfiguration &inputCfg,
+ 	outputSize_ = outputCfg.size;
+ 	nativeOutputSize_ = outSizeRange.max;
+ 
+-	if (quadBayer_) {
++	/*
++	 * The window is the part of the input that is output, for the texture
++	 * coordinates and the statistics alike. The GPU scales the whole input
++	 * to the output (softwareIspTextureCoordinates()), so the window is
++	 * all of it, except for quad Bayer, which crops to the output's aspect
++	 * ratio. A window of the output's size in the input would have the
++	 * statistics describe only its centre.
++	 */
++	if (quadBayer_)
+ 		window_ = quadBayerStatsWindow(inputCfg.size, outputCfg.size);
+-	} else {
+-		window_.x = ((inputCfg.size.width - outputCfg.size.width) / 2) &
+-			    ~(inputConfig_.patternSize.width - 1);
+-		window_.y = ((inputCfg.size.height - outputCfg.size.height) / 2) &
+-			    ~(inputConfig_.patternSize.height - 1);
+-		window_.width = outputCfg.size.width;
+-		window_.height = outputCfg.size.height;
+-	}
++	else
++		window_ = Rectangle(inputCfg.size);
+ 
+ 	/*
+-	 * Don't pass x,y from window_ since process() already adjusts for it.
+-	 * But crop the window to 2/3 of its width and height for speedup.
++	 * The statistics are gathered from the whole input buffer
++	 * (SwStatsCpu::processFrame()), which starts from the window's x and y:
++	 * pass them, or the statistics describe the top left corner of the
++	 * input instead of the part of it that is output.
+ 	 */
+-	stats_->setWindow(quadBayer_ ? window_ : Rectangle(window_.size()));
++	stats_->setWindow(window_);
+ 
+ 	inputBufferCount_ = inputCfg.bufferCount;
+ 	outputBufferCount_ = outputCfg.bufferCount;
+@@ -701,6 +705,7 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 			inDmaSyncer.emplace(input->planes()[0].fd, DmaSyncer::SyncType::Read);
+ 			inMapped.emplace(input, MappedFrameBuffer::MapFlag::Read);
+ 		}
++		stats_->setLensShading(params);
+ 		stats_->processFrame(frame, 0, inMapped.value());
+ 	}
+ 	inDmaSyncer.reset();
+diff --git a/src/libcamera/software_isp/swstats_cpu.cpp b/src/libcamera/software_isp/swstats_cpu.cpp
+index 14500a262..efdb589dd 100644
+--- a/src/libcamera/software_isp/swstats_cpu.cpp
++++ b/src/libcamera/software_isp/swstats_cpu.cpp
+@@ -11,6 +11,9 @@
+ 
+ #include "libcamera/internal/software_isp/swstats_cpu.h"
+ 
++#include <algorithm>
++#include <cmath>
++
+ #include <libcamera/base/log.h>
+ 
+ #include <libcamera/stream.h>
+@@ -195,7 +198,27 @@ static constexpr unsigned int kSaturated = 248;
+ 	/* Loop bound for the sharpness window; bytes for packed formats. */ \
+ 	unsigned int xSpan = window_.width;
+ 
++/*
++ * Apply the lens shading gain to a sample above the black level, as the
++ * debayer will, so that the statistics describe the corrected image; div
++ * scales the 8-bit statistics range to the sample's.
++ */
++#define SWSTATS_LENS_SHADING(v, channel, div)                                    \
++	{                                                                         \
++		constexpr float full = SwIspStats::kYLevels * (div);              \
++		const float black = lscBlack_.channel() * full;                   \
++		if (v > black)                                                    \
++			v = static_cast<decltype(v)>(std::min(                    \
++				black + (v - black) * lscLine_[gCount].channel,   \
++				full - 1));                                       \
++	}
++
+ #define SWSTATS_ACCUMULATE_LINE_STATS(div) \
++	if (lscLine_) {                    \
++		SWSTATS_LENS_SHADING(r, r, div) \
++		SWSTATS_LENS_SHADING(g, g, div) \
++		SWSTATS_LENS_SHADING(b, b, div) \
++	}                                  \
+ 	/*                                                                        \
+ 	 * Keep saturated samples out of the channel sums. The sums only feed     \
+ 	 * the AWB gains, which are ratios between channels: a clipped channel    \
+@@ -560,6 +583,7 @@ int SwStatsCpu::setupStandardBayerOrder(BayerFormat::Order order)
+ int SwStatsCpu::configure(const StreamConfiguration &inputCfg, unsigned int statsBufferCount)
+ {
+ 	stride_ = inputCfg.stride;
++	inputSize_ = inputCfg.size;
+ 	stats_.resize(statsBufferCount);
+ 
+ 	BayerFormat bayerFormat =
+@@ -665,6 +689,7 @@ void SwStatsCpu::setWindow(const Rectangle &window)
+ 	ASSERT(window.x >= 0 && window.y >= 0);
+ 
+ 	window_ = window;
++	lscColumns_.clear();
+ 
+ 	window_.x &= ~(patternSize_.width - 1);
+ 	window_.x += xShift_;
+@@ -676,6 +701,72 @@ void SwStatsCpu::setWindow(const Rectangle &window)
+ 	window_.height &= ~(patternSize_.height - 1);
+ }
+ 
++/**
++ * \brief Set the lens shading correction the debayer applies to the frame
++ * \param[in] params The debayer parameters
++ *
++ * The statistics of frames processed by processFrame() are then gathered as
++ * if on the corrected image: the lens shading gains lift the image corners,
++ * and exposure and white balance must see them lifted.
++ */
++void SwStatsCpu::setLensShading(const DebayerParams &params)
++{
++	lscEnabled_ = params.lscEnabled && !quadBayer_;
++	lscBlack_ = params.blackLevel;
++	if (!lscEnabled_ || params.lsc == lscValues_)
++		return;
++
++	lscValues_ = params.lsc;
++	std::transform(lscValues_.begin(), lscValues_.end(), lscGrid_.begin(),
++		       DebayerParams::lscDecode);
++}
++
++/*
++ * Interpolate the lens shading gains for the samples of the 2x2 block line
++ * at an input row: one sample every 4 pixels from the window's left edge,
++ * the grid's points spanning the input image corner to corner.
++ */
++void SwStatsCpu::prepareLscLine(unsigned int row)
++{
++	constexpr unsigned int kW = DebayerParams::kLscWidth;
++	constexpr unsigned int kH = DebayerParams::kLscHeight;
++	constexpr unsigned int kSampleStep = 4;
++
++	auto position = [](float pixel, unsigned int size, unsigned int points) {
++		float p = std::clamp(pixel / std::max(size, 1u), 0.0f, 1.0f) * (points - 1);
++		unsigned int i = std::min(static_cast<unsigned int>(p), points - 2);
++		return std::make_pair(i, p - i);
++	};
++
++	/* The samples' columns are the same on every line */
++	const unsigned int samples = window_.width / kSampleStep + 1;
++	if (lscColumns_.size() != samples) {
++		lscColumns_.resize(samples);
++		for (unsigned int k = 0; k < samples; k++)
++			lscColumns_[k] = position(window_.x + k * kSampleStep + 1.0f,
++						  inputSize_.width, kW);
++	}
++
++	/* The grid's row at this input row, per point and channel */
++	const auto [gy, fy] = position(row + 1.0f, inputSize_.height, kH);
++	std::array<float, kW * 3> gridRow;
++	for (unsigned int i = 0; i < kW * 3; i++)
++		gridRow[i] = lscGrid_[gy * kW * 3 + i] * (1.0f - fy) +
++			     lscGrid_[(gy + 1) * kW * 3 + i] * fy;
++
++	lscLineGains_.resize(samples);
++	for (unsigned int k = 0; k < samples; k++) {
++		const auto [gx, fx] = lscColumns_[k];
++		const float *a = &gridRow[gx * 3];
++		const float *b = &gridRow[(gx + 1) * 3];
++		lscLineGains_[k] = {
++			a[0] * (1.0f - fx) + b[0] * fx,
++			a[1] * (1.0f - fx) + b[1] * fx,
++			a[2] * (1.0f - fx) + b[2] * fx,
++		};
++	}
++}
++
+ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
+ {
+ 	const uint8_t *src = in.planes()[0].data();
+@@ -690,12 +781,19 @@ void SwStatsCpu::processBayerFrame2(MappedFrameBuffer &in)
+ 			continue;
+ 		}
+ 
++		if (lscEnabled_) {
++			prepareLscLine(window_.y + y);
++			lscLine_ = lscLineGains_.data();
++		}
++
+ 		/* linePointers[0] is not used by any stats0_ functions */
+ 		linePointers[1] = src;
+ 		linePointers[2] = src + stride_;
+ 		(this->*stats0_)(linePointers, stats_[0], y);
+ 		src += stride_ * 2;
+ 	}
++
++	lscLine_ = nullptr;
+ }
+ 
+ void SwStatsCpu::processQuadBayerFrame(MappedFrameBuffer &in)

@@ -1,0 +1,35 @@
+From 6df943a2a1c3565f9fd90d16d8e416ab7f3b754f Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Tue, 30 Jun 2026 18:06:32 +0530
+Subject: libcamera: camera_sensor_raw: Enumerate formats using sink pads
+
+Use internal sink pads instead of source pad for format enumeration.
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 77847944972c93fa77afccde2dba7ca4176fb762)
+---
+ src/libcamera/sensor/camera_sensor_raw.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index 46e3a1657..c76541c21 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -290,7 +290,7 @@ std::optional<int> CameraSensorRaw::init()
+ 		}
+ 
+ 		/* Identify the stream type based on the supported formats. */
+-		V4L2Subdevice::Formats formats = subdev_->formats(route.source);
++		V4L2Subdevice::Formats formats = subdev_->formats(route.sink);
+ 
+ 		std::optional<MediaBusFormatInfo::Type> type;
+ 
+@@ -305,7 +305,7 @@ std::optional<int> CameraSensorRaw::init()
+ 
+ 		if (!type) {
+ 			LOG(CameraSensor, Warning)
+-				<< "No known format on pad " << route.source;
++				<< "No known format on pad " << route.sink;
+ 			continue;
+ 		}
+ 

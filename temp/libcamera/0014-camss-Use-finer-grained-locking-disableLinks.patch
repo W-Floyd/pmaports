@@ -1,0 +1,141 @@
+From 22dc544ef418d4953912f26547041664b71bdb9d Mon Sep 17 00:00:00 2001
+From: Hans de Goede <johannes.goede@oss.qualcomm.com>
+Date: Fri, 3 Apr 2026 17:16:45 +0200
+Subject: camss: Use finer grained locking / disableLinks()
+
+Use finer grained locking / disableLinks() calls to allow 2 separate
+libcamera instances to stream from 2 different cameras at the same time.
+
+Note this does not work when mixing (e.g. from containers) older libcamera
+instances still using the simple pipeline handler with libcamera instances
+using the new camss pipeline handler. The simple pipeline always picks
+csid0 for all cameras. When using a camera on phy1 this sets up a
+'msm_csiphy1'[1] -> 'msm_csid0'[0] link which does not get disabled by
+the camss pipeline handler when trying to use a phy0 -> csid0 -> vfe0
+pipeline, leading to a "Failed to setup link 'msm_csiphy0'[1] ->
+'msm_csid0'[0]: Device or resource busy" error.
+
+Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
+---
+ src/libcamera/pipeline/camss/camss.cpp     | 17 ++++++++++
+ src/libcamera/pipeline/camss/camss_csi.cpp | 36 ++++++++++++++--------
+ src/libcamera/pipeline/camss/camss_csi.h   |  3 ++
+ 3 files changed, 44 insertions(+), 12 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index df62bb9a6..7a5448155 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -118,6 +118,8 @@ private:
+ 		return static_cast<CamssCameraData *>(camera->_d());
+ 	}
+ 
++	bool acquireDevice(Camera *camera) override;
++	void releaseDevice(Camera *camera) override;
+ 	int allocateBuffers(Camera *camera);
+ 	void freeBuffers(Camera *camera);
+ 
+@@ -290,6 +292,7 @@ CameraConfiguration::Status CamssCameraConfiguration::validate()
+ PipelineHandlerCamss::PipelineHandlerCamss(CameraManager *manager)
+ 	: PipelineHandler(manager), csi_()
+ {
++	lockOnAcquire_ = false;
+ }
+ 
+ std::unique_ptr<CameraConfiguration>
+@@ -383,6 +386,20 @@ void PipelineHandlerCamss::freeBuffers(Camera *camera)
+ 	cameraData(camera)->isp_->freeBuffers();
+ }
+ 
++bool PipelineHandlerCamss::acquireDevice(Camera *camera)
++{
++	CamssCameraData *data = cameraData(camera);
++
++	return data->csi_->acquireDevice();
++}
++
++void PipelineHandlerCamss::releaseDevice(Camera *camera)
++{
++	CamssCameraData *data = cameraData(camera);
++
++	data->csi_->releaseDevice();
++}
++
+ int PipelineHandlerCamss::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
+ {
+ 	CamssCameraData *data = cameraData(camera);
+diff --git a/src/libcamera/pipeline/camss/camss_csi.cpp b/src/libcamera/pipeline/camss/camss_csi.cpp
+index 481aaa203..2af54d287 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.cpp
++++ b/src/libcamera/pipeline/camss/camss_csi.cpp
+@@ -295,6 +295,12 @@ int CamssCsiCamera::configure(const StreamConfiguration &cfg, const Transform &t
+ 	V4L2DeviceFormat outputFormat;
+ 	int ret;
+ 
++	for (auto &link : links_) {
++		ret = link.sinkSubdev->entity()->disableLinks();
++		if (ret)
++			return ret;
++	}
++
+ 	sensorFormat = getSensorFormat(cfg.size, cfg.pixelFormat, false);
+ 	/* This updates sensorFormat with the actual established format */
+ 	ret = sensor_->setFormat(&sensorFormat, transform);
+@@ -338,6 +344,24 @@ int CamssCsiCamera::exportBuffers(unsigned int count,
+ 	return output_->exportBuffers(count, buffers);
+ }
+ 
++bool CamssCsiCamera::acquireDevice()
++{
++	for (auto &link : links_) {
++		if (!link.sinkSubdev->lock()) {
++			releaseDevice();
++			return false;
++		}
++	}
++
++	return true;
++}
++
++void CamssCsiCamera::releaseDevice()
++{
++	for (auto &link : links_)
++		link.sinkSubdev->unlock();
++}
++
+ int CamssCsiCamera::start()
+ {
+ 	int ret = output_->exportBuffers(bufferCount_, &buffers_);
+@@ -456,18 +480,6 @@ CamssCsi::Cameras CamssCsi::match(PipelineHandler *pipe, DeviceEnumerator *enume
+ 	if (!camssMediaDev_)
+ 		return {};
+ 
+-	/*
+-	 * Disable all links that are enabled to start with a clean state,
+-	 * CamssCsiCamera::configure() enables links as necessary.
+-	 * \todo instead only disable links on used entities, to allow
+-	 * 2 separate libcamera instances to drive 2 different sensors.
+-	 * This will also require changes to PipelineHandler::acquire() to
+-	 * allow a more fine grained version of that locking a list of
+-	 * subdevs associated with a Camera instead of the mediactl node.
+-	 */
+-	if (camssMediaDev_->disableLinks())
+-		return {};
+-
+ 	getEntities(phys_, "msm_csiphy%d", kMaxCsiPhys);
+ 	getEntities(csids_, "msm_csid%d", kMaxCsiDecoders);
+ 	/* Only RDI0 is used for now */
+diff --git a/src/libcamera/pipeline/camss/camss_csi.h b/src/libcamera/pipeline/camss/camss_csi.h
+index d78175a06..81d87c3d6 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.h
++++ b/src/libcamera/pipeline/camss/camss_csi.h
+@@ -52,6 +52,9 @@ public:
+ 
+ 	void setIsp(CamssIsp *isp) { isp_ = isp; }
+ 
++	bool acquireDevice();
++	void releaseDevice();
++
+ 	int start();
+ 	void stop();
+ 

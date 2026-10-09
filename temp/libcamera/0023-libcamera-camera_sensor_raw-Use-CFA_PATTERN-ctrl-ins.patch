@@ -1,0 +1,317 @@
+From 9a0cacb89d6f8a32f7f17e93dbe3369888d7a22d Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Fri, 18 Sep 2026 15:56:51 +0530
+Subject: libcamera: camera_sensor_raw: Use CFA_PATTERN ctrl instead of source
+ format
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 624b7913c00620e2030737d2ac10d92f5666e00b)
+---
+ src/libcamera/sensor/camera_sensor_raw.cpp | 176 ++++++++++-----------
+ 1 file changed, 86 insertions(+), 90 deletions(-)
+
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index 7e91d6743..46e3a1657 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -74,7 +74,7 @@ public:
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+ 	Size resolution() const override;
+ 
+-	V4L2SubdeviceFormat getFormat(std::span<const unsigned int> mbusCodes,
++	V4L2SubdeviceFormat getFormat(Span<const unsigned int> mbusCodes,
+ 				      const Size &size,
+ 				      const Size maxSize) const override;
+ 	int setFormat(V4L2SubdeviceFormat *format,
+@@ -97,7 +97,7 @@ public:
+ 	Orientation mountingOrientation() const override { return mountingOrientation_; }
+ 
+ 	const ControlInfoMap &controls() const override;
+-	ControlList getControls(std::span<const uint32_t> ids) override;
++	ControlList getControls(Span<const uint32_t> ids) override;
+ 	int setControls(ControlList *ctrls) override;
+ 
+ 	const std::vector<controls::draft::TestPatternModeEnum> &
+@@ -141,12 +141,10 @@ private:
+ 	std::vector<controls::draft::TestPatternModeEnum> testPatternModes_;
+ 	controls::draft::TestPatternModeEnum testPatternMode_;
+ 
+-	Rectangle pixelArrayArea_;
+-	Rectangle readableArea_;
++	Size pixelArraySize_;
+ 	Rectangle activeArea_;
+ 	BayerFormat::Order cfaPattern_;
+-	bool supportHFlips_;
+-	bool supportVFlips_;
++	bool supportFlips_;
+ 	bool flipsAlterBayerOrder_;
+ 	Orientation mountingOrientation_;
+ 
+@@ -164,9 +162,8 @@ private:
+  */
+ 
+ CameraSensorRaw::CameraSensorRaw(const MediaEntity *entity)
+-	: entity_(entity), staticProps_(nullptr), supportHFlips_(false),
+-	  supportVFlips_(false), flipsAlterBayerOrder_(false),
+-	  properties_(properties::properties)
++	: entity_(entity), staticProps_(nullptr), supportFlips_(false),
++	  flipsAlterBayerOrder_(false), properties_(properties::properties)
+ {
+ }
+ 
+@@ -376,29 +373,6 @@ std::optional<int> CameraSensorRaw::init()
+ 	 * array order for the image stream.
+ 	 */
+ 
+-	/*
+-	 * Get the native sensor CFA pattern. It is simpler to retrieve it from
+-	 * the internal image sink pad as it is guaranteed to expose a single
+-	 * format, and is not affected by flips.
+-	 */
+-	V4L2Subdevice::Formats formats = subdev_->formats(streams_.image.sink);
+-	if (formats.size() != 1) {
+-		LOG(CameraSensor, Error)
+-			<< "Image pad has " << formats.size()
+-			<< " formats, expected 1";
+-		return { -EINVAL };
+-	}
+-
+-	uint32_t nativeFormat = formats.cbegin()->first;
+-	const BayerFormat &bayerFormat = BayerFormat::fromMbusCode(nativeFormat);
+-	if (!bayerFormat.isValid()) {
+-		LOG(CameraSensor, Error)
+-			<< "Invalid native format " << nativeFormat;
+-		return { 0 };
+-	}
+-
+-	cfaPattern_ = bayerFormat.order;
+-
+ 	/*
+ 	 * Retrieve and cache the media bus codes and sizes on the source image
+ 	 * stream.
+@@ -449,17 +423,7 @@ std::optional<int> CameraSensorRaw::init()
+ 		return { ret };
+ 	}
+ 
+-	/*
+-	 * \todo Implement querying the physical sensor size based on pad 1,
+-	 * stream 0. See
+-	 * https://lore.kernel.org/linux-media/20260409201501.975242-23-sakari.ailus@linux.intel.com/
+-	 */
+-	LOG(CameraSensor, Warning) << "PixelArrayArea might be incorrect";
+-	pixelArrayArea_ = Rectangle(0, 0,
+-				    rect.x + rect.width,
+-				    rect.y + rect.height);
+-
+-	readableArea_ = rect;
++	pixelArraySize_ = rect.size();
+ 
+ 	ret = subdev_->getSelection(streams_.image.sink, V4L2_SEL_TGT_CROP_DEFAULT,
+ 				    &activeArea_);
+@@ -509,31 +473,58 @@ std::optional<int> CameraSensorRaw::init()
+ 		return { ret };
+ 	}
+ 
+-	/* Verify if sensor supports horizontal/vertical flips. */
+-	auto queryFlip = [&](uint32_t id, const char *name) -> std::pair<bool, bool> {
+-		const struct v4l2_query_ext_ctrl *flipInfo = subdev_->controlInfo(id);
+-		if (!flipInfo || flipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY) {
+-			LOG(CameraSensor, Debug)
+-				<< "Camera sensor does not support " << name << " flip";
+-			return { false, false };
+-		}
+-
+-		return { true, flipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT };
+-	};
++	/*
++	 * Get the native sensor CFA pattern.
++	 */
++	ControlList ctrls = subdev_->getControls({ { V4L2_CID_CFA_PATTERN } });
++	if (ctrls.empty()) {
++		LOG(CameraSensor, Error)
++			<< "Failed to retrieve CFA_PATTERN control";
++		return -EINVAL;
++	}
+ 
+-	auto hflip = queryFlip(V4L2_CID_HFLIP, "horizontal");
+-	auto vflip = queryFlip(V4L2_CID_VFLIP, "vertical");
++	int cfaPattern = ctrls.get(V4L2_CID_CFA_PATTERN).get<int32_t>();
+ 
+-	if (hflip.first && vflip.first && (hflip.second != vflip.second)) {
++	switch (cfaPattern) {
++	case V4L2_CFA_PATTERN_GRBG:
++		cfaPattern_ = BayerFormat::GRBG;
++		break;
++	case V4L2_CFA_PATTERN_RGGB:
++		cfaPattern_ = BayerFormat::RGGB;
++		break;
++	case V4L2_CFA_PATTERN_BGGR:
++		cfaPattern_ = BayerFormat::BGGR;
++		break;
++	case V4L2_CFA_PATTERN_GBRG:
++		cfaPattern_ = BayerFormat::GBRG;
++		break;
++	default:
+ 		LOG(CameraSensor, Error)
+-			<< "Flips with differing alter bayer order properties"
+-			<< " are unsupported. Disabling flipping.";
+-	} else {
+-		supportHFlips_ = hflip.first;
+-		supportVFlips_ = vflip.first;
+-		flipsAlterBayerOrder_ = hflip.second || vflip.second;
++			<< "Unsupported CFA pattern "
++			<< cfaPattern;
++		return -EINVAL;
+ 	}
+ 
++	/*
++	 * Verify if sensor supports horizontal/vertical flips
++	 *
++	 * \todo Handle horizontal and vertical flips independently.
++	 */
++	const struct v4l2_query_ext_ctrl *hflipInfo = subdev_->controlInfo(V4L2_CID_HFLIP);
++	const struct v4l2_query_ext_ctrl *vflipInfo = subdev_->controlInfo(V4L2_CID_VFLIP);
++	if (hflipInfo && !(hflipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY) &&
++	    vflipInfo && !(vflipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY)) {
++		supportFlips_ = true;
++
++		if (hflipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT ||
++		    vflipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT)
++			flipsAlterBayerOrder_ = true;
++	}
++
++	if (!supportFlips_)
++		LOG(CameraSensor, Debug)
++			<< "Camera sensor does not support horizontal/vertical flip";
++
+ 	/*
+ 	 * 5. Discover ancillary devices.
+ 	 *
+@@ -662,8 +653,7 @@ int CameraSensorRaw::initProperties()
+ 		mountingOrientation_ = Orientation::Rotate0;
+ 	}
+ 
+-	properties_.set(properties::PixelArrayArea, pixelArrayArea_);
+-	properties_.set(properties::PixelArrayReadableArea, readableArea_);
++	properties_.set(properties::PixelArraySize, pixelArraySize_);
+ 	properties_.set(properties::PixelArrayActiveAreas, { activeArea_ });
+ 
+ 	/* Color filter array pattern. */
+@@ -796,7 +786,7 @@ Size CameraSensorRaw::resolution() const
+ }
+ 
+ V4L2SubdeviceFormat
+-CameraSensorRaw::getFormat(std::span<const unsigned int> mbusCodes,
++CameraSensorRaw::getFormat(Span<const unsigned int> mbusCodes,
+ 			   const Size &size, Size maxSize) const
+ {
+ 	unsigned int desiredArea = size.width * size.height;
+@@ -855,16 +845,14 @@ CameraSensorRaw::getFormat(std::span<const unsigned int> mbusCodes,
+ int CameraSensorRaw::setFormat(V4L2SubdeviceFormat *format, Transform transform)
+ {
+ 	/* Configure flips if the sensor supports that. */
+-	ControlList flipCtrls(subdev_->controls());
+-	if (supportHFlips_)
++	if (supportFlips_) {
++		ControlList flipCtrls(subdev_->controls());
++
+ 		flipCtrls.set(V4L2_CID_HFLIP,
+ 			      static_cast<int32_t>(!!(transform & Transform::HFlip)));
+-
+-	if (supportVFlips_)
+ 		flipCtrls.set(V4L2_CID_VFLIP,
+ 			      static_cast<int32_t>(!!(transform & Transform::VFlip)));
+ 
+-	if (!flipCtrls.empty()) {
+ 		int ret = subdev_->setControls(&flipCtrls);
+ 		if (ret)
+ 			return ret;
+@@ -1024,19 +1012,29 @@ int CameraSensorRaw::setEmbeddedDataEnabled(bool enable)
+ int CameraSensorRaw::sensorInfo(IPACameraSensorInfo *info) const
+ {
+ 	info->model = model();
+-	info->pixelArrayArea = pixelArrayArea_;
+ 
+ 	/*
+-	 * The active area is a static property, while the crop rectangle needs
+-	 * to be re-read as it depends on the sensor configuration.
++	 * The active area size is a static property, while the crop
++	 * rectangle needs to be re-read as it depends on the sensor
++	 * configuration.
+ 	 */
+-	info->activeArea = activeArea_;
++	info->activeAreaSize = { activeArea_.width, activeArea_.height };
+ 
+ 	int ret = subdev_->getSelection(streams_.image.sink, V4L2_SEL_TGT_CROP,
+ 					&info->analogCrop);
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * IPACameraSensorInfo::analogCrop::x and IPACameraSensorInfo::analogCrop::y
++	 * are defined relatively to the active pixel area, while V4L2's
++	 * TGT_CROP target is defined in respect to the full pixel array.
++	 *
++	 * Compensate it by subtracting the active area offset.
++	 */
++	info->analogCrop.x -= activeArea_.x;
++	info->analogCrop.y -= activeArea_.y;
++
+ 	/* The bit depth and image size depend on the currently applied format. */
+ 	V4L2SubdeviceFormat format{};
+ 	ret = subdev_->getFormat(streams_.image.source, &format);
+@@ -1082,8 +1080,17 @@ int CameraSensorRaw::sensorInfo(IPACameraSensorInfo *info) const
+ Transform CameraSensorRaw::computeTransform(Orientation *orientation) const
+ {
+ 	/*
+-	 * Compute the required transform to obtain 'orientation' starting from
+-	 * the mounting rotation.
++	 * If we cannot do any flips we cannot change the native camera mounting
++	 * orientation.
++	 */
++	if (!supportFlips_) {
++		*orientation = mountingOrientation_;
++		return Transform::Identity;
++	}
++
++	/*
++	 * Now compute the required transform to obtain 'orientation' starting
++	 * from the mounting rotation.
+ 	 *
+ 	 * As a note:
+ 	 * 	orientation / mountingOrientation_ = transform
+@@ -1091,17 +1098,6 @@ Transform CameraSensorRaw::computeTransform(Orientation *orientation) const
+ 	 */
+ 	Transform transform = *orientation / mountingOrientation_;
+ 
+-	/* If we cannot do the required flips, fall back to identity. */
+-	if (!supportHFlips_ && !!(transform & Transform::HFlip)) {
+-		*orientation = mountingOrientation_;
+-		return Transform::Identity;
+-	}
+-
+-	if (!supportVFlips_ && !!(transform & Transform::VFlip)) {
+-		*orientation = mountingOrientation_;
+-		return Transform::Identity;
+-	}
+-
+ 	/*
+ 	 * If transform contains any Transpose we cannot do it, so adjust
+ 	 * 'orientation' to report the image native orientation and return Identity.
+@@ -1132,7 +1128,7 @@ const ControlInfoMap &CameraSensorRaw::controls() const
+ 	return subdev_->controls();
+ }
+ 
+-ControlList CameraSensorRaw::getControls(std::span<const uint32_t> ids)
++ControlList CameraSensorRaw::getControls(Span<const uint32_t> ids)
+ {
+ 	return subdev_->getControls(ids);
+ }
+@@ -1189,6 +1185,6 @@ std::string CameraSensorRaw::logPrefix() const
+ 	return "'" + entity_->name() + "'";
+ }
+ 
+-REGISTER_CAMERA_SENSOR(CameraSensorRaw, -200)
++REGISTER_CAMERA_SENSOR(CameraSensorRaw, 0)
+ 
+ } /* namespace libcamera */

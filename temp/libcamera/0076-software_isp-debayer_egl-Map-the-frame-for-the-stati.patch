@@ -1,0 +1,58 @@
+From d278e6a64e13d06ed5d941f00c4dc6fd3e0c89de Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 17:12:58 +0000
+Subject: software_isp: debayer_egl: Map the frame for the statistics on their
+ thread
+
+The raw buffer is imported into EGL, so for the CPU statistics of the
+frames that have them it has to be mapped, and synchronised for the CPU
+to read it. That was done on the debayer thread, before the job was
+handed to the statistics thread, and took several milliseconds out of
+every fourth frame. Do it in the job.
+
+On the rear camera of a Moto G Play (2024) at 1920x1080, 30 fps, the
+time from a frame's timestamp to its request completing has a p95 of
+43 to 44 ms, from 46 to 50 ms.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 22 +++++++++++-----------
+ 1 file changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 8c0e5604d..cd560e298 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -1005,21 +1005,21 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 		 */
+ 		/* Below, once the GPU has read the buffer */
+ 	} else {
+-		if (!inMapped) {
+-			/*
+-			 * The buffer was directly imported into EGL and thus
+-			 * not mapped for texture upload. Do it now for the
+-			 * CPU-based stats calculation.
+-			 */
+-			assert(!inDmaSyncer);
+-			inDmaSyncer.emplace(input->planes()[0].fd, DmaSyncer::SyncType::Read);
+-			inMapped.emplace(input, MappedFrameBuffer::MapFlag::Read);
+-		}
+-
+ 		/* A job's callable is copied, and the mapping is not */
+ 		auto mapped = std::make_shared<std::optional<MappedFrameBuffer>>(std::move(inMapped));
+ 		auto syncer = std::make_shared<std::optional<DmaSyncer>>(std::move(inDmaSyncer));
+ 		statsThread_.post([this, frame, input, params, mapped, syncer] {
++			if (!*mapped) {
++				/*
++				 * The buffer was directly imported into EGL and thus
++				 * not mapped for texture upload. Do it now for the
++				 * CPU-based stats calculation, on this thread, so
++				 * that the debayer's does not wait for it.
++				 */
++				assert(!*syncer);
++				syncer->emplace(input->planes()[0].fd, DmaSyncer::SyncType::Read);
++				mapped->emplace(input, MappedFrameBuffer::MapFlag::Read);
++			}
+ 			stats_->setLensShading(params);
+ 			stats_->processFrame(frame, 0, mapped->value());
+ 			syncer->reset();

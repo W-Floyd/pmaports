@@ -1,0 +1,89 @@
+From c6d6cac74bdce0918fd887692a64c86646a4ddb0 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <johannes.goede@oss.qualcomm.com>
+Date: Fri, 3 Apr 2026 15:58:42 +0200
+Subject: libcamera: pipeline: Allow pipeline-handlers to opt out of locking
+ the media devices
+
+On Qualcomm chips any CSI-phy can be connected to any CSI-decoder and
+any CSI-decoder can be connected to any Video-Front-End (VFE, DMA write
+engine and co). Basically there are 2 big cross-switches between PHYs
+and decoders and between decoders and VFEs which can be controlled through
+media-controller links.
+
+As such the entite CAMSS block with CSI-phys, decoders and VFEs is
+represented to userspace as a single /dev/media# node.
+
+As long as active links from unrelated cameras are not touched when setting
+up a new camera 2 independent raw data-streams can be run and managed by 2
+different libcamera instances.
+
+But the standard locking of the /dev/media# node by the first libcamera
+instance to start streaming from one of the cameras blocks this.
+
+Add a new lockOnAcquire_ class member which defaults to true and allow
+pipeline-handlers to opt out of the /dev/media# locking by setting this
+to false.
+
+Note pipeline-handlers which opt-out will need to implement their own
+alternative locking from acquireDevice(). This could be done for example
+by using lockf() on the phy, decoder and VFE v4l2-subdevs used by
+the camera being acquired.
+
+Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
+---
+ include/libcamera/internal/pipeline_handler.h | 1 +
+ src/libcamera/pipeline_handler.cpp            | 8 ++++----
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/include/libcamera/internal/pipeline_handler.h b/include/libcamera/internal/pipeline_handler.h
+index 6a018fe42..c4366730d 100644
+--- a/include/libcamera/internal/pipeline_handler.h
++++ b/include/libcamera/internal/pipeline_handler.h
+@@ -99,6 +99,7 @@ protected:
+ 
+ 	CameraManager *manager_;
+ 	const unsigned int maxQueuedRequestsDevice_;
++	bool lockOnAcquire_;
+ 
+ private:
+ 	void unlockMediaDevices();
+diff --git a/src/libcamera/pipeline_handler.cpp b/src/libcamera/pipeline_handler.cpp
+index a803f6208..a1284920f 100644
+--- a/src/libcamera/pipeline_handler.cpp
++++ b/src/libcamera/pipeline_handler.cpp
+@@ -72,7 +72,7 @@ LOG_DEFINE_CATEGORY(Pipeline)
+ PipelineHandler::PipelineHandler(CameraManager *manager,
+ 				 unsigned int maxQueuedRequestsDevice)
+ 	: manager_(manager), maxQueuedRequestsDevice_(maxQueuedRequestsDevice),
+-	  useCount_(0)
++	  lockOnAcquire_(true), useCount_(0)
+ {
+ }
+ 
+@@ -170,7 +170,7 @@ PipelineHandler::acquireMediaDevice(DeviceEnumerator *enumerator,
+  */
+ bool PipelineHandler::acquire(Camera *camera)
+ {
+-	if (useCount_ == 0) {
++	if (useCount_ == 0 && lockOnAcquire_) {
+ 		for (std::shared_ptr<MediaDevice> &media : mediaDevices_) {
+ 			if (!media->lock()) {
+ 				unlockMediaDevices();
+@@ -180,7 +180,7 @@ bool PipelineHandler::acquire(Camera *camera)
+ 	}
+ 
+ 	if (!acquireDevice(camera)) {
+-		if (useCount_ == 0)
++		if (useCount_ == 0 && lockOnAcquire_)
+ 			unlockMediaDevices();
+ 
+ 		return false;
+@@ -212,7 +212,7 @@ void PipelineHandler::release(Camera *camera)
+ 
+ 	releaseDevice(camera);
+ 
+-	if (useCount_ == 1)
++	if (useCount_ == 1 && lockOnAcquire_)
+ 		unlockMediaDevices();
+ 
+ 	--useCount_;

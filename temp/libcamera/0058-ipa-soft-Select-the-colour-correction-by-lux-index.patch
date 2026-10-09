@@ -1,0 +1,383 @@
+From 26235d7d871e385b8d4c6c236cf34cd1402df5df Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 7 Oct 2026 21:50:05 +0000
+Subject: ipa: soft: Select the colour correction by lux index
+
+The vendor tuning keys its colour correction matrices by lux index as
+well as colour temperature, and the soft IPA used the one region, for
+every light. Give Agc a model of the lux index (lux: refProduct,
+perStop): the exposure time x gain that brings the frame to the luma
+target, in stops from that of lux index 250. Ccm takes luxSets, the
+matrices by lux index region, and blends the two regions either side of
+a gap in the tuning's ranges, as CamX interpolates. Without luxSets or
+the model, ccms apply as before.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/softisp/algorithms/agc.cpp |  28 ++++++++
+ src/ipa/softisp/algorithms/agc.h   |  11 ++++
+ src/ipa/softisp/algorithms/ccm.cpp | 102 +++++++++++++++++++----------
+ src/ipa/softisp/algorithms/ccm.h   |  36 ++++++----
+ src/ipa/softisp/ipa_context.h      |   6 ++
+ src/ipa/softisp/lux.h              |  57 ++++++++++++++++
+ 6 files changed, 192 insertions(+), 48 deletions(-)
+ create mode 100644 src/ipa/softisp/lux.h
+
+diff --git a/src/ipa/softisp/algorithms/agc.cpp b/src/ipa/softisp/algorithms/agc.cpp
+index 5dfdcb872..48d7c67fb 100644
+--- a/src/ipa/softisp/algorithms/agc.cpp
++++ b/src/ipa/softisp/algorithms/agc.cpp
+@@ -158,6 +158,24 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+ 	if (mean.has_value() && *mean > 0.0 && *mean < 1.0)
+ 		meanTarget_ = *mean;
+ 
++	/*
++	 * lux: a model of the lux index the vendor tuning's regions are keyed
++	 * by (Qualcomm's AEC, whose own is not public), for the algorithms
++	 * that switch their data by it. The scene's brightness is the exposure
++	 * time x gain that brings the frame to the luma target, and the index
++	 * moves by perStop for each stop of it away from refProduct, that of
++	 * lux index 250 (ordinary indoor light):
++	 *
++	 *   lux:
++	 *     refProduct: 40000   # exposure time in us x analogue gain
++	 *     perStop: 36
++	 */
++	const ValueNode &lux = tuningData["lux"];
++	auto luxRef = lux["refProduct"].get<double>();
++	auto luxStop = lux["perStop"].get<double>();
++	if (meanTarget_ && luxRef && *luxRef > 0.0 && luxStop && *luxStop > 0.0)
++		lux_ = LuxTuning{ *luxRef, *luxStop };
++
+ 	/*
+ 	 * histogram: adjusts the mean luminance target from the brightest
+ 	 * pixels, after the histogram luma target of Qualcomm's AEC metering
+@@ -666,6 +684,16 @@ void Agc::process(IPAContext &context,
+ 	agc.lastMean = std::max((meanY - black) / (kYMax - black), 1e-3);
+ 	agc.lastProduct = frameContext.sensor.exposure * frameContext.sensor.gain;
+ 
++	if (lux_) {
++		/* The exposure that would put this frame's mean on the target */
++		const double plain = hist_ ? agc.plainTarget : *meanTarget_;
++		const double product = exposureTime.get<std::micro>() *
++				       frameContext.sensor.gain * plain / agc.lastMean;
++		agc.luxIndex = std::clamp(250.0 + lux_->perStop * std::log2(product / lux_->refProduct),
++					  0.0, 900.0);
++		LOG(IPASoftIspExposure, Debug) << "Lux index " << agc.luxIndex;
++	}
++
+ 	updateExposure(context, frameContext, exposureMSV, meanY, target);
+ 	applyManual(context, frameContext);
+ 
+diff --git a/src/ipa/softisp/algorithms/agc.h b/src/ipa/softisp/algorithms/agc.h
+index a08af7640..8d796f3b9 100644
+--- a/src/ipa/softisp/algorithms/agc.h
++++ b/src/ipa/softisp/algorithms/agc.h
+@@ -64,6 +64,17 @@ private:
+ 	std::optional<double> meanTarget_;
+ 	std::optional<HistTuning> hist_;
+ 
++	/*
++	 * The lux index model: the exposure time (us) x gain at which a scene
++	 * of lux index 250 meets the luma target, and how many lux index
++	 * steps a stop of scene brightness is.
++	 */
++	struct LuxTuning {
++		double refProduct;
++		double perStop;
++	};
++	std::optional<LuxTuning> lux_;
++
+ 	/* The DRC gain exposure is being set for */
+ 	double drcDecided_ = 1.0;
+ 	/* The dark boost the tone curve is being set for */
+diff --git a/src/ipa/softisp/algorithms/ccm.cpp b/src/ipa/softisp/algorithms/ccm.cpp
+index 039074494..1e11ef43f 100644
+--- a/src/ipa/softisp/algorithms/ccm.cpp
++++ b/src/ipa/softisp/algorithms/ccm.cpp
+@@ -8,64 +8,96 @@
+ 
+ #include "ccm.h"
+ 
++#include <cmath>
++
++#include <libcamera/base/log.h>
++#include <libcamera/base/utils.h>
++
++#include <libcamera/control_ids.h>
++
+ #include "libcamera/internal/matrix.h"
+ 
++namespace {
++
++constexpr unsigned int kTemperatureThreshold = 100;
++constexpr double kLuxThreshold = 5.0;
++
++}
++
+ namespace libcamera {
+ 
+ namespace ipa::softisp::algorithms {
+ 
+ LOG_DEFINE_CATEGORY(IPASoftIspCcm)
+ 
+-/**
+- * \copydoc libcamera::ipa::Algorithm::init
+- */
+-int Ccm::init(IPAContext &context, const ValueNode &tuningData)
++int Ccm::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ {
+-	/* Informs the 'adjust' component that CCM is available to apply Saturation */
++	int ret = ccm_.readYaml(tuningData["ccms"], "ct", "ccm");
++	if (ret < 0) {
++		LOG(IPASoftIspCcm, Error)
++			<< "Failed to parse 'ccm' parameter from tuning file.";
++		return ret;
++	}
++
++	/*
++	 * luxSets: the same matrices by lux index region, which Agc estimates:
++	 *
++	 *   luxSets:
++	 *     - lux: [ 220, 300 ]
++	 *       ccms: [ ... ]    # as above
++	 */
++	for (const ValueNode &node : tuningData["luxSets"].asList()) {
++		auto lux = node["lux"].get<std::vector<double>>();
++		LuxSet set;
++		if (!lux || lux->size() != 2 || set.ccm.readYaml(node["ccms"], "ct", "ccm") < 0) {
++			LOG(IPASoftIspCcm, Error) << "Invalid 'luxSets' in tuning file";
++			return -EINVAL;
++		}
++		luxRanges_.push_back({ (*lux)[0], (*lux)[1] });
++		luxSets_.push_back(std::move(set));
++	}
++
+ 	context.ccmEnabled = true;
+ 
+-	return ccmAlgo_.init(tuningData, context.ctrlMap);
++	return 0;
+ }
+ 
+-/**
+- * \copydoc libcamera::ipa::Algorithm::configure
+- */
+-int Ccm::configure(IPAContext &context,
+-		   [[maybe_unused]] const IPAConfigInfo &configInfo)
++/* The matrix at a colour temperature, blended across lux index regions */
++Matrix<float, 3, 3> Ccm::matrixAt(unsigned int ct, double lux)
+ {
+-	return ccmAlgo_.configure(context.activeState.ccm,
+-				  context.activeState.awb.automatic.colourTemperature);
+-}
++	if (luxSets_.empty() || lux < 0)
++		return ccm_.getInterpolated(ct);
+ 
+-/**
+- * \copydoc libcamera::ipa::Algorithm::queueRequest
+- */
+-void Ccm::queueRequest(IPAContext &context,
+-		       [[maybe_unused]] const uint32_t frame,
+-		       IPAFrameContext &frameContext,
+-		       const ControlList &controls)
+-{
+-	/* Nothing to do here, the ccm will be calculated in prepare() */
+-	if (frameContext.awb.autoEnabled)
+-		return;
++	const ipa::softisp::LuxBlend b = ipa::softisp::luxBlend(luxRanges_, lux);
++	const Matrix<float, 3, 3> lo = luxSets_[b.lo].ccm.getInterpolated(ct);
++	if (b.lo == b.hi)
++		return lo;
+ 
+-	ccmAlgo_.queueRequest(context.activeState.ccm, frameContext.ccm, controls);
++	const Matrix<float, 3, 3> hi = luxSets_[b.hi].ccm.getInterpolated(ct);
++	return lo * static_cast<float>(1.0 - b.weight) + hi * static_cast<float>(b.weight);
+ }
+ 
+-void Ccm::prepare(IPAContext &context, const uint32_t frame,
++void Ccm::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
+ 		  IPAFrameContext &frameContext, [[maybe_unused]] DebayerParams *params)
+ {
+-	if (frameContext.awb.autoEnabled)
+-		ccmAlgo_.prepare(context.activeState.ccm, frameContext.ccm,
+-				 frame, frameContext.awb.colourTemperature);
++	const unsigned int ct = context.activeState.awb.temperatureK;
++	const double lux = context.activeState.agc.luxIndex;
+ 
+ 	/*
+-	 * \todo: Split out combined matrix into individual parameters in
+-	 * DebayerParams and perform any pre-multiplication combination in the
+-	 * SoftISP component directly.
++	 * Change CCM only on bigger temperature changes, and on a change of
++	 * the lux index that is a visible step of the blend.
+ 	 */
++	if (!currentCcm_ ||
++	    utils::abs_diff(ct, lastCt_) >= kTemperatureThreshold ||
++	    std::abs(lux - lastLux_) >= kLuxThreshold) {
++		currentCcm_ = matrixAt(ct, lux);
++		lastCt_ = ct;
++		lastLux_ = lux;
++	}
++
+ 	context.activeState.combinedMatrix =
+-		frameContext.ccm.ccm * context.activeState.combinedMatrix;
++		currentCcm_.value() * context.activeState.combinedMatrix;
++	frameContext.ccm = currentCcm_.value();
+ }
+ 
+ void Ccm::process([[maybe_unused]] IPAContext &context,
+@@ -74,7 +106,7 @@ void Ccm::process([[maybe_unused]] IPAContext &context,
+ 		  [[maybe_unused]] const SwIspStats *stats,
+ 		  ControlList &metadata)
+ {
+-	ccmAlgo_.process(frameContext.ccm, metadata);
++	metadata.set(controls::ColourCorrectionMatrix, frameContext.ccm.data());
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Ccm, "Ccm")
+diff --git a/src/ipa/softisp/algorithms/ccm.h b/src/ipa/softisp/algorithms/ccm.h
+index 2a2030a41..7bc93b628 100644
+--- a/src/ipa/softisp/algorithms/ccm.h
++++ b/src/ipa/softisp/algorithms/ccm.h
+@@ -7,15 +7,15 @@
+ 
+ #pragma once
+ 
+-#include <libcamera/controls.h>
++#include <optional>
++#include <vector>
+ 
+-#include "libcamera/internal/value_node.h"
++#include "libcamera/internal/matrix.h"
+ 
+-#include "libipa/ccm.h"
+-#include "libipa/fixedpoint.h"
++#include <libipa/interpolator.h>
+ 
+ #include "algorithm.h"
+-#include "ipa_context.h"
++#include "lux.h"
+ 
+ namespace libcamera {
+ 
+@@ -24,14 +24,10 @@ namespace ipa::softisp::algorithms {
+ class Ccm : public Algorithm
+ {
+ public:
+-	int init(IPAContext &context, const ValueNode &tuningData) override;
+-
+-	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
+-
+-	void queueRequest(IPAContext &context, const uint32_t frame,
+-			  IPAFrameContext &frameContext,
+-			  const ControlList &controls) override;
++	Ccm() = default;
++	~Ccm() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
+ 	void prepare(IPAContext &context,
+ 		     const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+@@ -42,7 +38,21 @@ public:
+ 		     ControlList &metadata) override;
+ 
+ private:
+-	CcmAlgorithm<Q<4, 16>> ccmAlgo_;
++	/* The matrices of one lux index region, by colour temperature */
++	struct LuxSet {
++		Interpolator<Matrix<float, 3, 3>> ccm;
++	};
++
++	Matrix<float, 3, 3> matrixAt(unsigned int ct, double lux);
++
++	unsigned int lastCt_;
++	double lastLux_ = -1.0;
++	Interpolator<Matrix<float, 3, 3>> ccm_;
++	std::optional<Matrix<float, 3, 3>> currentCcm_;
++
++	/* By lux index, if the tuning has them; ccm_ is used otherwise */
++	std::vector<ipa::softisp::LuxRange> luxRanges_;
++	std::vector<LuxSet> luxSets_;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index f7395f7fd..d868f3dfe 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -83,6 +83,12 @@ struct IPAActiveState {
+ 		double plainTarget;
+ 		double lastMean;
+ 		double lastProduct;
++		/*
++		 * The scene's lux index, in Qualcomm's terms (higher is
++		 * darker), from the last frame with statistics; negative
++		 * until there is one, or when the tuning has no model of it.
++		 */
++		double luxIndex = -1.0;
+ 	} agc;
+ 
+ 	struct {
+diff --git a/src/ipa/softisp/lux.h b/src/ipa/softisp/lux.h
+new file mode 100644
+index 000000000..a7c6b8017
+--- /dev/null
++++ b/src/ipa/softisp/lux.h
+@@ -0,0 +1,57 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Tuning data selected by lux index
++ */
++
++#pragma once
++
++#include <algorithm>
++#include <vector>
++
++namespace libcamera {
++
++namespace ipa::softisp {
++
++/*
++ * A tuning file's lux index regions, in Qualcomm's terms: the lux index grows
++ * as the scene darkens, each region holds from its start to its end, and the
++ * data of the two regions either side of a gap between them blends across it.
++ */
++struct LuxRange {
++	double start;
++	double end;
++};
++
++/* The two regions to blend, and the weight of the second */
++struct LuxBlend {
++	unsigned int lo;
++	unsigned int hi;
++	double weight;
++};
++
++/* Ranges are sorted by start, as the converter writes them */
++inline LuxBlend luxBlend(const std::vector<LuxRange> &ranges, double lux)
++{
++	const unsigned int last = ranges.size() - 1;
++
++	for (unsigned int i = 0; i <= last; i++) {
++		if (lux < ranges[i].start) {
++			if (i == 0)
++				return { 0, 0, 0.0 };
++			/* In the gap below this region */
++			const double from = ranges[i - 1].end;
++			const double span = ranges[i].start - from;
++			return { i - 1, i, span > 0 ? std::clamp((lux - from) / span, 0.0, 1.0) : 1.0 };
++		}
++		if (lux <= ranges[i].end)
++			return { i, i, 0.0 };
++	}
++
++	return { last, last, 0.0 };
++}
++
++} /* namespace ipa::softisp */
++
++} /* namespace libcamera */

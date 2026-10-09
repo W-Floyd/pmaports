@@ -1,0 +1,198 @@
+From a9dde747093ae9dee9fdb341a12d06843520e764 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 03:51:33 +0000
+Subject: software_isp: debayer_egl: Run the CPU statistics on their own thread
+
+The statistics of a frame take about 75 ms on this SoC's CPUs (9 ms to map
+the buffer and 66 ms to read it), once in four frames, while the GPU work
+that they ran beside takes 13 to 26 ms and the frames' period is 33 ms.
+Four frames then took (3 * 26 + 90) / 4 = 43 ms on average with the cells
+path, and (3 * 13 + 80) / 4 = 30 ms without it: over the period or at it,
+so frames queued and reached the application 150 ms late, which a
+synchronised video sink such as Snapshot's drops as late, leaving a preview
+at about 1 fps although the camera ran at 25 fps.
+
+Run the statistics, and the end of every other frame's, as jobs of a
+thread of their own, in the order of the frames, as the statistics buffer
+the IPA reads holds one frame's at a time. The thread returns each frame's
+input buffer when it is done with it; the output buffer is handed over as
+soon as the GPU is done. At the sink, buffers are now 1 ms late with the
+cells path, against 150 ms.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 71 ++++++++++++++++++++--
+ src/libcamera/software_isp/debayer_egl.h   | 36 +++++++++++
+ 2 files changed, 101 insertions(+), 6 deletions(-)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 095cc79be..91e70a24e 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -943,9 +943,16 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 
+ 	metadata.planes()[0].bytesused = output->planes()[0].length;
+ 
+-	/* Calculate stats for the whole frame */
++	/*
++	 * The statistics of the frame, once in a few, and the end of every
++	 * frame's, on their own thread and in order (see StatsThread). That
++	 * thread returns the input buffer when it is done with it.
++	 */
+ 	if (frame % SwStatsCpu::kStatPerNumFrames) {
+-		stats_->finishFrame(frame, 0);
++		statsThread_.post([this, frame, input] {
++			stats_->finishFrame(frame, 0);
++			inputBufferReady.emit(input);
++		});
+ 	} else {
+ 		if (!inMapped) {
+ 			/*
+@@ -957,16 +964,23 @@ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output
+ 			inDmaSyncer.emplace(input->planes()[0].fd, DmaSyncer::SyncType::Read);
+ 			inMapped.emplace(input, MappedFrameBuffer::MapFlag::Read);
+ 		}
+-		stats_->setLensShading(params);
+-		stats_->processFrame(frame, 0, inMapped.value());
++
++		/* A job's callable is copied, and the mapping is not */
++		auto mapped = std::make_shared<std::optional<MappedFrameBuffer>>(std::move(inMapped));
++		auto syncer = std::make_shared<std::optional<DmaSyncer>>(std::move(inDmaSyncer));
++		statsThread_.post([this, frame, input, params, mapped, syncer] {
++			stats_->setLensShading(params);
++			stats_->processFrame(frame, 0, mapped->value());
++			syncer->reset();
++			mapped->reset();
++			inputBufferReady.emit(input);
++		});
+ 	}
+-	inDmaSyncer.reset();
+ 
+ 	egl_.syncOutput();
+ 	bench_.finishFrame();
+ 
+ 	outputBufferReady.emit(output);
+-	inputBufferReady.emit(input);
+ 
+ 	return;
+ 
+@@ -992,11 +1006,56 @@ int DebayerEGL::start()
+ 	if (initBayerShaders(inputPixelFormat_, outputPixelFormat_))
+ 		return -EINVAL;
+ 
++	statsThread_.start();
++
+ 	return 0;
+ }
+ 
++/* Run the jobs posted, in order, until finish() is called and none are left */
++void DebayerEGL::StatsThread::run()
++{
++	std::unique_lock<std::mutex> lock(mutex_);
++
++	for (;;) {
++		condition_.wait(lock, [this] { return stop_ || !jobs_.empty(); });
++		if (jobs_.empty())
++			return;
++
++		std::function<void()> job = std::move(jobs_.front());
++		jobs_.pop_front();
++		lock.unlock();
++		job();
++		lock.lock();
++	}
++}
++
++void DebayerEGL::StatsThread::post(std::function<void()> job)
++{
++	{
++		std::lock_guard<std::mutex> lock(mutex_);
++		jobs_.push_back(std::move(job));
++	}
++	condition_.notify_one();
++}
++
++/* Do the jobs that are posted, and stop the thread */
++void DebayerEGL::StatsThread::finish()
++{
++	{
++		std::lock_guard<std::mutex> lock(mutex_);
++		stop_ = true;
++	}
++	condition_.notify_all();
++	wait();
++
++	std::lock_guard<std::mutex> lock(mutex_);
++	stop_ = false;
++}
++
+ void DebayerEGL::stop()
+ {
++	statsThread_.finish();
++
+ 	eglImageOutCache_.clear();
+ 	eglImageInCache_.clear();
+ 	toneLut_.reset();
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 1e564746e..9c7a58227 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -10,8 +10,11 @@
+ #pragma once
+ 
+ #include <array>
++#include <condition_variable>
+ #include <deque>
++#include <functional>
+ #include <memory>
++#include <mutex>
+ #include <stdint.h>
+ #include <string>
+ #include <tuple>
+@@ -21,6 +24,7 @@
+ #define EGL_EGLEXT_PROTOTYPES
+ #include <libcamera/base/object.h>
+ #include <libcamera/base/span.h>
++#include <libcamera/base/thread.h>
+ 
+ #include "libcamera/internal/egl.h"
+ #include "libcamera/internal/mapped_framebuffer.h"
+@@ -161,6 +165,38 @@ private:
+ 	std::unique_ptr<eGLImage> cells_;
+ 	Size cellsSize_;
+ 
++	/*
++	 * The CPU statistics of a frame take longer (about 75 ms on this
++	 * SoC's CPUs) than the frames' period, once in several frames, which
++	 * the GPU work cannot hide: they run on a thread of their own, in the
++	 * order of the frames, as every frame's statistics are due in order
++	 * (the shared statistics buffer holds one at a time), and leave the
++	 * thread of the GPU work free for the next frames. A frame's input
++	 * buffer is returned once its job is done.
++	 */
++	class StatsThread : public Thread
++	{
++	public:
++		StatsThread()
++			: Thread("SWIspStats")
++		{
++		}
++
++		void post(std::function<void()> job);
++		void finish();
++
++	protected:
++		void run() override;
++
++	private:
++		std::mutex mutex_;
++		std::condition_variable condition_;
++		std::deque<std::function<void()>> jobs_;
++		bool stop_ = false;
++	};
++
++	StatsThread statsThread_;
++
+ 	/* The main program's variables for the cells */
+ 	GLint cellTexUniform_;
+ 	GLint cellSizeUniform_;

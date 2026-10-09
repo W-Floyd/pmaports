@@ -1,0 +1,69 @@
+From 0b24e46431eb2ffbddede56c1e870352bd89e29d Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 16:11:13 +0000
+Subject: ipa: softisp: awb: Average the illuminant estimate over frames
+
+A frame's own estimate of the illuminant moves with what is in it, and
+the gains that followed it made the picture pulse whenever something
+moved. Average it in the log of the red and blue ratios over the
+statistics frames: the first few as a plain mean, so that it settles at
+the start, then by a weight of 0.12, a time constant of about a second
+at the statistics' rate.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/softisp/algorithms/awb.cpp | 21 +++++++++++++++++++++
+ src/ipa/softisp/algorithms/awb.h   |  8 ++++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/src/ipa/softisp/algorithms/awb.cpp b/src/ipa/softisp/algorithms/awb.cpp
+index fa043ba90..b2f3ebee7 100644
+--- a/src/ipa/softisp/algorithms/awb.cpp
++++ b/src/ipa/softisp/algorithms/awb.cpp
+@@ -424,6 +424,27 @@ void Awb::process(IPAContext &context,
+ 			}
+ 		}
+ 
++		/*
++		 * Averaged over the frames' statistics, in the log of the ratios: the
++		 * first few ones as a plain mean, so that it settles at the start,
++		 * then by a weight of kSmoothing, a time constant of a second or so
++		 * at the statistics' rate (every fourth frame). A change of the light
++		 * is followed, at that pace; what moves in the picture is not.
++		 */
++		{
++			constexpr double kSmoothing = 0.12;
++			const Vector<double, 2> logNow{ { std::log(std::max(greyWorld[0], 1e-3)),
++							  std::log(std::max(greyWorld[1], 1e-3)) } };
++			if (smoothedCount_ == 0) {
++				smoothed_ = logNow;
++			} else {
++				const double weight = std::max(kSmoothing, 1.0 / (smoothedCount_ + 1));
++				smoothed_ = smoothed_ + (logNow - smoothed_) * weight;
++			}
++			smoothedCount_++;
++			greyWorld = { { std::exp(smoothed_[0]), std::exp(smoothed_[1]) } };
++		}
++
+ 		const LocusFit fit = fitLocus(greyWorld);
+ 		context.activeState.awb.temperatureK = fit.ct;
+ 		const Vector<double, 2> adjust = gainAdjust(fit.ratios, fit.ct);
+diff --git a/src/ipa/softisp/algorithms/awb.h b/src/ipa/softisp/algorithms/awb.h
+index 7c71b460f..667d9c848 100644
+--- a/src/ipa/softisp/algorithms/awb.h
++++ b/src/ipa/softisp/algorithms/awb.h
+@@ -75,6 +75,14 @@ private:
+ 
+ 	/* The learned illuminant estimate, if the tuning names one that loads */
+ 	std::unique_ptr<AwbModel> model_;
++
++	/*
++	 * The estimate of the illuminant (red and blue over green), averaged over
++	 * the frames' statistics: a frame's own moves with what is in it, and the
++	 * gains that followed it made the picture pulse whenever something moved.
++	 */
++	Vector<double, 2> smoothed_;
++	unsigned int smoothedCount_ = 0;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */

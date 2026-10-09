@@ -1,14 +1,18 @@
-From e980fa653af37c4e2e0c618a039d25238ff21d11 Mon Sep 17 00:00:00 2001
+From dea58c30164811d3d4287093d4f9df48b350c8dd Mon Sep 17 00:00:00 2001
 From: Hans de Goede <johannes.goede@oss.qualcomm.com>
 Date: Tue, 19 May 2026 18:02:15 +0200
 Subject: libcamera: V4L2Subdevice: Add whence argument to [get|set]Selection()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Add a whence argument to V4L2Subdevice::[get|set]Selection() allowing
 callers to specify that the operation should be applied to the try state,
 rather then always applying it to the active state.
 
+Reviewed-by: Kieran Bingham <kieran.bingham@ideasonboard.com>
+Reviewed-by: Barnabás Pőcze <barnabas.pocze@ideasonboard.com>
 Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
-(cherry picked from commit 69c4248b285622530b4416580f6afbefac055d6d)
 ---
  include/libcamera/internal/v4l2_subdevice.h | 14 ++++++++------
  src/libcamera/v4l2_subdevice.cpp            | 20 ++++++++++++++------

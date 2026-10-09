@@ -1,0 +1,122 @@
+From 2dd20232036d8f94b0fca5b913aba3627a90920b Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 17:07:19 +0000
+Subject: pipeline: camss: Do not hold a frame back for its metadata
+
+A request completed only when its output buffer was ready and the
+metadata of its frame had been processed. The metadata comes from the
+IPA's processStats(), which runs after the CPU statistics thread has
+finished the frame, in order, and the statistics of every fourth frame
+take 41 to 49 ms: the frame with them completed 40 ms after its image
+was ready, the next one 14 ms, and the application saw the preview that
+much later (a mean of 14 ms, and 77 ms from the frame's timestamp for
+one frame in four).
+
+Complete a frame with the metadata of the last one that has some once
+its output is ready, and let its own follow without anybody waiting for
+it. The first frames, with no metadata yet, still wait. The metadata
+of a frame that has gone is no longer a fatal error.
+
+On the rear camera of a Moto G Play (2024) at 1920x1080, 30 fps, the
+time from a frame's timestamp to its request completing went from a
+median of 37 ms, mean 48 ms, p95 95 ms and maximum 125 ms to 33, 34,
+46 and 57 ms.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp        | 25 ++++++++++++++++++-
+ src/libcamera/pipeline/camss/camss_frames.cpp | 11 ++++++++
+ src/libcamera/pipeline/camss/camss_frames.h   |  1 +
+ 3 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index 96e765064..d124f8322 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -82,6 +82,14 @@ public:
+ 	std::unique_ptr<DelayedControls> delayedCtrls_;
+ 	CamssFrames frameInfos_;
+ 
++	/*
++	 * The metadata of the last frame whose statistics were processed: a
++	 * frame whose output is ready before its own metadata (those come
++	 * after the statistics, which take several frames' time) completes
++	 * with this one, rather than hold the application back by that time.
++	 */
++	std::optional<ControlList> lastMetadata_;
++
+ 	/* The last focus position sent to the lens, for parking it at stop. */
+ 	std::optional<int32_t> lastFocusPosition_;
+ 
+@@ -438,6 +446,7 @@ int PipelineHandlerCamss::start(Camera *camera, [[maybe_unused]] const ControlLi
+ 		return ret;
+ 
+ 	data->delayedCtrls_->reset();
++	data->lastMetadata_.reset();
+ 
+ 	/* Before the image, so that the sensor's streams start together. */
+ 	data->startPdaf();
+@@ -789,7 +798,10 @@ void CamssCameraData::setSensorControls(const ControlList &sensorControls,
+ 
+ void CamssCameraData::metadataReady(unsigned int id, const ControlList &metadata)
+ {
+-	CamssFrames::Info *info = frameInfos_.find(id);
++	lastMetadata_ = metadata;
++
++	/* The frame may have completed already, with the last metadata */
++	CamssFrames::Info *info = frameInfos_.tryFind(id);
+ 	if (!info)
+ 		return;
+ 
+@@ -821,6 +833,17 @@ void CamssCameraData::ispOutputBufferReady(FrameBuffer *buffer)
+ 	/* tryComplete(info) will free info on success! */
+ 	Request *request = info->request;
+ 
++	/*
++	 * Do not wait for the frame's own metadata, which follows its
++	 * statistics (several frames' time on the CPU) and so held the frame
++	 * back after its image was ready: complete it with the last that
++	 * there was. The first frames, before there is any, still wait.
++	 */
++	if (!info->metadataProcessed && lastMetadata_) {
++		request->_d()->metadata().merge(*lastMetadata_);
++		info->metadataProcessed = true;
++	}
++
+ 	pipe()->completeBuffer(request, buffer);
+ 	if (frameInfos_.tryComplete(info))
+ 		pipe()->completeRequest(request);
+diff --git a/src/libcamera/pipeline/camss/camss_frames.cpp b/src/libcamera/pipeline/camss/camss_frames.cpp
+index a33af4a1f..3b256ffa3 100644
+--- a/src/libcamera/pipeline/camss/camss_frames.cpp
++++ b/src/libcamera/pipeline/camss/camss_frames.cpp
+@@ -145,6 +145,17 @@ CamssFrames::Info *CamssFrames::find(unsigned int id)
+ 	return nullptr;
+ }
+ 
++/*
++ * Like find(), for a frame that may be gone: the metadata of a frame can
++ * follow its completion.
++ */
++CamssFrames::Info *CamssFrames::tryFind(unsigned int id)
++{
++	const auto &itInfo = frameInfo_.find(id);
++
++	return itInfo != frameInfo_.end() ? &itInfo->second : nullptr;
++}
++
+ CamssFrames::Info *CamssFrames::find(FrameBuffer *buffer)
+ {
+ 	for (auto &[id, info] : frameInfo_) {
+diff --git a/src/libcamera/pipeline/camss/camss_frames.h b/src/libcamera/pipeline/camss/camss_frames.h
+index ca9c11243..aa9a49af8 100644
+--- a/src/libcamera/pipeline/camss/camss_frames.h
++++ b/src/libcamera/pipeline/camss/camss_frames.h
+@@ -54,6 +54,7 @@ public:
+ 	std::vector<Request *> requests() const;
+ 
+ 	Info *find(unsigned int id);
++	Info *tryFind(unsigned int id);
+ 	Info *find(FrameBuffer *buffer);
+ 
+ 	Signal<> bufferAvailable;

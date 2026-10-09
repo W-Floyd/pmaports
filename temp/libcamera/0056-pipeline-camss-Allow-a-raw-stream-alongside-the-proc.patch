@@ -1,0 +1,78 @@
+From dd17b7eba599bb6f4e44f3b335d9d054d5884f0c Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 19:55:27 +0000
+Subject: pipeline: camss: Allow a raw stream alongside the processed one
+
+A configuration with a raw stream was always Invalid: the CSI side
+matched the raw stream's size, the sensor's own, as if it were the
+size the ISP is to output, adding the ISP's debayering margins, which
+no sensor mode is large enough for ("No supported format or size
+found").
+
+Take the margins into account only when the raw size is derived from
+the processed stream, not when a raw stream is asked for.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp     |  6 +++++-
+ src/libcamera/pipeline/camss/camss_csi.cpp | 11 +++++++++--
+ src/libcamera/pipeline/camss/camss_csi.h   |  3 ++-
+ 3 files changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index f06a528f3..c5adfe6cb 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -213,7 +213,11 @@ CameraConfiguration::Status CamssCameraConfiguration::validate()
+ 		rawConfig.bufferCount = processedConfig.bufferCount;
+ 	}
+ 
+-	csiConfig_ = data_->csi_->validate(rawConfig);
++	/*
++	 * A raw stream asked for names the sensor's own size; one derived from
++	 * the processed stream needs the ISP's margins on top.
++	 */
++	csiConfig_ = data_->csi_->validate(rawConfig, !rawCount);
+ 	if (!csiConfig_.pixelFormat.isValid())
+ 		return Invalid;
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_csi.cpp b/src/libcamera/pipeline/camss/camss_csi.cpp
+index ef32d3e23..0910abe5c 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.cpp
++++ b/src/libcamera/pipeline/camss/camss_csi.cpp
+@@ -294,12 +294,19 @@ StreamConfiguration CamssCsiCamera::generateConfiguration(void) const
+ 	return cfg;
+ }
+ 
+-StreamConfiguration CamssCsiCamera::validate(const StreamConfiguration &req) const
++/*
++ * The capture configuration closest to req. With useIspMargins, req is the
++ * size the ISP is to output and the sensor must give its debayering margins
++ * on top; without, req is the raw stream itself, the sensor's own size.
++ */
++StreamConfiguration CamssCsiCamera::validate(const StreamConfiguration &req,
++					     bool useIspMargins) const
+ {
+ 	StreamConfiguration cfg;
+ 
+ 	/* Query the sensor static information for closest match. */
+-	V4L2SubdeviceFormat sensorFormat = getSensorFormat(req.size, req.pixelFormat, true);
++	V4L2SubdeviceFormat sensorFormat = getSensorFormat(req.size, req.pixelFormat,
++							   useIspMargins);
+ 
+ 	if (tryFormat(sensorFormat, cfg))
+ 		return {};
+diff --git a/src/libcamera/pipeline/camss/camss_csi.h b/src/libcamera/pipeline/camss/camss_csi.h
+index 33288893c..4bfc09b0d 100644
+--- a/src/libcamera/pipeline/camss/camss_csi.h
++++ b/src/libcamera/pipeline/camss/camss_csi.h
+@@ -42,7 +42,8 @@ public:
+ 	CamssCsiCamera();
+ 
+ 	StreamConfiguration generateConfiguration(void) const;
+-	StreamConfiguration validate(const StreamConfiguration &req) const;
++	StreamConfiguration validate(const StreamConfiguration &req,
++				     bool useIspMargins = true) const;
+ 	int configure(const StreamConfiguration &cfg, const Transform &transform);
+ 	int exportBuffers(unsigned int count,
+ 			  std::vector<std::unique_ptr<FrameBuffer>> *buffers);

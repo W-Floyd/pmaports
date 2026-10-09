@@ -1,0 +1,285 @@
+From b6b08b05d8aceb383e4046ac720e09347edf16b3 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 08:38:41 +0000
+Subject: ipa: soft: adjust: Take the DRC tone mapping from the tuning file
+
+When exposure is held below target to keep highlights from clipping,
+the tone curve scales the rest back up with x * g / (1 + (g - 1) * x),
+which lifts shadows and highlights alike by the DRC gain's share. The
+vendor tunings shape that differently: Qualcomm's TMC 1.2 builds its
+curve from tone anchors in the tuning, lifting shadows by the DRC gain
+and a dark boost more, mid-tones by the DRC gain, and leaving the
+highlights alone, and does so even at a DRC gain of 1.
+
+Add a drcCurve to Adjust's tuning, anchors at DRC gains, from which
+the curve for each frame's DRC gain is built as TMC 1.2 does (CamX's
+tmc12interpolation.cpp, anchor knee points and a quartic Bezier curve
+through them), and use it in place of the generic one. A share below
+1 applies part of it, for pipelines that leave the rest to local tone
+mapping.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/softisp/algorithms/adjust.cpp | 143 +++++++++++++++++++++++++-
+ src/ipa/softisp/algorithms/adjust.h   |  43 +++++++-
+ 2 files changed, 180 insertions(+), 6 deletions(-)
+
+diff --git a/src/ipa/softisp/algorithms/adjust.cpp b/src/ipa/softisp/algorithms/adjust.cpp
+index 14312912d..87803148c 100644
+--- a/src/ipa/softisp/algorithms/adjust.cpp
++++ b/src/ipa/softisp/algorithms/adjust.cpp
+@@ -27,32 +27,158 @@ constexpr float kDefaultSaturation = 1.0f;
+ 
+ LOG_DEFINE_CATEGORY(IPASoftIspAdjust)
+ 
++/*
++ * The DRC tone mapping of Qualcomm's TMC 1.2 (CamX tmc12interpolation.cpp),
++ * from its anchor knee points: for a DRC gain g, five knees
++ *
++ *   (0, 0), (dy / (g r), dy), (mid / g, mid), (bright, bright), (1, 1)
++ *
++ * with r = 1 + darkBoost and dy = min(mid / r, dark), a straight gain of g r
++ * up to the second knee and a quartic Bezier curve through the rest: the
++ * shadows lifted by g and a little more, the mid-tones by g, the highlights
++ * left alone. The tuning data holds anchors at several DRC gains, which
++ * are interpolated:
++ *
++ *   drcCurve:
++ *     maxRatio: 256        # the largest gain, tone_max_ratio
++ *     share: 1.0           # optional: the share of the curve's gain (in
++ *                          # log) applied here, the rest left to local
++ *                          # tone mapping
++ *     anchors:
++ *       - drcGain: 1.0
++ *         tones: [ 0.30, 0.30, 0.87 ]  # dark, mid, bright
++ *         darkBoost: 0.2
++ */
++int DrcCurve::read(const ValueNode &tuningData)
++{
++	maxRatio_ = tuningData["maxRatio"].get<double>(16.0);
++	share_ = std::clamp(tuningData["share"].get<double>(1.0), 0.0, 1.0);
++
++	for (const ValueNode &node : tuningData["anchors"].asList()) {
++		auto g = node["drcGain"].get<double>();
++		auto tones = node["tones"].get<std::vector<double>>();
++		if (!g || !tones || tones->size() != 3) {
++			LOG(IPASoftIspAdjust, Error) << "Invalid drcCurve anchors";
++			return -EINVAL;
++		}
++		anchors_.push_back({ *g, (*tones)[0], (*tones)[1], (*tones)[2],
++				     node["darkBoost"].get<double>(0.0) });
++	}
++	std::sort(anchors_.begin(), anchors_.end(),
++		  [](const Anchors &a, const Anchors &b) { return a.drcGain < b.drcGain; });
++
++	if (anchors_.empty()) {
++		LOG(IPASoftIspAdjust, Error) << "drcCurve has no anchors";
++		return -EINVAL;
++	}
++	return 0;
++}
++
++DrcCurve::Anchors DrcCurve::at(double drcGain) const
++{
++	if (drcGain <= anchors_.front().drcGain)
++		return anchors_.front();
++	if (drcGain >= anchors_.back().drcGain)
++		return anchors_.back();
++
++	auto hi = std::upper_bound(anchors_.begin(), anchors_.end(), drcGain,
++				   [](double g, const Anchors &a) { return g < a.drcGain; });
++	const Anchors &b = *hi;
++	const Anchors &a = *(hi - 1);
++	const double t = (drcGain - a.drcGain) / (b.drcGain - a.drcGain);
++	auto mix = [t](double u, double v) { return u + (v - u) * t; };
++	return { drcGain, mix(a.dark, b.dark), mix(a.mid, b.mid),
++		 mix(a.bright, b.bright), mix(a.darkBoost, b.darkBoost) };
++}
++
++DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain)
++	: share_(curve.share_)
++{
++	/* TMC 1.2 takes the gain in steps of 3%, up to 1.03^94 (about 16) */
++	constexpr double kStep = 1.03;
++	constexpr unsigned int kMaxIndex = 94;
++	const unsigned int index = std::min<unsigned int>(
++		std::lround(std::log(std::max(drcGain, 1.0)) / std::log(kStep)), kMaxIndex);
++	const double g = std::pow(kStep, index);
++
++	const Anchors a = curve.at(drcGain);
++	const double ratio = std::max(std::clamp(1.0 + a.darkBoost, 1.0, 16.0), 1.0001);
++	const double gainDark = std::min(g * ratio, curve.maxRatio_);
++	const double darkY = std::min(a.mid / ratio, a.dark);
++
++	kneeX_ = { 0.0, darkY / gainDark, a.mid / g, a.bright, 1.0 };
++	kneeY_ = { 0.0, darkY, a.mid, a.bright, 1.0 };
++	linearGain_ = kneeY_[1] / kneeX_[1];
++
++	/* The Bezier curve of the knees, spanning the second to the last */
++	auto bezier = [](const std::array<double, 5> &k, double t) {
++		const double s = 1.0 - t;
++		const double b = k[0] * s * s * s * s + k[1] * 4 * s * s * s * t +
++				 k[2] * 6 * s * s * t * t + k[3] * 4 * s * t * t * t +
++				 k[4] * t * t * t * t;
++		return k[1] + (k[4] - k[1]) * b;
++	};
++	for (unsigned int i = 0; i < kBezierPoints; i++) {
++		const double t = static_cast<double>(i) / (kBezierPoints - 1);
++		bezierX_[i] = bezier(kneeX_, t);
++		bezierY_[i] = bezier(kneeY_, t);
++	}
++}
++
++double DrcCurve::Mapping::operator()(double x) const
++{
++	if (x <= 0.0)
++		return 0.0;
++
++	double y = 0.0;
++	if (x <= kneeX_[1]) {
++		y = x * linearGain_;
++	} else {
++		for (unsigned int i = 1; i < kBezierPoints; i++) {
++			if (x <= bezierX_[i]) {
++				y = ((bezierX_[i] - x) * bezierY_[i - 1] +
++				     (x - bezierX_[i - 1]) * bezierY_[i]) /
++				    (bezierX_[i] - bezierX_[i - 1]);
++				break;
++			}
++		}
++	}
++
++	const double gain = std::clamp(std::clamp(y, 0.0, 1.0) / x, 1.0, linearGain_);
++	return x * std::pow(gain, share_);
++}
++
+ /**
+  * \brief Build the debayer's tone lookup table
+  * \param[in] gamma The display gamma, e.g. 2.2, used when \a curve is null
+  * \param[in] contrastExp Exponent of the contrast S-curve, 1 for none
+  * \param[in] curve A tone curve mapping [0, 1] to [0, 1], or nullptr
+  * \param[in] drcGain The dynamic range compression gain, 1 for none
++ * \param[in] drc The tuning's DRC tone mapping, or nullptr
+  *
+  * Dynamic range compression comes first, on the linear input: when exposure
+  * has been reduced by \a drcGain to keep highlights from clipping, it scales
+  * the shadows and mid-tones back up by that much while leaving white at
+- * white, with x * g / (1 + (g - 1) * x). The contrast S-curve follows, then
+- * either \a curve or the gamma encoding x^(1/gamma).
++ * white, with \a drc's curve for that gain or else x * g / (1 + (g - 1) * x).
++ * The contrast S-curve follows, then either \a curve or the gamma encoding
++ * x^(1/gamma).
+  *
+  * \return The tone lookup table
+  */
+ ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
+-		float drcGain)
++		float drcGain, const DrcCurve *drc)
+ {
+ 	ToneLut lut;
+ 	const double last = lut.size() - 1.0;
+ 	const double g = std::max(drcGain, 1.0f);
++	std::optional<DrcCurve::Mapping> mapping;
++	if (drc && !drc->empty())
++		mapping.emplace(*drc, g);
+ 
+ 	for (unsigned int i = 0; i < lut.size(); i++) {
+ 		double x = i / last;
+ 
+-		x = x * g / (1.0 + (g - 1.0) * x);
++		x = mapping ? (*mapping)(x) : x * g / (1.0 + (g - 1.0) * x);
+ 
+ 		/* Simple S-curve around mid-grey */
+ 		if (x < 0.5)
+@@ -108,6 +234,12 @@ int Adjust::init(IPAContext &context, const ValueNode &tuningData)
+ 			<< curve_.size() << " points)";
+ 	}
+ 
++	if (tuningData.contains("drcCurve")) {
++		int ret = drcCurve_.read(tuningData["drcCurve"]);
++		if (ret < 0)
++			return ret;
++	}
++
+ 	if (tuningData.contains("chroma")) {
+ 		ipa::Interpolator<Vector<double, 4>> chroma;
+ 		int ret = chroma.readYaml(tuningData["chroma"], "ct", "scale");
+@@ -256,7 +388,8 @@ void Adjust::prepare(IPAContext &context,
+ 
+ 	if (!lutValid_ || gamma != lutGamma_ || contrastExp != lutContrastExp_ ||
+ 	    fromCurve != lutFromCurve_ || drc != lutDrc_) {
+-		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr, drc);
++		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr, drc,
++			       &drcCurve_);
+ 		lutGamma_ = gamma;
+ 		lutContrastExp_ = contrastExp;
+ 		lutFromCurve_ = fromCurve;
+diff --git a/src/ipa/softisp/algorithms/adjust.h b/src/ipa/softisp/algorithms/adjust.h
+index b58b75b02..ac2ad7835 100644
+--- a/src/ipa/softisp/algorithms/adjust.h
++++ b/src/ipa/softisp/algorithms/adjust.h
+@@ -10,6 +10,7 @@
+ #include <array>
+ #include <optional>
+ #include <stdint.h>
++#include <vector>
+ 
+ #include "libcamera/internal/matrix.h"
+ #include "libcamera/internal/vector.h"
+@@ -28,8 +29,45 @@ constexpr float kDefaultGamma = 2.2f;
+ 
+ using ToneLut = std::array<uint8_t, DebayerParams::kToneLutSize>;
+ 
++class DrcCurve
++{
++public:
++	/* The tuning's anchors at one DRC gain */
++	struct Anchors {
++		double drcGain;
++		double dark, mid, bright;
++		double darkBoost;
++	};
++
++	/* The curve for one DRC gain: linear light in, linear light out */
++	class Mapping
++	{
++	public:
++		Mapping(const DrcCurve &curve, double drcGain);
++		double operator()(double x) const;
++
++	private:
++		static constexpr unsigned int kBezierPoints = 1000;
++
++		std::array<double, 5> kneeX_, kneeY_;
++		double linearGain_;
++		double share_;
++		std::array<double, kBezierPoints> bezierX_, bezierY_;
++	};
++
++	int read(const ValueNode &tuningData);
++	bool empty() const { return anchors_.empty(); }
++
++private:
++	Anchors at(double drcGain) const;
++
++	std::vector<Anchors> anchors_;
++	double maxRatio_ = 16.0;
++	double share_ = 1.0;
++};
++
+ ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
+-		float drcGain = 1.0f);
++		float drcGain = 1.0f, const DrcCurve *drc = nullptr);
+ 
+ class Adjust : public Algorithm
+ {
+@@ -60,6 +98,9 @@ private:
+ 	/* Tone curve from the tuning file, used unless Gamma is set. */
+ 	ipa::Pwl curve_;
+ 
++	/* The DRC tone mapping from the tuning file, if any */
++	DrcCurve drcCurve_;
++
+ 	/* Chroma scales and shears by colour temperature, from the tuning file */
+ 	std::optional<ipa::Interpolator<Vector<double, 4>>> chroma_;
+ 	std::optional<ipa::Interpolator<Vector<double, 4>>> chromaShear_;

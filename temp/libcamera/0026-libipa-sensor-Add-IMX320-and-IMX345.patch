@@ -1,0 +1,107 @@
+From 67cfb8b9b701f9d21eb6e8826dcd88db2fcd56f4 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 4 Sep 2026 00:00:00 +0000
+Subject: libipa, sensor: Add IMX320 and IMX345
+
+The Snapdragon Galaxy S9 uses a Sony IMX320 front and IMX345 rear sensor.
+Without a helper the SoftISP cannot convert between gain code and gain, so
+its AGC never raises the analogue gain and every frame comes out black.
+
+Both use the usual Sony gain = 1024 / (1024 - code) model, the same as the
+IMX477 and IMX708, and their black level was measured at 64 in 10 bits.
+
+Neither sensor is in the properties database, so libcamera warns that it is
+"assuming unverified defaults" and uses a gain delay of one frame. Every
+other Sony sensor in the database except the imx219 and imx283 applies gain
+two frames later, and assuming one frame makes the AGC correct against a
+frame that has not taken the previous correction yet -- the loop then
+overshoots on a scene change and clips.
+
+Pixel pitches are from the Galaxy S9, which pairs a 1.4um rear IMX345 with a
+1.22um front IMX320. The delays follow the Sony family convention rather than
+individual measurement.
+---
+ src/ipa/libipa/camera_sensor_helper.cpp       | 24 +++++++++++++++++++
+ .../sensor/camera_sensor_properties.cpp       | 20 ++++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 359040ec7..4c2c5d0be 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -599,6 +599,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx296", CameraSensorHelperImx296)
+ 
++class CameraSensorHelperImx320 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx320()
++	{
++		/* Measured on hardware: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx320", CameraSensorHelperImx320)
++
+ class CameraSensorHelperImx327 : public CameraSensorHelperImx290
+ {
+ };
+@@ -616,6 +628,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx335", CameraSensorHelperImx335)
+ 
++class CameraSensorHelperImx345 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx345()
++	{
++		/* Measured on hardware: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx345", CameraSensorHelperImx345)
++
+ class CameraSensorHelperImx355 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 20cfd0bc1..1d97f30e3 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -256,6 +256,16 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			.testPatternModes = {},
+ 			.sensorDelays = { },
+ 		} },
++		{ "imx320", {
++			.unitCellSize = { 1220, 1220 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "imx335", {
+ 			.unitCellSize = { 2000, 2000 },
+ 			.testPatternModes = {
+@@ -265,6 +275,16 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "imx345", {
++			.unitCellSize = { 1400, 1400 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "imx355", {
+ 			.unitCellSize = { 1120, 1120 },
+ 			.testPatternModes = {

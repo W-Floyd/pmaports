@@ -1,0 +1,240 @@
+From 61ccb436837488833fb52d219c1fd83333cdc372 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 19:01:32 +0000
+Subject: software_isp: Start the GPU debayer when the camera is configured
+
+The EGL context, the shaders' compilation and the first frame's
+texture setup ran on the first frame's request, after the sensor had
+started streaming, so the first frames waited for them. Start the
+debayer's worker thread, and with it the context and shaders, at the
+end of configure() when the debayer can (startsAhead()), and keep the
+configuration so that a configure with the same one does not restart it.
+start() then only finds it started, and stop() tears it down through
+stopWorker(), which also runs when the object is destroyed.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/software_isp.h      | 23 +++++++
+ src/libcamera/software_isp/debayer.h          |  6 ++
+ src/libcamera/software_isp/debayer_egl.cpp    | 16 +++++
+ src/libcamera/software_isp/debayer_egl.h      |  5 ++
+ src/libcamera/software_isp/software_isp.cpp   | 65 ++++++++++++++++---
+ 5 files changed, 106 insertions(+), 9 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 311db3542..7e5eddd12 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -11,6 +11,7 @@
+ #include <functional>
+ #include <map>
+ #include <memory>
++#include <optional>
+ #include <stdint.h>
+ #include <string>
+ #include <tuple>
+@@ -106,6 +107,28 @@ private:
+ 	void statsReady(uint32_t frame, uint32_t bufferId);
+ 	void inputReady(FrameBuffer *input);
+ 	void outputReady(FrameBuffer *output);
++	void stopWorker();
++
++	/*
++	 * The configuration the debayer was configured, and started ahead,
++	 * with: the same one again leaves it alone.
++	 */
++	struct DebayerConfig {
++		PixelFormat inputFormat;
++		Size inputSize;
++		unsigned int inputStride;
++		PixelFormat outputFormat;
++		Size outputSize;
++		unsigned int outputStride;
++
++		bool operator==(const DebayerConfig &o) const
++		{
++			return inputFormat == o.inputFormat && inputSize == o.inputSize &&
++			       inputStride == o.inputStride && outputFormat == o.outputFormat &&
++			       outputSize == o.outputSize && outputStride == o.outputStride;
++		}
++	};
++	std::optional<DebayerConfig> debayerConfig_;
+ 	std::unique_ptr<Debayer> debayer_;
+ 	Thread ispWorkerThread_;
+ 	SharedMemObject<DebayerParams> sharedParams_;
+diff --git a/src/libcamera/software_isp/debayer.h b/src/libcamera/software_isp/debayer.h
+index c5167e9fa..4d11b4461 100644
+--- a/src/libcamera/software_isp/debayer.h
++++ b/src/libcamera/software_isp/debayer.h
+@@ -51,6 +51,12 @@ public:
+ 	virtual void process(uint32_t frame, FrameBuffer *input, FrameBuffer *output, const DebayerParams &params) = 0;
+ 	virtual int start() { return 0; }
+ 	virtual void stop() {}
++	/*
++	 * Whether start() takes long enough to be asked for when the camera is
++	 * configured, and then again, for the result, when it starts: it must
++	 * be safe to call twice.
++	 */
++	virtual bool startsAhead() const { return false; }
+ 
+ 	virtual SizeRange sizes(PixelFormat inputFormat, const Size &inputSize) = 0;
+ 
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index cd560e298..7eab99c4a 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -1108,7 +1108,22 @@ void DebayerEGL::timerCollect()
+ 	}
+ }
+ 
++/*
++ * Started ahead of the camera, when it is configured, so that the context and
++ * the shaders are ready by the time its first frame is: what the start that
++ * comes with the camera's gets is the result of that one.
++ */
+ int DebayerEGL::start()
++{
++	if (!started_) {
++		startRet_ = startContext();
++		started_ = true;
++	}
++
++	return startRet_;
++}
++
++int DebayerEGL::startContext()
+ {
+ 	GLint maxTextureImageUnits;
+ 
+@@ -1211,6 +1226,7 @@ void DebayerEGL::stop()
+ 
+ 	/* Everything above lives in the context, which goes now */
+ 	egl_.resetEGLContext();
++	started_ = false;
+ }
+ 
+ SizeRange DebayerEGL::sizes(PixelFormat inputFormat, const Size &inputSize)
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 04062cb41..8ca807375 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -64,6 +64,7 @@ public:
+ 	void process(uint32_t frame, FrameBuffer *input, FrameBuffer *output, const DebayerParams &params) override;
+ 	int start() override;
+ 	void stop() override;
++	bool startsAhead() const override { return true; }
+ 
+ 	const SharedFD &getStatsFD() override { return stats_->getStatsFD(); }
+ 
+@@ -71,6 +72,10 @@ public:
+ 
+ private:
+ 	static int getInputConfig(PixelFormat inputFormat, DebayerInputConfig &config);
++	int startContext();
++	/* start() is asked for twice: when the camera is configured, and when it starts */
++	bool started_ = false;
++	int startRet_ = 0;
+ 	int initBayerShaders(PixelFormat inputFormat, PixelFormat outputFormat);
+ 	int getShaderVariableLocations();
+ 	void setShaderVariableValues(eGLImage &eGLImageIn, const DebayerParams &params);
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 56cadad50..22b2867af 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -219,10 +219,26 @@ SoftwareIsp::SoftwareIsp(PipelineHandler *pipe, CameraSensor *sensor,
+ 
+ SoftwareIsp::~SoftwareIsp()
+ {
++	/* A debayer started ahead, for a camera that was configured and never started */
++	if (ispWorkerThread_.isRunning())
++		stopWorker();
++
+ 	/* make sure to destroy the DebayerCpu before the ispWorkerThread_ is gone */
+ 	debayer_.reset();
+ }
+ 
++/*
++ * Stop the debayer and its thread, not the frames waiting for them (see
++ * stop()).
++ */
++void SoftwareIsp::stopWorker()
++{
++	debayer_->invokeMethod(&Debayer::stop, ConnectionTypeBlocking);
++
++	ispWorkerThread_.exit();
++	ispWorkerThread_.wait();
++}
++
+ /**
+  * \fn int SoftwareIsp::loadConfiguration([[maybe_unused]] const std::string &filename)
+  * \brief Load a configuration from a file
+@@ -384,9 +400,41 @@ int SoftwareIsp::configure(const StreamConfiguration &inputCfg,
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	ret = debayer_->configure(inputCfg, outputCfgs, ccmEnabled_);
+-	if (ret < 0)
+-		return ret;
++	/*
++	 * What the debayer is configured with, to leave it alone (and what it
++	 * has started, see below) when the same is asked for again, as
++	 * applications do, and not to configure it under its thread.
++	 */
++	std::optional<DebayerConfig> config;
++	if (!outputCfgs.empty()) {
++		const StreamConfiguration &out = outputCfgs.front();
++		config = DebayerConfig{ inputCfg.pixelFormat, inputCfg.size, inputCfg.stride,
++					out.pixelFormat, out.size, out.stride };
++	}
++	const bool running = ispWorkerThread_.isRunning();
++	const bool same = running && config && debayerConfig_ && *config == *debayerConfig_;
++
++	if (!same) {
++		if (running)
++			stopWorker();
++		debayerConfig_.reset();
++
++		ret = debayer_->configure(inputCfg, outputCfgs, ccmEnabled_);
++		if (ret < 0)
++			return ret;
++	}
++
++	/*
++	 * Start what takes long to start (the GL context and the shaders of
++	 * the GPU debayer) now, on the debayer's thread, in the time the
++	 * application takes to get from configuring the camera to starting
++	 * it: start() waits for the result.
++	 */
++	if (!same && config && debayer_->startsAhead()) {
++		debayerConfig_ = config;
++		ispWorkerThread_.start();
++		debayer_->invokeMethod(&Debayer::start, ConnectionTypeQueued);
++	}
+ 
+ 	LOG(SoftwareIsp, Info)
+ 		<< "Input " << inputCfg.size
+@@ -476,7 +524,9 @@ int SoftwareIsp::start()
+ 	if (ret)
+ 		return ret;
+ 
+-	ispWorkerThread_.start();
++	/* Already running if the debayer was started ahead, when configured */
++	if (!ispWorkerThread_.isRunning())
++		ispWorkerThread_.start();
+ 
+ 	return debayer_->invokeMethod(&Debayer::start,
+ 				      ConnectionTypeBlocking);
+@@ -495,11 +545,8 @@ void SoftwareIsp::stop()
+ 	if (!ispWorkerThread_.isRunning())
+ 		return;
+ 
+-	debayer_->invokeMethod(&Debayer::stop,
+-			       ConnectionTypeBlocking);
+-
+-	ispWorkerThread_.exit();
+-	ispWorkerThread_.wait();
++	stopWorker();
++	debayerConfig_.reset();
+ 
+ 	/*
+ 	 * Frames still waiting for parameters are cancelled below. Forget them

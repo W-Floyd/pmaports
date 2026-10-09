@@ -1,0 +1,60 @@
+From ebaa3747794094a4b6e18576e1458a292d4653d1 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 14:55:57 +0000
+Subject: software_isp: Don't queue frames to the stopped worker
+
+stop() dispatches the parameters the IPA has computed but that are
+still pending on the pipeline thread before it cancels the frames
+waiting for them. saveIspParams() then finds those frames and queues
+them to the debayer, whose thread has exited: the messages wait there
+until the next start(), which processes them with the buffers of the
+previous session, long freed. Opening the camera again crashed in
+DebayerEGL::process() reading the input buffer's metadata.
+
+Forget the pending frames before dispatching, and do not queue a
+frame while the worker is not running.
+
+Fixes: f8b06a726 ("software_isp: Process each frame with its own parameters")
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/software_isp.cpp | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 5573ae72e..425e56abe 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -499,13 +499,18 @@ void SoftwareIsp::stop()
+ 	ispWorkerThread_.exit();
+ 	ispWorkerThread_.wait();
+ 
++	/*
++	 * Frames still waiting for parameters are cancelled below. Forget them
++	 * before dispatching the parameters that are pending, or those would
++	 * queue the frames to the stopped worker, which processes them on the
++	 * next start, after their buffers are gone.
++	 */
++	pendingFrames_.clear();
++
+ 	Thread::current()->dispatchMessages(Message::Type::InvokeMessage, this);
+ 
+ 	ipa_->stop();
+ 
+-	/* Frames still waiting for parameters are cancelled below. */
+-	pendingFrames_.clear();
+-
+ 	for (auto buffer : queuedOutputBuffers_) {
+ 		buffer->_d()->cancel();
+ 		outputBufferReady.emit(buffer);
+@@ -548,6 +553,11 @@ void SoftwareIsp::saveIspParams(uint32_t frame)
+ 
+ 	auto [input, output] = it->second;
+ 	pendingFrames_.erase(it);
++
++	/* Parameters arriving while stopping: the frame is being cancelled */
++	if (!ispWorkerThread_.isRunning())
++		return;
++
+ 	debayer_->invokeMethod(&Debayer::process,
+ 			       ConnectionTypeQueued, frame, input, output, debayerParams_);
+ }

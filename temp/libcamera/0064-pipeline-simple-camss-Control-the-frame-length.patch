@@ -1,0 +1,141 @@
+From d5943945f6462bcbe8ef3c0099875308df3ea9ae Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 14:54:35 +0000
+Subject: pipeline: simple, camss: Control the frame length
+
+The software ISP lengthens the frame for longer exposures, and the
+exposure has to follow the frame length it depends on: write the blanking
+ahead, as the other pipelines do.
+
+The software ISP lengthens the frame for longer exposures, and the
+exposure has to follow the frame length it depends on: write the blanking
+ahead, as the other pipelines do.
+
+The software ISP lengthens the frame for long exposures in the dark, and
+the sensor keeps the vertical blanking after the session, so the next one
+read an exposure limit that was already lengthened. Set the default when
+configuring, and refresh the sensor's control information.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/libcamera/pipeline/camss/camss.cpp        |  6 ++++++
+ .../pipeline/camss/camss_isp_ope.cpp          |  2 +-
+ .../pipeline/camss/camss_isp_soft.cpp         |  2 +-
+ src/libcamera/pipeline/camss/camss_util.cpp   | 19 ++++++++++++++++++-
+ src/libcamera/pipeline/camss/camss_util.h     |  3 ++-
+ src/libcamera/pipeline/simple/simple.cpp      |  6 ++++++
+ 6 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index c5adfe6cb..f6df5f264 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -698,6 +698,12 @@ bool PipelineHandlerCamss::match(DeviceEnumerator *enumerator)
+ 			{ V4L2_CID_ANALOGUE_GAIN, { delays.gainDelay, false } },
+ 			{ V4L2_CID_EXPOSURE, { delays.exposureDelay, false } },
+ 		};
++		/*
++		 * The frame length, which the software ISP lengthens for longer
++		 * exposures: written ahead of the exposure that depends on it.
++		 */
++		if (sensor->device()->controls().count(V4L2_CID_VBLANK))
++			params[V4L2_CID_VBLANK] = { delays.vblankDelay, true };
+ 
+ 		data->delayedCtrls_ =
+ 			std::make_unique<DelayedControls>(sensor->device(), params);
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index d76adcbe4..6fc0bba6d 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -458,7 +458,7 @@ int CamssIspOpe::configure(const StreamConfiguration &inputCfg,
+ 			   const StreamConfiguration &outputCfg,
+ 			   ControlInfoMap *ispControls)
+ {
+-	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_), ispControls);
++	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_, true), ispControls);
+ 	if (ret < 0)
+ 		return ret;
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index 8a0a01d6e..6cd1e6998 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -188,7 +188,7 @@ int CamssIspSoft::configure(const StreamConfiguration &inputCfg,
+ 
+ 	/* \todo refactor SoftwareIsp to remove the need to pass this */
+ 	return swIsp_->configure(inputCfg, outputCfgs,
+-				 camssSoftIpaConfigInfo(sensor_), ispControls);
++				 camssSoftIpaConfigInfo(sensor_, true), ispControls);
+ }
+ 
+ int CamssIspSoft::allocateBuffers([[maybe_unused]] unsigned int bufferCount)
+diff --git a/src/libcamera/pipeline/camss/camss_util.cpp b/src/libcamera/pipeline/camss/camss_util.cpp
+index d4b84a79f..e9327c357 100644
+--- a/src/libcamera/pipeline/camss/camss_util.cpp
++++ b/src/libcamera/pipeline/camss/camss_util.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include "libcamera/internal/camera_lens.h"
+ #include "libcamera/internal/camera_sensor.h"
++#include "libcamera/internal/v4l2_subdevice.h"
+ #include "libcamera/internal/v4l2_videodevice.h"
+ 
+ namespace libcamera {
+@@ -46,10 +47,26 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+  * control maps. A sensor without them gets empty maps, so that the IPA does
+  * not offer their controls.
+  */
+-ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor)
++ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor,
++						bool resetFrameLength)
+ {
+ 	ipa::softisp::IPAConfigInfo info;
+ 
++	/*
++	 * The IPA lengthens the frame (vertical blanking) for long exposures
++	 * and the sensor keeps it after the session: start from the default,
++	 * which the exposure limit the IPA reads is relative to.
++	 */
++	if (resetFrameLength) {
++		const auto vblank = sensor->controls().find(V4L2_CID_VBLANK);
++		if (vblank != sensor->controls().end()) {
++			ControlList ctrls(sensor->controls());
++			ctrls.set(V4L2_CID_VBLANK, vblank->second.def().get<int32_t>());
++			sensor->setControls(&ctrls);
++			sensor->device()->updateControlInfo();
++		}
++	}
++
+ 	info.sensorControls = sensor->controls();
+ 	CameraLens *focusLens = sensor->focusLens();
+ 	info.lensControls = focusLens ? focusLens->controls() : ControlInfoMap();
+diff --git a/src/libcamera/pipeline/camss/camss_util.h b/src/libcamera/pipeline/camss/camss_util.h
+index 013883748..94ed90568 100644
+--- a/src/libcamera/pipeline/camss/camss_util.h
++++ b/src/libcamera/pipeline/camss/camss_util.h
+@@ -19,6 +19,7 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+ 					      const StreamConfiguration &cfg,
+ 					      const char *msgPrefix);
+ 
+-ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor);
++ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor,
++						bool resetFrameLength = false);
+ 
+ } /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 9b23f7031..cf28a5302 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -578,6 +578,12 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 		{ V4L2_CID_ANALOGUE_GAIN, { delays.gainDelay, false } },
+ 		{ V4L2_CID_EXPOSURE, { delays.exposureDelay, false } },
+ 	};
++	/*
++	 * The frame length, which the software ISP lengthens for longer
++	 * exposures: written ahead of the exposure that depends on it.
++	 */
++	if (sensor_->device()->controls().count(V4L2_CID_VBLANK))
++		params[V4L2_CID_VBLANK] = { delays.vblankDelay, true };
+ 	delayedCtrls_ = std::make_unique<DelayedControls>(sensor_->device(), params);
+ 
+ 	LOG(SimplePipeline, Debug)

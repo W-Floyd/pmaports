@@ -1,0 +1,83 @@
+From ebe4e6aee94bd68b11330c9743d0207c3f2da480 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 10 Oct 2026 05:22:24 +0000
+Subject: software_isp: shaders: Shorten the cells main pass's dependency chain
+
+The cells path's main pass takes the sigma of the noise model and the
+reciprocal of its product with the kernel's width, which is a square
+root and a reciprocal. Take the inverse square root of the variance
+instead, one operation, with the same result (the reciprocal is capped
+at 1000 as before).
+
+The sharpening's two linear luma values, of the filtered pixel and of
+the taps' mean, are now taken before the tone curve's fetches, so the
+taps and the lens shading gains are not live through them.
+
+Neither changes the output. On the rear camera of a Moto G Play (2024),
+an Adreno 610 at 1920x1080, the main pass went from 17.05 to 16.88 ms in
+runs interleaved with the old shader (the GPU's clock moves the
+baseline by about 1 ms between runs).
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/shaders/bayer_1x_packed.frag | 32 ++++++++++++++++------
+ 1 file changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index 046cb626f..538983358 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -248,11 +248,16 @@ void main(void)
+ 	vec3 c = texture2D(cell_tex, textureOut).rgb * 1023.0;
+ 
+ 	vec3 level = max(c - blacklevel * 1020.0, 0.0);
+-	vec3 sigma = sqrt(noise.x * level + noise.y * level * level + noise.z) *
+-		     vec3(1.0, 0.70710678, 1.0);
+ 	vec3 width = mix(width_lo, width_hi,
+ 			 clamp((level - anchors.x) / max(anchors.y - anchors.x, 1.0), 0.0, 1.0));
+-	vec3 inv = 1.0 / max(width * sigma, 0.001);
++	/*
++	 * 1 / (width * sigma), at most 1000, from the variance (the green's
++	 * is halved, as it is the mean of two pixels): one inverse square
++	 * root instead of a square root and a reciprocal.
++	 */
++	vec3 variance = (noise.x * level + noise.y * level * level + noise.z) *
++			vec3(1.0, 0.5, 1.0);
++	vec3 inv = min(inversesqrt(variance) / width, 1000.0);
+ 
+ 	vec3 sum = c;
+ 	float weights = 1.0;
+@@ -276,17 +281,28 @@ void main(void)
+ 
+ 	vec3 shading = lens_shading(textureOut);
+ 	vec3 lin = linear_stage(sum / weights / 1020.0, shading);
++	const vec3 luma = vec3(0.299, 0.587, 0.114);
++	/*
++	 * The linear luma of the filtered pixel and of the taps' mean (after
++	 * the same colour processing), for the sharpening: taken here, so that
++	 * the taps and the lens shading gains are not live through the tone
++	 * curve's fetches.
++	 */
++	float lumaLin = dot(lin, luma);
++	float lumaLow = 0.0;
++	if (sharpen.w > 0.0) {
++		vec3 linLow = linear_stage(ring * (0.25 / 1020.0), shading);
++		lumaLow = dot(linLow, luma);
++	}
+ 	vec3 rgb = tone_chroma(lin);
+ 
+ 	if (sharpen.w > 0.0) {
+-		const vec3 luma = vec3(0.299, 0.587, 0.114);
+ 		/*
+ 		 * The detail on the luma only, through the tone curve: the
+-		 * linear luma of the filtered pixel and of the taps' mean
+-		 * (after the same colour processing), each toned.
++		 * linear luma of the filtered pixel and of the taps' mean,
++		 * each toned.
+ 		 */
+-		vec3 linLow = linear_stage(ring * (0.25 / 1020.0), shading);
+-		float detail = tone_value(dot(lin, luma)) - tone_value(dot(linLow, luma));
++		float detail = tone_value(lumaLin) - tone_value(lumaLow);
+ 		float y = dot(rgb, luma);
+ 
+ 		vec4 levels = texture2D(sharpen_lut,

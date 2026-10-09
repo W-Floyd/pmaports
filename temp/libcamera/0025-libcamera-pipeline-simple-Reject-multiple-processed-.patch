@@ -1,0 +1,50 @@
+From c64e429b8881ff749d8a3e67f780c4399f1ba511 Mon Sep 17 00:00:00 2001
+From: Alexi Birlinger <alexi.birlinger@nxp.com>
+Date: Fri, 25 Sep 2026 17:18:16 +0200
+Subject: libcamera: pipeline: simple: Reject multiple processed streams with
+ software ISP
+
+The software ISP is defined with 2 streams. However, it only supports
+a single processed stream, with an optional raw stream.
+Return a null configuration early in generateConfiguration() when multiple
+processed streams are requested while the software ISP is enabled.
+
+Additionally, adjust validate() to enforce the same restriction, as the user
+is allowed to modify the configuration after it has been generated.
+
+Signed-off-by: Alexi Birlinger <alexi.birlinger@nxp.com>
+Signed-off-by: Kieran Bingham <kieran.bingham@ideasonboard.com>
+---
+ src/libcamera/pipeline/simple/simple.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 7daa565d1..aa1342aea 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1190,6 +1190,13 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
+ 		return Invalid;
+ 	}
+ 
++	unsigned int processedCount = config_.size() - rawCount;
++	if (data_->pipe()->swIspEnabled() && processedCount > 1) {
++		LOG(SimplePipeline, Error)
++			<< "Software ISP does not support multiple processed streams";
++		return Invalid;
++	}
++
+ 	/*
+ 	 * Find the best configuration for the pipeline using a heuristic.
+ 	 * First select the pixel format based on the raw streams followed by
+@@ -1434,6 +1441,11 @@ SimplePipelineHandler::generateConfiguration(Camera *camera, std::span<const Str
+ 			}
+ 			rawRequested = true;
+ 		} else {
++			if (swIspEnabled_ && processedRequested) {
++				LOG(SimplePipeline, Error)
++					<< "Software ISP can't capture multiple processed streams";
++				return nullptr;
++			}
+ 			processedRequested = true;
+ 		}
+ 

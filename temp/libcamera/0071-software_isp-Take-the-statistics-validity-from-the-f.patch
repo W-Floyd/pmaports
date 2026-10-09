@@ -1,0 +1,79 @@
+From d8dbae6b7c3326aeaa5f7423daac59664b605aee Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 16:11:13 +0000
+Subject: software_isp: Take the statistics' validity from the frame's number
+
+The valid flag in the shared statistics buffer is the one of the frame
+finished last, and the frames that finish after one before it is read
+overwrite it: the statistics thread runs the frames that waited for a
+long job back to back, which left most of the valid frames unseen (the
+IPA's loops ran about one frame in thirty). Whether a frame has
+statistics follows from its number, so the IPA computes it from that
+(SwIspStats::kFramesPerStats, the cadence the CPU statistics use).
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../libcamera/internal/software_isp/swisp_stats.h    | 10 ++++++++++
+ .../libcamera/internal/software_isp/swstats_cpu.h    |  2 +-
+ src/ipa/softisp/softisp.cpp                          | 12 +++++++++++-
+ 3 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index b95d3924b..5624f9d4d 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -22,6 +22,16 @@ namespace libcamera {
+  * wrap around.
+  */
+ struct SwIspStats {
++	/**
++	 * \brief Statistics are made of one frame in this many (the frames whose
++	 *        number is a multiple of it)
++	 *
++	 * The \ref valid flag says so for the frame whose statistics were last
++	 * finished, and is overwritten by the frames after it, which can finish
++	 * before the statistics of the one before are read: what a reader of the
++	 * statistics of a frame should go by is its number.
++	 */
++	static constexpr uint32_t kFramesPerStats = 4;
+ 	/**
+ 	 * \brief True if the statistics buffer contains valid data, false if
+ 	 *        no statistics were generated for this frame
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index e6fd44ea0..bcfcaae6a 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -45,7 +45,7 @@ public:
+ 	 * Run stats once every 4 frames to ensure any previous
+ 	 * exposure changes have been applied.
+ 	 */
+-	static constexpr uint32_t kStatPerNumFrames = 4;
++	static constexpr uint32_t kStatPerNumFrames = SwIspStats::kFramesPerStats;
+ 
+ 	bool isValid() const { return sharedStats_.fd().isValid(); }
+ 
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index 5ad261830..a5eadb195 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -441,9 +441,19 @@ void IPASoftIsp::processStats(const uint32_t frame,
+ 	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
+ 	frameContext.sensor.gain = camHelper_ ? camHelper_->gain(again) : again;
+ 
++	/*
++	 * The statistics of this frame are valid if one in this many frames is:
++	 * the flag in the shared buffer is the last frame's finished, and is
++	 * cleared by the frames that finished after this one before it was read
++	 * (the thread of the statistics runs the frames that waited for a long
++	 * job back to back), which left most of the valid ones unseen.
++	 */
++	SwIspStats stats = *stats_;
++	stats.valid = !(frame % SwIspStats::kFramesPerStats);
++
+ 	ControlList metadata(controls::controls);
+ 	for (const auto &algo : algorithms())
+-		algo->process(context_, frame, frameContext, stats_, metadata);
++		algo->process(context_, frame, frameContext, &stats, metadata);
+ 	metadataReady.emit(frame, metadata);
+ 
+ 	/* Sanity check */

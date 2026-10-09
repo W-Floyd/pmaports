@@ -1,4 +1,4 @@
-From cb1adff8e6026385a950e92d91d635238013f755 Mon Sep 17 00:00:00 2001
+From de6f7d22e90cde99a5607f742fd132ef78281660 Mon Sep 17 00:00:00 2001
 From: Hans de Goede <johannes.goede@oss.qualcomm.com>
 Date: Tue, 31 Mar 2026 15:21:40 +0200
 Subject: camss: Add Offline Processing Engine ISP support
@@ -10,21 +10,19 @@ This is still in the proof of concept phase atm. With the biggest todo
 item being this using the softISP simple IPA atm, while it really should
 come with its own IPA.
 
-Link: https://lore.kernel.org/linux-media/20260508-camss-isp-ope-v3-0-bb1055274603@oss.qualcomm.com/
 Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
-(cherry picked from commit fda77c39097fa97c7ece76f48dd68eede1877501)
 ---
  src/libcamera/pipeline/camss/camss.cpp        |  19 +-
- .../pipeline/camss/camss_isp_ope.cpp          | 679 ++++++++++++++++++
- src/libcamera/pipeline/camss/camss_isp_ope.h  | 120 ++++
+ .../pipeline/camss/camss_isp_ope.cpp          | 702 ++++++++++++++++++
+ src/libcamera/pipeline/camss/camss_isp_ope.h  | 121 +++
  src/libcamera/pipeline/camss/camss_params.h   |   2 +-
  src/libcamera/pipeline/camss/meson.build      |   3 +
- 5 files changed, 816 insertions(+), 7 deletions(-)
+ 5 files changed, 840 insertions(+), 7 deletions(-)
  create mode 100644 src/libcamera/pipeline/camss/camss_isp_ope.cpp
  create mode 100644 src/libcamera/pipeline/camss/camss_isp_ope.h
 
 diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
-index 371d4f8a2..6b53bdacd 100644
+index 6ab50b9ce..df62bb9a6 100644
 --- a/src/libcamera/pipeline/camss/camss.cpp
 +++ b/src/libcamera/pipeline/camss/camss.cpp
 @@ -38,6 +38,7 @@
@@ -35,7 +33,7 @@ index 371d4f8a2..6b53bdacd 100644
  #include "camss_isp_soft.h"
  
  namespace libcamera {
-@@ -522,12 +523,18 @@ bool PipelineHandlerCamss::match(DeviceEnumerator *enumerator)
+@@ -523,12 +524,18 @@ bool PipelineHandlerCamss::match(DeviceEnumerator *enumerator)
  		data->delayedCtrls_ =
  			std::make_unique<DelayedControls>(sensor->device(), params);
  
@@ -62,10 +60,10 @@ index 371d4f8a2..6b53bdacd 100644
  		data->isp_->inputBufferReady.connect(data->csi_.get(),
 diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
 new file mode 100644
-index 000000000..8676c10a6
+index 000000000..d2ce5ac69
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,702 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS OPE ISP class
@@ -168,7 +166,7 @@ index 000000000..8676c10a6
 +					   statsReady.emit(frame, statsBufferId);
 +				   });
 +
-+	ipa_ = pipe->createIPA<ipa::softisp::IPAProxySoft>("simple", 0, 0);
++	ipa_ = pipe->createIPA<ipa::softisp::IPAProxySoftIsp>(0, 0);
 +	if (!ipa_) {
 +		LOG(Camss, Error) << "Creating IPA failed";
 +		return;
@@ -481,12 +479,13 @@ index 000000000..8676c10a6
 +}
 +
 +int CamssIspOpe::configure(const StreamConfiguration &inputCfg,
-+			   const StreamConfiguration &outputCfg)
++			   const StreamConfiguration &outputCfg,
++			   ControlInfoMap *ispControls)
 +{
 +	ipa::softisp::IPAConfigInfo configInfo;
 +	configInfo.sensorControls = sensor_->controls();
 +
-+	int ret = ipa_->configure(configInfo);
++	int ret = ipa_->configure(configInfo, ispControls);
 +	if (ret < 0)
 +		return ret;
 +
@@ -549,7 +548,7 @@ index 000000000..8676c10a6
 +	/* Lambda function for future re-use with statsBuffers. */
 +	auto pushBuffers = [&](const std::vector<std::unique_ptr<FrameBuffer>> &buffers) {
 +		for (const std::unique_ptr<FrameBuffer> &buffer : buffers) {
-+			Span<const FrameBuffer::Plane> planes = buffer->planes();
++			std::span<const FrameBuffer::Plane> planes = buffer->planes();
 +
 +			buffer->setCookie(ipaBufferId++);
 +			ipaBuffers_.emplace_back(buffer->cookie(),
@@ -631,12 +630,13 @@ index 000000000..8676c10a6
 +	 */
 +	uint32_t bufferId = info->paramBuffer->cookie();
 +	ipa::camss::CamssParams params(mappedIpaBuffers_.at(bufferId).planes()[0]);
++
 +	auto awbGains = params.block<ipa::camss::CamssBlocks::AwbGains>();
 +	DebayerParams debayerParams = *sharedParams_;
 +	/* Convert gains to 15uQ10 and store */
-+	awbGains->r_gain = std::clamp(debayerParams.gains.r(), 0.0f, 31.0f) * 1024;
-+	awbGains->g_gain = std::clamp(debayerParams.gains.g(), 0.0f, 31.0f) * 1024;
-+	awbGains->b_gain = std::clamp(debayerParams.gains.b(), 0.0f, 31.0f) * 1024;
++	awbGains->r_gain = std::clamp(debayerParams.gains.r(), 0.0, 31.0) * 1024;
++	awbGains->g_gain = std::clamp(debayerParams.gains.g(), 0.0, 31.0) * 1024;
++	awbGains->b_gain = std::clamp(debayerParams.gains.b(), 0.0, 31.0) * 1024;
 +	/* Convert blacklevel to 0-65535 (u16) and store */
 +	awbGains->r_sub = debayerParams.blackLevel.r() * 65535;
 +	awbGains->g_sub = debayerParams.blackLevel.g() * 65535;
@@ -645,6 +645,27 @@ index 000000000..8676c10a6
 +	awbGains->r_add = 0;
 +	awbGains->g_add = 0;
 +	awbGains->b_add = 0;
++
++	/*
++	 * a[] contains green input contributions to GBR output
++	 * b[] contains blue input contributions to GBR output
++	 * c[] contains red input contributions to GBR output
++	 * k[] contains offset for GBR output
++	 */
++	auto colorCorrect = params.block<ipa::camss::CamssBlocks::ColorCorrect>();
++	colorCorrect->qfactor = 1; /* Select 12sQ8 format for matrix values */
++	colorCorrect->a[0] = (int)(std::clamp(debayerParams.combinedMatrix[1][1], -8.0f, 7.9f) * 256);
++	colorCorrect->a[1] = (int)(std::clamp(debayerParams.combinedMatrix[2][1], -8.0f, 7.9f) * 256);
++	colorCorrect->a[2] = (int)(std::clamp(debayerParams.combinedMatrix[0][1], -8.0f, 7.9f) * 256);
++	colorCorrect->b[0] = (int)(std::clamp(debayerParams.combinedMatrix[1][2], -8.0f, 7.9f) * 256);
++	colorCorrect->b[1] = (int)(std::clamp(debayerParams.combinedMatrix[2][2], -8.0f, 7.9f) * 256);
++	colorCorrect->b[2] = (int)(std::clamp(debayerParams.combinedMatrix[0][2], -8.0f, 7.9f) * 256);
++	colorCorrect->c[0] = (int)(std::clamp(debayerParams.combinedMatrix[1][0], -8.0f, 7.9f) * 256);
++	colorCorrect->c[1] = (int)(std::clamp(debayerParams.combinedMatrix[2][0], -8.0f, 7.9f) * 256);
++	colorCorrect->c[2] = (int)(std::clamp(debayerParams.combinedMatrix[0][0], -8.0f, 7.9f) * 256);
++	colorCorrect->k[0] = 0;
++	colorCorrect->k[1] = 0;
++	colorCorrect->k[2] = 0;
 +
 +	info->paramBuffer->_d()->metadata().planes()[0].bytesused = params.bytesused();
 +	params_->queueBuffer(info->paramBuffer);
@@ -747,10 +768,10 @@ index 000000000..8676c10a6
 +} /* namespace libcamera */
 diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.h b/src/libcamera/pipeline/camss/camss_isp_ope.h
 new file mode 100644
-index 000000000..c8348b16f
+index 000000000..7b73bf48d
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_isp_ope.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS OPE ISP class
@@ -763,8 +784,8 @@ index 000000000..c8348b16f
 +#include <memory>
 +#include <vector>
 +
-+#include <libcamera/ipa/soft_ipa_interface.h>
-+#include <libcamera/ipa/soft_ipa_proxy.h>
++#include <libcamera/ipa/softisp_ipa_interface.h>
++#include <libcamera/ipa/softisp_ipa_proxy.h>
 +
 +/* FIXME drop once using own camss IPA, which will map on IPA side */
 +#include "libcamera/internal/mapped_framebuffer.h"
@@ -806,7 +827,8 @@ index 000000000..c8348b16f
 +	StreamConfiguration generateConfiguration(const StreamConfiguration &raw) const override;
 +	StreamConfiguration validate(const StreamConfiguration &raw, const StreamConfiguration &req) const override;
 +	int configure(const StreamConfiguration &inputCfg,
-+		      const StreamConfiguration &outputCfg) override;
++		      const StreamConfiguration &outputCfg,
++		      ControlInfoMap *ispControls) override;
 +
 +	int allocateBuffers(unsigned int bufferCount) override;
 +	void freeBuffers() override;
@@ -861,7 +883,7 @@ index 000000000..c8348b16f
 +	std::unique_ptr<V4L2VideoDevice> params_;
 +	std::unique_ptr<V4L2VideoDevice> input_;
 +	std::unique_ptr<V4L2VideoDevice> output_;
-+	std::unique_ptr<ipa::softisp::IPAProxySoft> ipa_;
++	std::unique_ptr<ipa::softisp::IPAProxySoftIsp> ipa_;
 +	std::vector<std::unique_ptr<FrameBuffer>> paramBuffers_;
 +	std::vector<IPABuffer> ipaBuffers_;
 +	/* FIXME drop once using own camss IPA, which will map on IPA side */
@@ -872,10 +894,10 @@ index 000000000..c8348b16f
 +
 +} /* namespace libcamera */
 diff --git a/src/libcamera/pipeline/camss/camss_params.h b/src/libcamera/pipeline/camss/camss_params.h
-index 6dec85fbc..c09d2c4c2 100644
+index 51e6e639c..9244de7e0 100644
 --- a/src/libcamera/pipeline/camss/camss_params.h
 +++ b/src/libcamera/pipeline/camss/camss_params.h
-@@ -20,7 +20,7 @@ namespace libcamera {
+@@ -22,7 +22,7 @@ namespace libcamera {
  
  namespace ipa::camss {
  

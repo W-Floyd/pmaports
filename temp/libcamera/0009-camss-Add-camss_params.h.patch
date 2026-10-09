@@ -1,4 +1,4 @@
-From b4eec245d021ac8543c6d2b011f8114d80e1a6a9 Mon Sep 17 00:00:00 2001
+From 9742267be560f1b0045d2650df6cbf9f41f51520 Mon Sep 17 00:00:00 2001
 From: Hans de Goede <johannes.goede@oss.qualcomm.com>
 Date: Sat, 2 May 2026 15:11:51 +0200
 Subject: camss: Add camss_params.h
@@ -7,18 +7,17 @@ Add header file definging the V4L2Params derived CamssParams class
 for OPE extensible ISP parameters support.
 
 Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
-(cherry picked from commit 3b3f3fd2952a5c734814011dcb616097963b92fb)
 ---
- src/libcamera/pipeline/camss/camss_params.h | 67 +++++++++++++++++++++
- 1 file changed, 67 insertions(+)
+ src/libcamera/pipeline/camss/camss_params.h | 71 +++++++++++++++++++++
+ 1 file changed, 71 insertions(+)
  create mode 100644 src/libcamera/pipeline/camss/camss_params.h
 
 diff --git a/src/libcamera/pipeline/camss/camss_params.h b/src/libcamera/pipeline/camss/camss_params.h
 new file mode 100644
-index 000000000..6dec85fbc
+index 000000000..51e6e639c
 --- /dev/null
 +++ b/src/libcamera/pipeline/camss/camss_params.h
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +/* SPDX-License-Identifier: LGPL-2.1-or-later */
 +/*
 + * Qualcomm CAMSS ISP Parameters
@@ -28,7 +27,9 @@ index 000000000..6dec85fbc
 +
 +#pragma once
 +
-+#include <linux/camss-config.h>
++#include <stdint.h>
++
++#include <linux/qcom-camss-config.h>
 +#include <linux/videodev2.h>
 +
 +/*
@@ -45,6 +46,7 @@ index 000000000..6dec85fbc
 +	AwbGains,
 +	ChromaEnh,
 +	ColorCorrect,
++	Gamma,
 +};
 +
 +namespace details {
@@ -64,6 +66,7 @@ index 000000000..6dec85fbc
 +CAMSS_DEFINE_BLOCK_TYPE(AwbGains, wb_gain, WB_GAIN);
 +CAMSS_DEFINE_BLOCK_TYPE(ChromaEnh, chroma_enhan, CHROMA_ENHAN);
 +CAMSS_DEFINE_BLOCK_TYPE(ColorCorrect, color_correct, COLOR_CORRECT);
++CAMSS_DEFINE_BLOCK_TYPE(Gamma, gamma, GAMMA);
 +
 +struct param_traits {
 +	using id_type = CamssBlocks;
@@ -77,7 +80,7 @@ index 000000000..6dec85fbc
 +class CamssParams : public V4L2Params<details::param_traits>
 +{
 +public:
-+	CamssParams(Span<uint8_t> data)
++	CamssParams(std::span<uint8_t> data)
 +		: V4L2Params(data, V4L2_ISP_PARAMS_VERSION_V1)
 +	{
 +	}

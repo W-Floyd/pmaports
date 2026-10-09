@@ -1,0 +1,250 @@
+From 2a0525b34373b181c067324865a9094037a31012 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 03:51:04 +0000
+Subject: ipa: soft: Add a noise reduction algorithm
+
+Denoise sets the GPU debayer's noise filter for each frame from the vendor
+tuning's adaptive Bayer filter, by the frame's gain: the noise model (the
+variance of the 12-bit signal is the region's noise times its bin plus its
+noiseQuad times the bin squared, the bin being the level over 64, which on
+the rear sensor measures within 15% of its raw frames) and the filter
+strengths for red/blue and green between the anchors' levels, as the kernel
+width, the inverse of the strength (smaller is stronger). The regions blend
+across the gaps between their gain ranges. It switches the filter on from a
+gain of 3 and off below 2, as the cells path costs the GPU more than the
+single pixel one, and the noise is small at low gain.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/softisp/algorithms/denoise.cpp | 148 +++++++++++++++++++++++++
+ src/ipa/softisp/algorithms/denoise.h   |  53 +++++++++
+ src/ipa/softisp/algorithms/meson.build |   1 +
+ 3 files changed, 202 insertions(+)
+ create mode 100644 src/ipa/softisp/algorithms/denoise.cpp
+ create mode 100644 src/ipa/softisp/algorithms/denoise.h
+
+diff --git a/src/ipa/softisp/algorithms/denoise.cpp b/src/ipa/softisp/algorithms/denoise.cpp
+new file mode 100644
+index 000000000..fc699bb43
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/denoise.cpp
+@@ -0,0 +1,148 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Noise reduction
++ */
++
++#include "denoise.h"
++
++#include <algorithm>
++
++#include <libcamera/base/log.h>
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(IPASoftIspDenoise)
++
++namespace ipa::softisp::algorithms {
++
++/*
++ * The range kernel's width, in noise deviations, is the inverse of the
++ * tuning's filter strength (smaller is stronger), within these bounds.
++ */
++static constexpr double kMinWidth = 1.0;
++static constexpr double kMaxWidth = 4.0;
++
++/*
++ * The noise reduction costs the GPU three to eight times what sampling single
++ * pixels does, and the noise is small below a gain of a few: it is on from the
++ * first gain, and off again below the second.
++ */
++static constexpr double kEnableGain = 3.0;
++static constexpr double kDisableGain = 2.0;
++
++/* The variance of the read noise, in 10-bit counts squared, by gain */
++static constexpr double kReadNoiseBase = 0.3;
++static constexpr double kReadNoisePerGain = 0.05;
++
++/**
++ * \class Denoise
++ * \brief Noise reduction by the sensor's noise model
++ *
++ * The GPU debayer bins the raw frame in 2x2 cells and filters them with a
++ * bilateral filter whose range kernel follows the noise: a difference of a
++ * few deviations is noise to average, a larger one an edge to keep (see
++ * DebayerParams::Denoise). This algorithm sets the filter for each frame from
++ * the vendor tuning's adaptive Bayer filter, by the frame's gain:
++ *
++ *   - Denoise:
++ *       regions:
++ *         - gain: [ 1, 1.1 ]
++ *           noise: 19                # the variance of the 12-bit signal
++ *                                    # is noise * bin + noiseQuad * bin^2,
++ *                                    # the bin being the level / 64
++ *           noiseQuad: 0             # optional
++ *           strengthLo: [ 0.5, 0.5 ]   # R/B, Gr/Gb, at and below anchors[0]
++ *           strengthHi: [ 0.9, 0.9 ]   # at and above anchors[1]
++ *           anchors: [ 64, 160 ]       # levels above black, in 10-bit counts
++ *
++ * The regions blend across the gaps between their gain ranges.
++ */
++
++int Denoise::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	for (const ValueNode &node : tuningData["regions"].asList()) {
++		auto gain = node["gain"].get<std::vector<double>>();
++		auto lo = node["strengthLo"].get<std::vector<double>>();
++		auto hi = node["strengthHi"].get<std::vector<double>>();
++		auto anchors = node["anchors"].get<std::vector<double>>();
++		auto noise = node["noise"].get<double>();
++		const double quad = node["noiseQuad"].get<double>(0.0);
++		if (!gain|| gain->size() != 2 || !lo || lo->size() != 2 || !hi || hi->size() != 2 ||
++		    !anchors || anchors->size() != 2 || !noise || *noise <= 0.0 ||
++		    (*lo)[0] <= 0.0 || (*lo)[1] <= 0.0 || (*hi)[0] <= 0.0 || (*hi)[1] <= 0.0) {
++			LOG(IPASoftIspDenoise, Error) << "Invalid noise reduction region";
++			return -EINVAL;
++		}
++
++		ranges_.push_back({ (*gain)[0], (*gain)[1] });
++		regions_.push_back({ *noise, quad,
++				     { (*lo)[0], (*lo)[1] },
++				     { (*hi)[0], (*hi)[1] },
++				     (*anchors)[0], (*anchors)[1] });
++	}
++
++	if (regions_.empty()) {
++		LOG(IPASoftIspDenoise, Error) << "No noise reduction regions";
++		return -EINVAL;
++	}
++
++	LOG(IPASoftIspDenoise, Info)
++		<< "Noise reduction, " << regions_.size() << " gain regions";
++
++	return 0;
++}
++
++void Denoise::prepare(IPAContext &context,
++		      [[maybe_unused]] const uint32_t frame,
++		      IPAFrameContext &frameContext,
++		      DebayerParams *params)
++{
++	const double gain = frameContext.sensor.known ? frameContext.sensor.gain
++						      : context.activeState.agc.again;
++
++	if (gain >= kEnableGain)
++		active_ = true;
++	else if (gain < kDisableGain)
++		active_ = false;
++
++	params->denoise.enabled = active_;
++	if (!active_)
++		return;
++
++	const auto b = ipa::softisp::luxBlend(ranges_, gain);
++	const Region &lo = regions_[b.lo];
++	const Region &hi = regions_[b.hi];
++	const double w = b.lo == b.hi ? 0.0 : b.weight;
++	auto mix = [w](double u, double v) { return u + (v - u) * w; };
++
++	/* The widths of red, green and blue, from R/B's and Gr/Gb's strengths */
++	auto widths = [&](const std::array<double, 2> &a, const std::array<double, 2> &c) {
++		std::array<float, 3> out;
++		const double rb = std::clamp(1.0 / mix(a[0], c[0]), kMinWidth, kMaxWidth);
++		const double g = std::clamp(1.0 / mix(a[1], c[1]), kMinWidth, kMaxWidth);
++		out = { static_cast<float>(rb), static_cast<float>(g), static_cast<float>(rb) };
++		return out;
++	};
++
++	DebayerParams::Denoise &d = params->denoise;
++	/*
++	 * The variance of the 12-bit signal at a bin of 64 counts, as 10-bit
++	 * counts: the level is a quarter of the 12-bit one, the variance a
++	 * sixteenth, so k * L / 16 / 16 and c * (L / 16)^2 / 16.
++	 */
++	d.slope = mix(lo.noise, hi.noise) / 256.0;
++	d.quad = mix(lo.noiseQuad, hi.noiseQuad) / 4096.0;
++	d.floor = kReadNoiseBase + kReadNoisePerGain * gain;
++	d.widthLow = widths(lo.strengthLo, hi.strengthLo);
++	d.widthHigh = widths(lo.strengthHi, hi.strengthHi);
++	d.levelLow = mix(lo.anchorLo, hi.anchorLo);
++	d.levelHigh = mix(lo.anchorHi, hi.anchorHi);
++}
++
++REGISTER_IPA_ALGORITHM(Denoise, "Denoise")
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/denoise.h b/src/ipa/softisp/algorithms/denoise.h
+new file mode 100644
+index 000000000..e782e0a73
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/denoise.h
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Noise reduction
++ */
++
++#pragma once
++
++#include <array>
++#include <vector>
++
++#include "algorithm.h"
++#include "lux.h"
++
++namespace libcamera {
++
++namespace ipa::softisp::algorithms {
++
++class Denoise : public Algorithm
++{
++public:
++	Denoise() = default;
++	~Denoise() = default;
++
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	void prepare(IPAContext &context,
++		     const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     DebayerParams *params) override;
++
++private:
++	/* The adaptive Bayer filter's tuning at one gain region */
++	struct Region {
++		double noise;
++		double noiseQuad;
++		std::array<double, 2> strengthLo;
++		std::array<double, 2> strengthHi;
++		double anchorLo;
++		double anchorHi;
++	};
++
++	/* The gain regions' ranges, for blending across the gaps */
++	std::vector<ipa::softisp::LuxRange> ranges_;
++	std::vector<Region> regions_;
++
++	/* Whether the noise reduction is on, with a hysteresis in the gain */
++	bool active_ = false;
++};
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/meson.build b/src/ipa/softisp/algorithms/meson.build
+index ed8141803..11732a473 100644
+--- a/src/ipa/softisp/algorithms/meson.build
++++ b/src/ipa/softisp/algorithms/meson.build
+@@ -6,6 +6,7 @@ softisp_ipa_algorithms = files([
+     'agc.cpp',
+     'blc.cpp',
+     'ccm.cpp',
++    'denoise.cpp',
+     'af.cpp',
+     'aperture.cpp',
+     'lsc.cpp',

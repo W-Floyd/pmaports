@@ -1,0 +1,558 @@
+From 9276c810f10094fa184d647cfdd8e49098e829dd Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 7 Oct 2026 22:21:57 +0000
+Subject: ipa: soft: Select the chroma, tone curve, DRC tone mapping and lens
+ shading by lux index
+
+Each of the vendor tuning's cv12, gamma15, tmc12 and lsc3x has its own lux
+index regions, as cc13 has, and the soft IPA used the one, for every light.
+Adjust takes chromaLux, toneCurveLux and drcCurveLux, and Lsc luxSets, one
+list of regions each, and blends the two regions either side of a gap in
+their ranges with the lux index Agc estimates. The tone lookup table is
+built again once the lux index moves by 5. Without the keys, or without
+the lux model, the plain ones apply as before.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/softisp/algorithms/adjust.cpp | 197 ++++++++++++++++++++++----
+ src/ipa/softisp/algorithms/adjust.h   |  35 ++++-
+ src/ipa/softisp/algorithms/lsc.cpp    | 105 +++++++++++---
+ src/ipa/softisp/algorithms/lsc.h      |  11 +-
+ 4 files changed, 293 insertions(+), 55 deletions(-)
+
+diff --git a/src/ipa/softisp/algorithms/adjust.cpp b/src/ipa/softisp/algorithms/adjust.cpp
+index 9ff2abae3..7793522bd 100644
+--- a/src/ipa/softisp/algorithms/adjust.cpp
++++ b/src/ipa/softisp/algorithms/adjust.cpp
+@@ -25,6 +25,9 @@ namespace ipa::softisp::algorithms {
+ constexpr float kDefaultContrast = 1.0f;
+ constexpr float kDefaultSaturation = 1.0f;
+ 
++/* How far the lux index moves before the tone lookup table is chosen again */
++constexpr double kLuxThreshold = 5.0;
++
+ LOG_DEFINE_CATEGORY(IPASoftIspAdjust)
+ 
+ /*
+@@ -77,8 +80,64 @@ int DrcCurve::read(const ValueNode &tuningData)
+ 	return 0;
+ }
+ 
++/*
++ * drcCurveLux: the same by lux index region, as the tuning's tmc12 has them.
++ * The curves of the regions around the lux index in use (setLux()) blend:
++ *
++ *   drcCurveLux:
++ *     - lux: [ 1, 180 ]
++ *       drcCurve: ...    # as drcCurve
++ */
++int DrcCurve::readLux(const ValueNode &tuningData)
++{
++	for (const ValueNode &node : tuningData.asList()) {
++		auto lux = node["lux"].get<std::vector<double>>();
++		DrcCurve curve;
++		if (!lux || lux->size() != 2 || curve.read(node["drcCurve"]) < 0) {
++			LOG(IPASoftIspAdjust, Error) << "Invalid drcCurveLux";
++			return -EINVAL;
++		}
++		luxRanges_.push_back({ (*lux)[0], (*lux)[1] });
++		luxCurves_.push_back(std::move(curve));
++	}
++	return 0;
++}
++
++ipa::softisp::LuxBlend DrcCurve::luxBlend() const
++{
++	return ipa::softisp::luxBlend(luxRanges_, lux_);
++}
++
++double DrcCurve::maxRatio() const
++{
++	if (luxCurves_.empty() || lux_ < 0)
++		return maxRatio_;
++	const auto b = luxBlend();
++	return luxCurves_[b.lo].maxRatio_ * (1.0 - b.weight) + luxCurves_[b.hi].maxRatio_ * b.weight;
++}
++
++double DrcCurve::share() const
++{
++	if (luxCurves_.empty() || lux_ < 0)
++		return share_;
++	const auto b = luxBlend();
++	return luxCurves_[b.lo].share_ * (1.0 - b.weight) + luxCurves_[b.hi].share_ * b.weight;
++}
++
+ DrcCurve::Anchors DrcCurve::at(double drcGain) const
+ {
++	if (!luxCurves_.empty() && lux_ >= 0) {
++		const auto b = luxBlend();
++		const Anchors lo = luxCurves_[b.lo].at(drcGain);
++		if (b.lo == b.hi)
++			return lo;
++		const Anchors hi = luxCurves_[b.hi].at(drcGain);
++		auto mix = [&b](double u, double v) { return u + (v - u) * b.weight; };
++		return { drcGain, mix(lo.dark, hi.dark), mix(lo.mid, hi.mid),
++			 mix(lo.bright, hi.bright), mix(lo.darkBoost, hi.darkBoost),
++			 mix(lo.darkBoostRatio, hi.darkBoostRatio) };
++	}
++
+ 	if (drcGain <= anchors_.front().drcGain)
+ 		return anchors_.front();
+ 	if (drcGain >= anchors_.back().drcGain)
+@@ -96,7 +155,7 @@ DrcCurve::Anchors DrcCurve::at(double drcGain) const
+ }
+ 
+ DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain, double darkGain)
+-	: share_(curve.share_)
++	: share_(curve.share())
+ {
+ 	/* TMC 1.2 takes the gain in steps of 3%, up to 1.03^94 (about 16) */
+ 	constexpr double kStep = 1.03;
+@@ -108,7 +167,7 @@ DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain, double darkGai
+ 	const Anchors a = curve.at(drcGain);
+ 	const double boost = (std::max(darkGain, 1.0) - 1.0) * a.darkBoostRatio;
+ 	const double ratio = std::max(std::clamp(boost + 1.0 + a.darkBoost, 1.0, 16.0), 1.0001);
+-	const double gainDark = std::min(g * ratio, curve.maxRatio_);
++	const double gainDark = std::min(g * ratio, curve.maxRatio());
+ 	const double darkY = std::min(a.mid / ratio, a.dark);
+ 
+ 	kneeX_ = { 0.0, darkY / gainDark, a.mid / g, a.bright, 1.0 };
+@@ -240,38 +299,80 @@ int Adjust::init(IPAContext &context, const ValueNode &tuningData)
+ 			<< curve_.size() << " points)";
+ 	}
+ 
++	/*
++	 * toneCurveLux, drcCurveLux and chromaLux: the same by lux index
++	 * region of the tuning's modules, which Agc estimates. Between two
++	 * regions' ranges, the data of both blend:
++	 *
++	 *   toneCurveLux:
++	 *     - lux: [ 0, 120 ]
++	 *       toneCurve: [ ... ]   # as toneCurve
++	 */
++	for (const ValueNode &node : tuningData["toneCurveLux"].asList()) {
++		auto lux = node["lux"].get<std::vector<double>>();
++		auto toneCurve = node["toneCurve"].get<ipa::Pwl>();
++		if (!lux || lux->size() != 2 || !toneCurve || toneCurve->empty()) {
++			LOG(IPASoftIspAdjust, Error) << "Invalid toneCurveLux";
++			return -EINVAL;
++		}
++		toneRanges_.push_back({ (*lux)[0], (*lux)[1] });
++		toneCurves_.push_back(std::move(*toneCurve));
++	}
++
+ 	if (tuningData.contains("drcCurve")) {
+ 		int ret = drcCurve_.read(tuningData["drcCurve"]);
+ 		if (ret < 0)
+ 			return ret;
++		ret = drcCurve_.readLux(tuningData["drcCurveLux"]);
++		if (ret < 0)
++			return ret;
+ 	}
+ 
+ 	if (tuningData.contains("chroma")) {
+-		ipa::Interpolator<Vector<double, 4>> chroma;
+-		int ret = chroma.readYaml(tuningData["chroma"], "ct", "scale");
++		ChromaSet set;
++		int ret = readChroma(tuningData["chroma"], &set);
+ 		if (ret < 0)
+ 			return ret;
+-		for (const auto &[ct, s] : chroma.data()) {
+-			for (unsigned int i = 0; i < 4; i++) {
+-				if (s[i] < 0) {
+-					LOG(IPASoftIspAdjust, Error)
+-						<< "Chroma scales at " << ct << " K must not be negative";
+-					return -EINVAL;
+-				}
+-			}
++		chroma_ = std::move(set);
++	}
++
++	for (const ValueNode &node : tuningData["chromaLux"].asList()) {
++		auto lux = node["lux"].get<std::vector<double>>();
++		ChromaSet set;
++		if (!lux || lux->size() != 2 || readChroma(node["chroma"], &set) < 0) {
++			LOG(IPASoftIspAdjust, Error) << "Invalid chromaLux";
++			return -EINVAL;
+ 		}
+-		chroma_ = std::move(chroma);
+-
+-		const ValueNode &list = tuningData["chroma"];
+-		if (list.size() > 0 && list[0].contains("shear")) {
+-			ipa::Interpolator<Vector<double, 4>> shear;
+-			ret = shear.readYaml(list, "ct", "shear");
+-			if (ret < 0)
+-				return ret;
+-			chromaShear_ = std::move(shear);
++		chromaRanges_.push_back({ (*lux)[0], (*lux)[1] });
++		chromaLux_.push_back(std::move(set));
++	}
++
++	return 0;
++}
++
++int Adjust::readChroma(const ValueNode &list, ChromaSet *set)
++{
++	int ret = set->scale.readYaml(list, "ct", "scale");
++	if (ret < 0)
++		return ret;
++	for (const auto &[ct, s] : set->scale.data()) {
++		for (unsigned int i = 0; i < 4; i++) {
++			if (s[i] < 0) {
++				LOG(IPASoftIspAdjust, Error)
++					<< "Chroma scales at " << ct << " K must not be negative";
++				return -EINVAL;
++			}
+ 		}
+ 	}
+ 
++	if (list.size() > 0 && list[0].contains("shear")) {
++		ipa::Interpolator<Vector<double, 4>> shear;
++		ret = shear.readYaml(list, "ct", "shear");
++		if (ret < 0)
++			return ret;
++		set->shear = std::move(shear);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -388,12 +489,35 @@ void Adjust::prepare(IPAContext &context,
+ 	const float contrast = context.activeState.knobs.contrast.value_or(kDefaultContrast);
+ 	/* Map contrast 0..2 to an exponent 0..infinity, avoiding tan(pi/2). */
+ 	const float contrastExp = tan(std::clamp(contrast * M_PI_4, 0.0, M_PI_2 - 0.00001));
++	const double lux = context.activeState.agc.luxIndex;
++
++	/*
++	 * The tuning's tone curve and DRC tone mapping by lux index: choose
++	 * them again once the lux index has moved by a visible step, as the
++	 * lookup table is rebuilt with them.
++	 */
++	bool luxChanged = false;
++	if (lux >= 0 && std::abs(lux - lutLux_) >= kLuxThreshold) {
++		if (!toneCurves_.empty()) {
++			const auto b = ipa::softisp::luxBlend(toneRanges_, lux);
++			curve_ = b.lo == b.hi
++					 ? toneCurves_[b.lo]
++					 : ipa::Pwl::combine(toneCurves_[b.lo], toneCurves_[b.hi],
++							     [&b](double, double y0, double y1) {
++								     return y0 + (y1 - y0) * b.weight;
++							     });
++		}
++		drcCurve_.setLux(lux);
++		lutLux_ = lux;
++		luxChanged = true;
++	}
++
+ 	const bool fromCurve = !curve_.empty() && !gammaSet_;
+ 	/* Rebuild for DRC changes of half a percent or more. */
+ 	const float drc = std::round(drcGain(context, frameContext) * 200) / 200;
+ 	const float dark = std::round(std::max(context.activeState.agc.darkBoost, 1.0) * 200) / 200;
+ 
+-	if (!lutValid_ || gamma != lutGamma_ || contrastExp != lutContrastExp_ ||
++	if (!lutValid_ || luxChanged || gamma != lutGamma_ || contrastExp != lutContrastExp_ ||
+ 	    fromCurve != lutFromCurve_ || drc != lutDrc_ || dark != lutDark_) {
+ 		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr, drc,
+ 			       &drcCurve_, dark);
+@@ -406,16 +530,31 @@ void Adjust::prepare(IPAContext &context,
+ 	}
+ 	params->toneLut = lut_;
+ 
++	/* The chroma enhancement by colour temperature, and by lux index */
+ 	const unsigned int ct = context.activeState.awb.temperatureK;
+-	if (chroma_) {
+-		const auto &s = chroma_->getInterpolated(ct);
++	ChromaSet *lo = chroma_ ? &*chroma_ : nullptr;
++	ChromaSet *hi = lo;
++	double w = 0.0;
++	if (!chromaLux_.empty() && lux >= 0) {
++		const auto b = ipa::softisp::luxBlend(chromaRanges_, lux);
++		lo = &chromaLux_[b.lo];
++		hi = &chromaLux_[b.hi];
++		w = b.lo == b.hi ? 0.0 : b.weight;
++	}
++	if (lo) {
++		auto blend = [w](const Vector<double, 4> &a, const Vector<double, 4> &b) {
++			return a * (1.0 - w) + b * w;
++		};
++		const Vector<double, 4> s = blend(lo->scale.getInterpolated(ct),
++						  hi->scale.getInterpolated(ct));
+ 		params->chroma = { static_cast<float>(s[0]), static_cast<float>(s[1]),
+ 				   static_cast<float>(s[2]), static_cast<float>(s[3]) };
+-	}
+-	if (chromaShear_) {
+-		const auto &h = chromaShear_->getInterpolated(ct);
+-		params->chromaShear = { static_cast<float>(h[0]), static_cast<float>(h[1]),
+-					static_cast<float>(h[2]), static_cast<float>(h[3]) };
++		if (lo->shear && hi->shear) {
++			const Vector<double, 4> h = blend(lo->shear->getInterpolated(ct),
++							  hi->shear->getInterpolated(ct));
++			params->chromaShear = { static_cast<float>(h[0]), static_cast<float>(h[1]),
++						static_cast<float>(h[2]), static_cast<float>(h[3]) };
++		}
+ 	}
+ }
+ 
+diff --git a/src/ipa/softisp/algorithms/adjust.h b/src/ipa/softisp/algorithms/adjust.h
+index 826fe1db9..dca2bee07 100644
+--- a/src/ipa/softisp/algorithms/adjust.h
++++ b/src/ipa/softisp/algorithms/adjust.h
+@@ -20,6 +20,7 @@
+ #include <libipa/pwl.h>
+ 
+ #include "algorithm.h"
++#include "lux.h"
+ 
+ namespace libcamera {
+ 
+@@ -60,14 +61,27 @@ public:
+ 	};
+ 
+ 	int read(const ValueNode &tuningData);
++	/* The curves by lux index region, from the tuning's drcCurveLux */
++	int readLux(const ValueNode &tuningData);
++	/* Use the curves of the regions around a lux index, if there are any */
++	void setLux(double lux) { lux_ = lux; }
+ 	bool empty() const { return anchors_.empty(); }
+ 
+ private:
+ 	Anchors at(double drcGain) const;
++	double maxRatio() const;
++	double share() const;
++
++	/* The two curves a lux index lies between, and the weight of the second */
++	ipa::softisp::LuxBlend luxBlend() const;
+ 
+ 	std::vector<Anchors> anchors_;
+ 	double maxRatio_ = 16.0;
+ 	double share_ = 1.0;
++
++	std::vector<ipa::softisp::LuxRange> luxRanges_;
++	std::vector<DrcCurve> luxCurves_;
++	double lux_ = -1.0;
+ };
+ 
+ ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
+@@ -100,17 +114,32 @@ private:
+ 	void applySaturation(Matrix<float, 3, 3> &ccm, float saturation);
+ 	double drcGain(const IPAContext &context, const IPAFrameContext &frameContext);
+ 
+-	/* Tone curve from the tuning file, used unless Gamma is set. */
++	/*
++	 * Tone curve from the tuning file, used unless Gamma is set. By lux
++	 * index, curve_ is the blend of toneCurves_ for the last lux index
++	 * applied.
++	 */
+ 	ipa::Pwl curve_;
++	std::vector<ipa::softisp::LuxRange> toneRanges_;
++	std::vector<ipa::Pwl> toneCurves_;
+ 
+ 	/* The DRC tone mapping from the tuning file, if any */
+ 	DrcCurve drcCurve_;
+ 
+ 	/* Chroma scales and shears by colour temperature, from the tuning file */
+-	std::optional<ipa::Interpolator<Vector<double, 4>>> chroma_;
+-	std::optional<ipa::Interpolator<Vector<double, 4>>> chromaShear_;
++	struct ChromaSet {
++		ipa::Interpolator<Vector<double, 4>> scale;
++		std::optional<ipa::Interpolator<Vector<double, 4>>> shear;
++	};
++	int readChroma(const ValueNode &list, ChromaSet *set);
++	std::optional<ChromaSet> chroma_;
++	std::vector<ipa::softisp::LuxRange> chromaRanges_;
++	std::vector<ChromaSet> chromaLux_;
+ 	bool gammaSet_ = false;
+ 
++	/* The lux index the tone lookup table's curves were chosen for */
++	double lutLux_ = -1.0;
++
+ 	/* The current lookup table and what it was built from. */
+ 	ToneLut lut_;
+ 	float lutGamma_ = 0.0f;
+diff --git a/src/ipa/softisp/algorithms/lsc.cpp b/src/ipa/softisp/algorithms/lsc.cpp
+index a775e57eb..1b200a2b0 100644
+--- a/src/ipa/softisp/algorithms/lsc.cpp
++++ b/src/ipa/softisp/algorithms/lsc.cpp
+@@ -25,6 +25,9 @@ namespace ipa::softisp::algorithms {
+  */
+ static constexpr unsigned int kCtStep = 50;
+ 
++/* Likewise for the lux index */
++static constexpr double kLuxStep = 5.0;
++
+ /* Before AWB has estimated a colour temperature */
+ static constexpr unsigned int kDefaultCt = 5000;
+ 
+@@ -60,7 +63,45 @@ int Lsc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 		return -EINVAL;
+ 	}
+ 
+-	for (const ValueNode &node : tuningData["sets"].asList()) {
++	int ret = readSets(tuningData["sets"], &sets_);
++	if (ret < 0)
++		return ret;
++
++	if (sets_.empty()) {
++		LOG(IPASoftIspLsc, Error) << "No lens shading sets";
++		return -EINVAL;
++	}
++
++	/*
++	 * luxSets: the same by lux index region, which Agc estimates; the
++	 * regions around it blend:
++	 *
++	 *   luxSets:
++	 *     - lux: [ 0, 190 ]
++	 *       sets: [ ... ]    # as sets
++	 */
++	for (const ValueNode &node : tuningData["luxSets"].asList()) {
++		auto lux = node["lux"].get<std::vector<double>>();
++		std::vector<Set> sets;
++		if (!lux || lux->size() != 2 || readSets(node["sets"], &sets) < 0 || sets.empty()) {
++			LOG(IPASoftIspLsc, Error) << "Invalid lens shading luxSets";
++			return -EINVAL;
++		}
++		luxRanges_.push_back({ (*lux)[0], (*lux)[1] });
++		luxSets_.push_back(std::move(sets));
++	}
++
++	LOG(IPASoftIspLsc, Info)
++		<< "Lens shading correction, " << sets_.size() << " illuminants from "
++		<< sets_.front().ct << "K to " << sets_.back().ct << "K, "
++		<< luxSets_.size() << " lux index regions";
++
++	return 0;
++}
++
++int Lsc::readSets(const ValueNode &list, std::vector<Set> *sets)
++{
++	for (const ValueNode &node : list.asList()) {
+ 		Set set;
+ 		set.ct = node["ct"].get<uint32_t>(0);
+ 
+@@ -77,42 +118,61 @@ int Lsc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 			LOG(IPASoftIspLsc, Error) << "Invalid lens shading set";
+ 			return -EINVAL;
+ 		}
+-		sets_.push_back(std::move(set));
++		sets->push_back(std::move(set));
+ 	}
+ 
+-	if (sets_.empty()) {
+-		LOG(IPASoftIspLsc, Error) << "No lens shading sets";
+-		return -EINVAL;
+-	}
+-
+-	std::sort(sets_.begin(), sets_.end(),
++	std::sort(sets->begin(), sets->end(),
+ 		  [](const Set &a, const Set &b) { return a.ct < b.ct; });
+-
+-	LOG(IPASoftIspLsc, Info)
+-		<< "Lens shading correction, " << sets_.size() << " illuminants from "
+-		<< sets_.front().ct << "K to " << sets_.back().ct << "K";
+-
+ 	return 0;
+ }
+ 
+-/* Interpolate the sets at a colour temperature, and encode the grid. */
+-void Lsc::encode(unsigned int ct, DebayerParams *params)
++/* Interpolate a region's sets at a colour temperature. */
++Lsc::Gains Lsc::gainsAt(const std::vector<Set> &sets, unsigned int ct)
+ {
+-	auto upper = std::lower_bound(sets_.begin(), sets_.end(), ct,
++	auto upper = std::lower_bound(sets.begin(), sets.end(), ct,
+ 				      [](const Set &s, unsigned int t) { return s.ct < t; });
+-	const Set &hi = upper == sets_.end() ? sets_.back() : *upper;
+-	const Set &lo = upper == sets_.begin() ? sets_.front() : *(upper - 1);
++	const Set &hi = upper == sets.end() ? sets.back() : *upper;
++	const Set &lo = upper == sets.begin() ? sets.front() : *(upper - 1);
+ 	const double w = hi.ct == lo.ct
+ 				 ? 0.0
+ 				 : std::clamp((static_cast<double>(ct) - lo.ct) / (hi.ct - lo.ct), 0.0, 1.0);
+ 
++	Gains out;
++	for (unsigned int c = 0; c < 3; c++) {
++		out[c].resize(kPoints);
++		for (unsigned int i = 0; i < kPoints; i++)
++			out[c][i] = lo.gains[c][i] * (1.0 - w) + hi.gains[c][i] * w;
++	}
++	return out;
++}
++
++/*
++ * Interpolate the sets at a colour temperature, blend the lux index regions
++ * around the lux index, and encode the grid.
++ */
++void Lsc::encode(unsigned int ct, double lux, DebayerParams *params)
++{
++	Gains gains;
++	if (luxSets_.empty() || lux < 0) {
++		gains = gainsAt(sets_, ct);
++	} else {
++		const auto b = ipa::softisp::luxBlend(luxRanges_, lux);
++		gains = gainsAt(luxSets_[b.lo], ct);
++		if (b.lo != b.hi) {
++			const Gains hi = gainsAt(luxSets_[b.hi], ct);
++			for (unsigned int c = 0; c < 3; c++)
++				for (unsigned int i = 0; i < kPoints; i++)
++					gains[c][i] = gains[c][i] * (1.0 - b.weight) + hi[c][i] * b.weight;
++		}
++	}
++
+ 	for (unsigned int i = 0; i < kPoints; i++)
+ 		for (unsigned int c = 0; c < 3; c++)
+-			lsc_[i * 3 + c] = DebayerParams::lscEncode(
+-				lo.gains[c][i] * (1.0 - w) + hi.gains[c][i] * w);
++			lsc_[i * 3 + c] = DebayerParams::lscEncode(gains[c][i]);
+ 
+ 	params->lsc = lsc_;
+ 	lastCt_ = ct;
++	lastLux_ = lux;
+ }
+ 
+ void Lsc::prepare(IPAContext &context,
+@@ -124,9 +184,10 @@ void Lsc::prepare(IPAContext &context,
+ 	if (!ct)
+ 		ct = kDefaultCt;
+ 	ct = (ct + kCtStep / 2) / kCtStep * kCtStep;
++	const double lux = context.activeState.agc.luxIndex;
+ 
+-	if (ct != lastCt_)
+-		encode(ct, params);
++	if (ct != lastCt_ || std::abs(lux - lastLux_) >= kLuxStep)
++		encode(ct, lux, params);
+ 	else
+ 		params->lsc = lsc_;
+ 
+diff --git a/src/ipa/softisp/algorithms/lsc.h b/src/ipa/softisp/algorithms/lsc.h
+index c816897ad..2924b109e 100644
+--- a/src/ipa/softisp/algorithms/lsc.h
++++ b/src/ipa/softisp/algorithms/lsc.h
+@@ -13,6 +13,7 @@
+ #include "libcamera/internal/software_isp/debayer_params.h"
+ 
+ #include "algorithm.h"
++#include "lux.h"
+ 
+ namespace libcamera {
+ 
+@@ -40,10 +41,18 @@ private:
+ 		std::array<std::vector<double>, 3> gains;
+ 	};
+ 
+-	void encode(unsigned int ct, DebayerParams *params);
++	using Gains = std::array<std::vector<double>, 3>;
++
++	int readSets(const ValueNode &list, std::vector<Set> *sets);
++	static Gains gainsAt(const std::vector<Set> &sets, unsigned int ct);
++	void encode(unsigned int ct, double lux, DebayerParams *params);
+ 
+ 	std::vector<Set> sets_;
++	/* The sets by lux index region, if the tuning has them */
++	std::vector<ipa::softisp::LuxRange> luxRanges_;
++	std::vector<std::vector<Set>> luxSets_;
+ 	unsigned int lastCt_ = 0;
++	double lastLux_ = -1.0;
+ 	decltype(DebayerParams::lsc) lsc_{};
+ };
+ 

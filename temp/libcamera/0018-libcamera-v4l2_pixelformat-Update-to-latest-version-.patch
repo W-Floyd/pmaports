@@ -1,0 +1,29 @@
+From 6c67b482691f264a2a4642230225ea3b91a4034e Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Thu, 17 Sep 2026 17:31:42 +0530
+Subject: libcamera: v4l2_pixelformat: Update to latest version of generic META
+ formats
+
+Fixes: 99b54c2c55a8 ("libcamera: v4l2_videodevice: Update to the new kernel metadata API")
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 7673269511f4bf276f888c7368eb60558958fde0)
+---
+ src/libcamera/v4l2_pixelformat.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/libcamera/v4l2_pixelformat.cpp b/src/libcamera/v4l2_pixelformat.cpp
+index e8b3eb9c1..c3e01a10e 100644
+--- a/src/libcamera/v4l2_pixelformat.cpp
++++ b/src/libcamera/v4l2_pixelformat.cpp
+@@ -397,9 +397,9 @@ bool V4L2PixelFormat::isGenericLineBasedMetadata() const
+ 	case V4L2_META_FMT_GENERIC_CSI2_10:
+ 	case V4L2_META_FMT_GENERIC_CSI2_12:
+ 	case V4L2_META_FMT_GENERIC_CSI2_14:
+-	case V4L2_META_FMT_GENERIC_CSI2_16:
++	case V4L2_META_FMT_GENERIC_16:
+ 	case V4L2_META_FMT_GENERIC_CSI2_20:
+-	case V4L2_META_FMT_GENERIC_CSI2_24:
++	case V4L2_META_FMT_GENERIC_24:
+ 		return true;
+ 	default:
+ 		return false;

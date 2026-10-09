@@ -1,0 +1,76 @@
+From 2be62ca998ea552a214e9f30cc75695f79b0fd22 Mon Sep 17 00:00:00 2001
+From: Hans de Goede <johannes.goede@oss.qualcomm.com>
+Date: Fri, 3 Apr 2026 19:24:52 +0200
+Subject: libcamera: v4l2_device: add lock() and unlock() methods
+
+Add lock() and unlock() methods to allow pipeline-handlers to do more
+fine grained locking the locking at the media-device label.
+
+Signed-off-by: Hans de Goede <johannes.goede@oss.qualcomm.com>
+---
+ include/libcamera/internal/v4l2_device.h |  3 ++
+ src/libcamera/v4l2_device.cpp            | 37 ++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/include/libcamera/internal/v4l2_device.h b/include/libcamera/internal/v4l2_device.h
+index 1a63fc547..f3edd04fe 100644
+--- a/include/libcamera/internal/v4l2_device.h
++++ b/include/libcamera/internal/v4l2_device.h
+@@ -52,6 +52,9 @@ public:
+ 
+ 	void updateControlInfo();
+ 
++	bool lock();
++	void unlock();
++
+ protected:
+ 	V4L2Device(const std::string &deviceNode);
+ 	~V4L2Device();
+diff --git a/src/libcamera/v4l2_device.cpp b/src/libcamera/v4l2_device.cpp
+index 258c82b8d..25469ba7e 100644
+--- a/src/libcamera/v4l2_device.cpp
++++ b/src/libcamera/v4l2_device.cpp
+@@ -148,6 +148,43 @@ void V4L2Device::close()
+ 	fd_.reset();
+ }
+ 
++/**
++ * \brief Lock the device to prevent it from being used by other instances of
++ * libcamera
++ *
++ * Multiple instances of libcamera might be running on the same system, at the
++ * same time. To allow the different instances to coexist, system resources like
++ * v4l2 devices must be accessible for enumerating the cameras they provide at
++ * all times, while still allowing an instance to lock a resource while it
++ * prepares to actively use a camera from the resource.
++ *
++ * \return True if the device could be locked, false otherwise
++ * \sa unlock()
++ */
++bool V4L2Device::lock()
++{
++	if (!fd_.isValid())
++		return false;
++
++	if (lockf(fd_.get(), F_TLOCK, 0))
++		return false;
++
++	return true;
++}
++
++/**
++ * \brief Unlock the device and free it for use for libcamera instances
++ *
++ * \sa lock()
++ */
++void V4L2Device::unlock()
++{
++	if (!fd_.isValid())
++		return;
++
++	std::ignore = lockf(fd_.get(), F_ULOCK, 0);
++}
++
+ /**
+  * \fn V4L2Device::isOpen()
+  * \brief Check if the V4L2 device node is open

@@ -1,0 +1,73 @@
+From 0c19fbef8c3c62565bd4d7f95cdc934a942dcfd8 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 16:15:42 +0000
+Subject: software_isp: debayer_egl: Bin only the cells the output shows
+
+The main pass draws the input into the output's framebuffer scaled to
+cover it, so with an output of a different aspect ratio than the input,
+or smaller than it, it shows only a fraction of each axis of the cells.
+Bin just that part, and a few cells more for the filters' taps, by
+scissoring the binning pass, and tell the GPU not to load the target's
+old contents into tile memory, which the pass overwrites.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/software_isp/debayer_egl.cpp | 28 ++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 7eab99c4a..c26462fed 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <assert.h>
++#include <cmath>
+ #include <memory>
+ #include <span>
+ #include <stdio.h>
+@@ -469,6 +470,26 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 	const DebayerParams::Denoise &d = params.denoise;
+ 	const bool temporal = d.enabled && d.temporal > 0.0f && cellsHistory_;
+ 
++	/*
++	 * Only the cells the output shows are binned. The main pass draws the
++	 * input's viewport (the whole input) into the output's framebuffer, from
++	 * its corner, scaled to cover the output (the projection, as in
++	 * setShaderVariableValues()), so that it shows the texture's part up to
++	 * this fraction of each axis, which a different aspect ratio crops. A few
++	 * cells more are kept for the filters' taps.
++	 */
++	int binWidth = cellsSize_.width;
++	int binHeight = cellsSize_.height;
++	if (!quadBayer_ && nativeOutputSize_.width && nativeOutputSize_.height) {
++		const float fit = std::max(static_cast<float>(outputSize_.width) / nativeOutputSize_.width,
++					   static_cast<float>(outputSize_.height) / nativeOutputSize_.height);
++		const float fx = std::min(1.0f, static_cast<float>(outputSize_.width) / width_) / fit;
++		const float fy = std::min(1.0f, static_cast<float>(outputSize_.height) / height_) / fit;
++		constexpr int margin = 4;
++		binWidth = std::min<int>(cellsSize_.width, std::ceil(fx * cellsSize_.width) + margin);
++		binHeight = std::min<int>(cellsSize_.height, std::ceil(fy * cellsSize_.height) + margin);
++	}
++
+ 	if (egl_.attachTextureToFBO(*cells_[next]))
+ 		return -ENODEV;
+ 	egl_.activateBindTexture(*cells_[previous]);
+@@ -492,9 +513,16 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 		    params.blackLevel[2] * 1020.0f);
+ 
+ 	glViewport(0, 0, cellsSize_.width, cellsSize_.height);
++
++	/* The target's old contents are not needed: no copy of them into the tile memory */
++	static const GLenum discard[1] = { GL_COLOR_ATTACHMENT0 };
++	glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, discard);
++	glEnable(GL_SCISSOR_TEST);
++	glScissor(0, 0, binWidth, binHeight);
+ 	timerBegin(TimerBin);
+ 	glDrawArrays(GL_TRIANGLE_FAN, 0, DEBAYER_OPENGL_COORDS);
+ 	timerEnd(TimerBin);
++	glDisable(GL_SCISSOR_TEST);
+ 
+ 	/* The main pass's program samples the cells just written */
+ 	egl_.activateBindTexture(*cells_[next]);
