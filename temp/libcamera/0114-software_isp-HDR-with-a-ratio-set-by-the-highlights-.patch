@@ -1,4 +1,4 @@
-From 139b81d4063be58fa6bbc93c7839ebeac34a907c Mon Sep 17 00:00:00 2001
+From 2bd136e98feb21186f8b08af7abf8c45084a143e Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -942,7 +942,7 @@ index 000000000..1cdc95640
 +	fragColor = vec4(sum / total, 1.0);
 +}
 diff --git a/src/libcamera/shaders/bayer_cells_bin.frag b/src/libcamera/shaders/bayer_cells_bin.frag
-index 680b00bda..3793d39c7 100644
+index 680b00bda..531cb930b 100644
 --- a/src/libcamera/shaders/bayer_cells_bin.frag
 +++ b/src/libcamera/shaders/bayer_cells_bin.frag
 @@ -44,7 +44,8 @@ uniform vec2 temporal;		/* strength, and width in deviations */
@@ -1034,7 +1034,7 @@ index 680b00bda..3793d39c7 100644
  			 * clipped one has the wrong colour.
  			 */
 -			float fresh = 1.0 - smoothstep(780.0, 940.0, max(max(cell.r, cell.g), cell.b));
-+			float fresh = 1.0 - smoothstep(600.0, 800.0, max(max(cell.r, cell.g), cell.b));
++			float fresh = 1.0 - smoothstep(820.0, 940.0, max(max(cell.r, cell.g), cell.b));
  
  			/* A cell's green is the mean of two pixels: half the variance */
  			vec3 half_green = vec3(1.0, 0.5, 1.0);
@@ -1053,7 +1053,7 @@ index 680b00bda..3793d39c7 100644
 +			 * ratio.
 +			 */
 +			vec3 level_long = level_prev * ratio_snap.x;
-+			float long_sees = 1.0 - smoothstep(600.0, 800.0, black.g + max(max(level_long.r, level_long.g), level_long.b));
++			float long_sees = 1.0 - smoothstep(820.0, 940.0, black.g + max(max(level_long.r, level_long.g), level_long.b));
  			vec3 var_prev = (noise.x * level_prev + noise.y * level_prev * level_prev + noise.z) *
 -					half_green * 0.6;
 +					half_green * 0.6 * mix(1.0, 1.0 / (ratio_snap.x * ratio_snap.x), long_sees);
