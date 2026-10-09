@@ -1,0 +1,94 @@
+From dfc4055b924eb1d423533b7e6be61f926c96dc4e Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 14:58:19 +0000
+Subject: ipa: softisp: Take the sensor's timing at the configured format
+
+init() gets the sensor information of the format the sensor starts with,
+which is often the largest, and configure() kept using it: on the S5KJN1,
+streaming its 4080x3072 binned mode, the line duration came out twice the
+real one (hblank + width of the full size over the pixel rate), and so did
+every exposure time computed from it. Pass the information in the
+configuration, queried after the format is set.
+
+Pass the sensor information in the configuration from the camss pipeline
+as well, and keep init()'s if the pipeline gives none.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ include/libcamera/ipa/softisp.mojom         |  1 +
+ src/ipa/softisp/softisp.cpp                 | 12 ++++++++++++
+ src/libcamera/pipeline/camss/camss_util.cpp |  3 +++
+ src/libcamera/pipeline/simple/simple.cpp    |  4 ++++
+ 4 files changed, 20 insertions(+)
+
+diff --git a/include/libcamera/ipa/softisp.mojom b/include/libcamera/ipa/softisp.mojom
+index 807cac251..a30de7c40 100644
+--- a/include/libcamera/ipa/softisp.mojom
++++ b/include/libcamera/ipa/softisp.mojom
+@@ -9,6 +9,7 @@ module ipa.softisp;
+ import "include/libcamera/ipa/core.mojom";
+ 
+ struct IPAConfigInfo {
++	libcamera.IPACameraSensorInfo sensorInfo;
+ 	libcamera.ControlInfoMap sensorControls;
+ 	libcamera.ControlInfoMap lensControls;
+ 	libcamera.ControlInfoMap irisControls;
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index 24148708e..863934408 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -283,6 +283,13 @@ void IPASoftIsp::updateApertureRange()
+ 
+ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ {
++	/*
++	 * The sensor's timing at the configured format: the one init() had is
++	 * of the format the sensor started with (often the largest), whose
++	 * line is longer than that of a binned mode's.
++	 */
++	if (configInfo.sensorInfo.pixelRate)
++		context_.sensorInfo = configInfo.sensorInfo;
+ 	sensorInfoMap_ = configInfo.sensorControls;
+ 	lensInfoMap_ = configInfo.lensControls;
+ 	irisInfoMap_ = configInfo.irisControls;
+@@ -305,6 +312,11 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 
+ 	context_.configuration.agc.lineDuration =
+ 		context_.sensorInfo.minLineLength * 1.0s / context_.sensorInfo.pixelRate;
++	LOG(IPASoftIsp, Debug)
++		<< "Sensor output " << context_.sensorInfo.outputSize
++		<< ", line length " << context_.sensorInfo.minLineLength
++		<< ", pixel rate " << context_.sensorInfo.pixelRate
++		<< ", line " << context_.configuration.agc.lineDuration;
+ 	context_.configuration.agc.exposureMin = exposureInfo.min().get<int32_t>();
+ 	context_.configuration.agc.exposureMax = exposureInfo.max().get<int32_t>();
+ 	if (!context_.configuration.agc.exposureMin) {
+diff --git a/src/libcamera/pipeline/camss/camss_util.cpp b/src/libcamera/pipeline/camss/camss_util.cpp
+index e9327c357..bbd4d589c 100644
+--- a/src/libcamera/pipeline/camss/camss_util.cpp
++++ b/src/libcamera/pipeline/camss/camss_util.cpp
+@@ -67,6 +67,9 @@ ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor,
+ 		}
+ 	}
+ 
++	/* The sensor's timing at the format set, which the IPA's init() did not have */
++	if (sensor->sensorInfo(&info.sensorInfo))
++		info.sensorInfo = {};
+ 	info.sensorControls = sensor->controls();
+ 	CameraLens *focusLens = sensor->focusLens();
+ 	info.lensControls = focusLens ? focusLens->controls() : ControlInfoMap();
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 12553395f..9f490744f 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -1661,6 +1661,10 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 		return data->converter_->configure(inputCfg, outputCfgs);
+ 	} else {
+ 		ipa::softisp::IPAConfigInfo configInfo;
++		/* The sensor's timing at the format set, not the one it started with */
++		int ret = data->sensor_->sensorInfo(&configInfo.sensorInfo);
++		if (ret)
++			return ret;
+ 		configInfo.sensorControls = data->sensor_->controls();
+ 		if (data->sensor_->focusLens())
+ 			configInfo.lensControls = data->sensor_->focusLens()->controls();

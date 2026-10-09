@@ -1,7 +1,7 @@
-From 2f1caa235b3cb150725eab1d88bbff9221c119ac Mon Sep 17 00:00:00 2001
+From 640faa8c9277f090fb0262a5909a5c5428fa64d6 Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Wed, 1 May 2024 18:12:02 +0200
-Subject: [PATCH 01/39] libcamera: simple: Enable softISP for the Pinephone
+Subject: libcamera: simple: Enable softISP for the Pinephone
 
 In theory the PP should be able to use the actual HW ISP, however in
 practice this does not work well yet - especially as the driver for the
@@ -17,7 +17,7 @@ Signed-off-by: Robert Mader <robert.mader@collabora.com>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index e26f438d9..24538649c 100644
+index 35c29ceca..11c1d8f03 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -264,7 +264,7 @@ static const SimplePipelineInfo supportedDevices[] = {

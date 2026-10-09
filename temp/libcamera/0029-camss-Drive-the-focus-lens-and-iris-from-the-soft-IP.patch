@@ -1,0 +1,401 @@
+From 30f0fc1ee261666b987308391ae9fc4ef731b5f7 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 16:08:58 +0000
+Subject: camss: Drive the focus lens and iris from the soft IPA
+
+The soft IPA reports focus lens and iris controls alongside the sensor
+controls, and takes their control maps at init() and configure() so that
+it only offers LensPosition and the aperture when the sensor has them.
+The simple pipeline handles them; the camss pipeline handler, which
+replaces it for CAMSS, did not.
+
+Pass the maps from both ISP backends (a helper collects the sensor, lens
+and iris maps, which needs a non-const CameraSensor as the lens accessors
+are non-const), apply lens and iris controls directly as they are separate
+sub-devices outside the delayed controls, and park the focus lens at stop
+with the same ramp as the simple pipeline, so that a VCM does not hold
+coil current between captures or click onto its end stop.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/libcamera/pipeline/camss/camss.cpp        | 68 ++++++++++++++++++-
+ src/libcamera/pipeline/camss/camss_isp.h      |  3 +-
+ .../pipeline/camss/camss_isp_ope.cpp          | 22 +++---
+ src/libcamera/pipeline/camss/camss_isp_ope.h  |  6 +-
+ .../pipeline/camss/camss_isp_soft.cpp         | 17 +++--
+ src/libcamera/pipeline/camss/camss_isp_soft.h |  4 +-
+ src/libcamera/pipeline/camss/camss_util.cpp   | 23 +++++++
+ src/libcamera/pipeline/camss/camss_util.h     |  5 ++
+ 8 files changed, 124 insertions(+), 24 deletions(-)
+
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index 6b53bdacd..7ec4f50e0 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -11,10 +11,15 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <memory>
++#include <optional>
+ #include <queue>
++#include <thread>
+ #include <vector>
+ 
++#include <linux/v4l2-controls.h>
++
+ #include <libcamera/base/log.h>
+ #include <libcamera/base/utils.h>
+ 
+@@ -25,6 +30,7 @@
+ #include <libcamera/stream.h>
+ 
+ #include "libcamera/internal/camera.h"
++#include "libcamera/internal/camera_lens.h"
+ #include "libcamera/internal/camera_sensor.h"
+ #include "libcamera/internal/camera_sensor_properties.h"
+ #include "libcamera/internal/delayed_controls.h"
+@@ -56,16 +62,22 @@ public:
+ 	void frameStart(uint32_t sequence);
+ 	void statsReady(uint32_t frame, uint32_t statsBufferId);
+ 	void metadataReady(unsigned int id, const ControlList &metadata);
+-	void setSensorControls(const ControlList &sensorControls);
++	void setSensorControls(const ControlList &sensorControls,
++			       const ControlList &lensControls,
++			       const ControlList &irisControls);
+ 
+ 	void queuePendingRequests();
+ 	void cancelPendingRequests();
++	void parkFocusLens();
+ 
+ 	std::unique_ptr<CamssCsiCamera> csi_;
+ 	std::unique_ptr<CamssIsp> isp_;
+ 	std::unique_ptr<DelayedControls> delayedCtrls_;
+ 	CamssFrames frameInfos_;
+ 
++	/* The last focus position sent to the lens, for parking it at stop. */
++	std::optional<int32_t> lastFocusPosition_;
++
+ 	/* Requests for which no buffer has been queued to the CSI receiver yet. */
+ 	std::queue<Request *> pendingRequests_;
+ };
+@@ -420,11 +432,46 @@ void PipelineHandlerCamss::stopDevice(Camera *camera)
+ 	data->cancelPendingRequests();
+ 
+ 	data->isp_->stop();
++	data->parkFocusLens();
+ 	data->csi_->stop();
+ 
+ 	freeBuffers(camera);
+ }
+ 
++/*
++ * Park the focus lens. The lens subdevice stays open for as long as the
++ * camera manager lives, so a VCM driver never runtime-suspends and a lens
++ * left mid-travel keeps drawing coil current until the next capture. The IPA
++ * is stopped by now and cannot move it again.
++ *
++ * Ramp down rather than jump: at the bottom of its travel a VCM has no coil
++ * current, and a lens dropped there from mid-travel lands on its end stop
++ * with an audible click.
++ */
++void CamssCameraData::parkFocusLens()
++{
++	CameraLens *focusLens = csi_->sensor()->focusLens();
++	if (!focusLens)
++		return;
++
++	const ControlInfoMap &lensInfo = focusLens->controls();
++	auto it = lensInfo.find(V4L2_CID_FOCUS_ABSOLUTE);
++	if (it == lensInfo.end())
++		return;
++
++	const int32_t park = it->second.min().get<int32_t>();
++	constexpr int32_t kParkStep = 16;
++	int32_t pos = lastFocusPosition_.value_or(park);
++
++	while (pos - kParkStep > park) {
++		pos -= kParkStep;
++		focusLens->setFocusPosition(pos);
++		std::this_thread::sleep_for(std::chrono::milliseconds(1));
++	}
++	focusLens->setFocusPosition(park);
++	lastFocusPosition_ = park;
++}
++
+ CamssCameraData::CamssCameraData(PipelineHandler *pipe)
+ 	: Camera::Private(pipe)
+ {
+@@ -564,10 +611,27 @@ bool PipelineHandlerCamss::match(DeviceEnumerator *enumerator)
+ 	return numCameras != 0;
+ }
+ 
+-void CamssCameraData::setSensorControls(const ControlList &sensorControls)
++void CamssCameraData::setSensorControls(const ControlList &sensorControls,
++					const ControlList &lensControls,
++					const ControlList &irisControls)
+ {
+ 	delayedCtrls_->push(sensorControls);
+ 
++	/*
++	 * The focus lens and the iris are separate sub-devices, not subject to
++	 * the delayed controls the sensor needs, so drive them directly.
++	 */
++	CameraLens *focusLens = csi_->sensor()->focusLens();
++	if (focusLens && lensControls.contains(V4L2_CID_FOCUS_ABSOLUTE)) {
++		lastFocusPosition_ = lensControls.get(V4L2_CID_FOCUS_ABSOLUTE).get<int32_t>();
++		focusLens->setFocusPosition(*lastFocusPosition_);
++	}
++
++	CameraLens *irisLens = csi_->sensor()->irisLens();
++	if (irisLens && irisControls.contains(V4L2_CID_IRIS_ABSOLUTE))
++		irisLens->setIrisPosition(
++			irisControls.get(V4L2_CID_IRIS_ABSOLUTE).get<int32_t>());
++
+ 	/*
+ 	 * Directly apply controls now if there is no frameStart signal.
+ 	 *
+diff --git a/src/libcamera/pipeline/camss/camss_isp.h b/src/libcamera/pipeline/camss/camss_isp.h
+index 36adf99cc..e648c2d12 100644
+--- a/src/libcamera/pipeline/camss/camss_isp.h
++++ b/src/libcamera/pipeline/camss/camss_isp.h
+@@ -55,7 +55,8 @@ public:
+ 	Signal<FrameBuffer *> paramBufferReady;
+ 	Signal<uint32_t, uint32_t> statsReady;
+ 	Signal<uint32_t, const ControlList &> metadataReady;
+-	Signal<const ControlList &> setSensorControls;
++	/* Sensor, focus lens and iris controls, in that order. */
++	Signal<const ControlList &, const ControlList &, const ControlList &> setSensorControls;
+ 	Stream outStream_;
+ };
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index 8676c10a6..dbff0adf4 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -77,7 +77,7 @@ static const std::map<PixelFormat, uint32_t> outputFormatToMediaBus = {
+  * \param[out] ControlInfoMap to which to add ISP provided controls
+  */
+ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> opeMediaDev,
+-			 const CameraSensor *sensor, CamssFrames *frameInfos,
++			 CameraSensor *sensor, CamssFrames *frameInfos,
+ 			 ControlInfoMap *ispControls)
+ 	: opeMediaDev_(std::move(opeMediaDev)), sensor_(sensor), frameInfos_(frameInfos)
+ {
+@@ -122,11 +122,14 @@ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> ope
+ 	}
+ 
+ 	bool ccmEnabled;
++	ipa::softisp::IPAConfigInfo ctrlInfo = camssSoftIpaConfigInfo(sensor);
+ 	ret = ipa_->init(IPASettings{ ipaTuningFile, sensor->model() },
+ 			 stats_->getStatsFD(),
+ 			 sharedParams_.fd(),
+ 			 sensorInfo,
+-			 sensor->controls(),
++			 ctrlInfo.sensorControls,
++			 ctrlInfo.lensControls,
++			 ctrlInfo.irisControls,
+ 			 ispControls,
+ 			 &ccmEnabled);
+ 	if (ret) {
+@@ -141,8 +144,12 @@ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> ope
+ 					    metadataReady.emit(frame, metadata);
+ 				    });
+ 	ipa_->setSensorControls.connect(this,
+-					[&](const ControlList &sensorControls) {
+-						setSensorControls.emit(sensorControls);
++					[&](const ControlList &sensorControls,
++					    const ControlList &lensControls,
++					    const ControlList &irisControls) {
++						setSensorControls.emit(sensorControls,
++								       lensControls,
++								       irisControls);
+ 					});
+ }
+ 
+@@ -415,10 +422,7 @@ StreamConfiguration CamssIspOpe::validate(const StreamConfiguration &raw, const
+ int CamssIspOpe::configure(const StreamConfiguration &inputCfg,
+ 			   const StreamConfiguration &outputCfg)
+ {
+-	ipa::softisp::IPAConfigInfo configInfo;
+-	configInfo.sensorControls = sensor_->controls();
+-
+-	int ret = ipa_->configure(configInfo);
++	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_));
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -645,7 +649,7 @@ void CamssIspOpe::stop()
+  */
+ std::unique_ptr<CamssIspOpe> CamssIspOpe::match(PipelineHandler *pipe,
+ 						DeviceEnumerator *enumerator,
+-						const CameraSensor *sensor,
++						CameraSensor *sensor,
+ 						CamssFrames *frameInfos,
+ 						ControlInfoMap *ispControls)
+ {
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.h b/src/libcamera/pipeline/camss/camss_isp_ope.h
+index c8348b16f..2243b6f00 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.h
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.h
+@@ -38,7 +38,7 @@ class CamssIspOpe : public CamssIsp
+ public:
+ 	static std::unique_ptr<CamssIspOpe> match(PipelineHandler *pipe,
+ 						  DeviceEnumerator *enumerator,
+-						  const CameraSensor *sensor,
++						  CameraSensor *sensor,
+ 						  CamssFrames *frameInfos,
+ 						  ControlInfoMap *ispControls);
+ 
+@@ -46,7 +46,7 @@ public:
+ 	Size getMargins(PixelFormat inputFormat) override;
+ 
+ 	CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> opeMediaDev,
+-		    const CameraSensor *sensor, CamssFrames *frameInfos,
++		    CameraSensor *sensor, CamssFrames *frameInfos,
+ 		    ControlInfoMap *ispControls);
+ 	~CamssIspOpe() override;
+ 
+@@ -98,7 +98,7 @@ private:
+ 				 V4L2Subdevice::Whence whence) const;
+ 
+ 	std::shared_ptr<MediaDevice> opeMediaDev_;
+-	const CameraSensor *sensor_;
++	CameraSensor *sensor_;
+ 	const Stream *rawStream_;
+ 	class CamssFrames *frameInfos_;
+ 	SharedMemObject<DebayerParams> sharedParams_;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index ed81c0790..4df046fb7 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -20,6 +20,7 @@
+ #include "libcamera/internal/v4l2_videodevice.h"
+ 
+ #include "camss_frames.h"
++#include "camss_util.h"
+ 
+ namespace libcamera {
+ 
+@@ -37,7 +38,7 @@ LOG_DECLARE_CATEGORY(Camss)
+  * \param[in] frameInfos Pointer to CamssFrames instance owned by the pipeline
+  * \param[out] ControlInfoMap to which to add ISP provided controls
+  */
+-CamssIspSoft::CamssIspSoft(PipelineHandler *pipe, const CameraSensor *sensor,
++CamssIspSoft::CamssIspSoft(PipelineHandler *pipe, CameraSensor *sensor,
+ 			   CamssFrames *frameInfos, ControlInfoMap *ispControls)
+ 	: sensor_(sensor), frameInfos_(frameInfos)
+ {
+@@ -56,8 +57,12 @@ CamssIspSoft::CamssIspSoft(PipelineHandler *pipe, const CameraSensor *sensor,
+ 					      metadataReady.emit(frame, metadata);
+ 				      });
+ 	swIsp_->setSensorControls.connect(this,
+-					  [&](const ControlList &sensorControls) {
+-						  setSensorControls.emit(sensorControls);
++					  [&](const ControlList &sensorControls,
++					      const ControlList &lensControls,
++					      const ControlList &irisControls) {
++						  setSensorControls.emit(sensorControls,
++									 lensControls,
++									 irisControls);
+ 					  });
+ }
+ 
+@@ -172,10 +177,8 @@ int CamssIspSoft::configure(const StreamConfiguration &inputCfg,
+ 	outputCfgs.push_back(outputCfg);
+ 
+ 	/* \todo refactor SoftwareIsp to remove the need to pass this */
+-	ipa::softisp::IPAConfigInfo configInfo;
+-	configInfo.sensorControls = sensor_->controls();
+-
+-	return swIsp_->configure(inputCfg, outputCfgs, configInfo);
++	return swIsp_->configure(inputCfg, outputCfgs,
++				 camssSoftIpaConfigInfo(sensor_));
+ }
+ 
+ int CamssIspSoft::allocateBuffers([[maybe_unused]] unsigned int bufferCount)
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
+index 8adc6c59c..bc082a7c0 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.h
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
+@@ -23,7 +23,7 @@ class SoftwareIsp;
+ class CamssIspSoft : public CamssIsp
+ {
+ public:
+-	CamssIspSoft(PipelineHandler *pipe, const CameraSensor *sensor,
++	CamssIspSoft(PipelineHandler *pipe, CameraSensor *sensor,
+ 		     class CamssFrames *frameInfos, ControlInfoMap *ispControls);
+ 	~CamssIspSoft() override;
+ 
+@@ -49,7 +49,7 @@ public:
+ 
+ private:
+ 	std::unique_ptr<SoftwareIsp> swIsp_;
+-	const CameraSensor *sensor_;
++	CameraSensor *sensor_;
+ 	class CamssFrames *frameInfos_;
+ };
+ 
+diff --git a/src/libcamera/pipeline/camss/camss_util.cpp b/src/libcamera/pipeline/camss/camss_util.cpp
+index 96b1bbc72..d4b84a79f 100644
+--- a/src/libcamera/pipeline/camss/camss_util.cpp
++++ b/src/libcamera/pipeline/camss/camss_util.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <libcamera/stream.h>
+ 
++#include "libcamera/internal/camera_lens.h"
++#include "libcamera/internal/camera_sensor.h"
+ #include "libcamera/internal/v4l2_videodevice.h"
+ 
+ namespace libcamera {
+@@ -36,4 +38,25 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+ 	return true;
+ }
+ 
++/**
++ * \brief Collect the control maps the soft IPA drives for a sensor
++ * \param[in] sensor The camera sensor
++ *
++ * The focus lens and the iris are separate sub-devices with their own
++ * control maps. A sensor without them gets empty maps, so that the IPA does
++ * not offer their controls.
++ */
++ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor)
++{
++	ipa::softisp::IPAConfigInfo info;
++
++	info.sensorControls = sensor->controls();
++	CameraLens *focusLens = sensor->focusLens();
++	info.lensControls = focusLens ? focusLens->controls() : ControlInfoMap();
++	CameraLens *irisLens = sensor->irisLens();
++	info.irisControls = irisLens ? irisLens->controls() : ControlInfoMap();
++
++	return info;
++}
++
+ } /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/camss/camss_util.h b/src/libcamera/pipeline/camss/camss_util.h
+index 111c305aa..013883748 100644
+--- a/src/libcamera/pipeline/camss/camss_util.h
++++ b/src/libcamera/pipeline/camss/camss_util.h
+@@ -7,8 +7,11 @@
+ 
+ #pragma once
+ 
++#include <libcamera/ipa/soft_ipa_interface.h>
++
+ namespace libcamera {
+ 
++class CameraSensor;
+ struct StreamConfiguration;
+ class V4L2DeviceFormat;
+ 
+@@ -16,4 +19,6 @@ bool camssV4L2DeviceFormatMatchesStreamConfig(const V4L2DeviceFormat &fmt,
+ 					      const StreamConfiguration &cfg,
+ 					      const char *msgPrefix);
+ 
++ipa::softisp::IPAConfigInfo camssSoftIpaConfigInfo(CameraSensor *sensor);
++
+ } /* namespace libcamera */

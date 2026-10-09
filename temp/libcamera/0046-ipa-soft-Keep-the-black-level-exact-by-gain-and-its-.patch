@@ -1,0 +1,295 @@
+From 41d2d6a0cd78a94c90f9fe0aeb7abf511d3aa0e5 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 08:10:20 +0000
+Subject: ipa: soft: Keep the black level exact, by gain, and its noise
+
+Three things lift the shadows off black, and the AWB gains then tint
+what is lifted, blue under warm light (blue gain ~2.2 against red
+~1.05), and the tone curve brings it up:
+
+- The black level is held as an 8-bit integer, the 16-bit value
+  shifted down: a 10-bit pedestal of 63 (4032) is taken as 15, not
+  15.75, leaving 0.75 above black in every pixel. Hold it as a float.
+- Sensors' black level can drift with analogue gain; the S5KJNS
+  module's vendor tuning has it fall from 4032 at 1x to 3664 from
+  64x. Accept a blackLevelGain piecewise linear function of the gain
+  and apply each frame's level by the gain it was taken with, in the
+  debayer and, for its statistics, to AWB and AGC.
+- The debayer clamps each channel at 0 after the AWB gains, so the
+  noise around black, half of it below, averages to a positive
+  offset in dark areas. Keep values below black through colour
+  correction and clamp only before the tone curve.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/softisp/algorithms/agc.cpp         |  2 +-
+ src/ipa/softisp/algorithms/awb.cpp         |  4 +-
+ src/ipa/softisp/algorithms/blc.cpp         | 72 +++++++++++++++-------
+ src/ipa/softisp/algorithms/blc.h           |  8 ++-
+ src/ipa/softisp/ipa_context.h              |  4 +-
+ src/ipa/softisp/softisp.cpp                |  2 +-
+ src/libcamera/shaders/bayer_1x_packed.frag |  9 ++-
+ src/libcamera/shaders/bayer_unpacked.frag  |  9 ++-
+ 8 files changed, 76 insertions(+), 34 deletions(-)
+
+diff --git a/src/ipa/softisp/algorithms/agc.cpp b/src/ipa/softisp/algorithms/agc.cpp
+index 259d15727..db390e8e6 100644
+--- a/src/ipa/softisp/algorithms/agc.cpp
++++ b/src/ipa/softisp/algorithms/agc.cpp
+@@ -476,7 +476,7 @@ void Agc::process(IPAContext &context,
+ 	 */
+ 	const auto &histogram = stats->yHistogram;
+ 	const unsigned int blackLevelHistIdx =
+-		context.activeState.blc.level / kYBinWidth;
++		static_cast<unsigned int>(context.activeState.blc.level) / kYBinWidth;
+ 	const unsigned int histogramSize =
+ 		SwIspStats::kYHistogramSize - blackLevelHistIdx;
+ 	const unsigned int yHistValsPerBin = histogramSize / kExposureBinsCount;
+diff --git a/src/ipa/softisp/algorithms/awb.cpp b/src/ipa/softisp/algorithms/awb.cpp
+index 205949018..b55512894 100644
+--- a/src/ipa/softisp/algorithms/awb.cpp
++++ b/src/ipa/softisp/algorithms/awb.cpp
+@@ -302,7 +302,7 @@ void Awb::process(IPAContext &context,
+ 		  ControlList &metadata)
+ {
+ 	const SwIspStats::Histogram &histogram = stats->yHistogram;
+-	const uint8_t blackLevel = context.activeState.blc.level;
++	const float blackLevel = context.activeState.blc.level;
+ 
+ 	metadata.set(controls::ColourGains, { frameContext.gains.r(),
+ 					      frameContext.gains.b() });
+@@ -332,7 +332,7 @@ void Awb::process(IPAContext &context,
+ 	 * samples that actually contributed to the sums, which is not the
+ 	 * number of samples in the histogram.
+ 	 */
+-	const uint64_t offset = blackLevel * stats->sumCount;
++	const uint64_t offset = std::llround(blackLevel * stats->sumCount);
+ 	const uint64_t minValid = 1;
+ 	/*
+ 	 * Make sure the sums are at least minValid, while preventing unsigned
+diff --git a/src/ipa/softisp/algorithms/blc.cpp b/src/ipa/softisp/algorithms/blc.cpp
+index c7714aa34..7ebddd60c 100644
+--- a/src/ipa/softisp/algorithms/blc.cpp
++++ b/src/ipa/softisp/algorithms/blc.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "blc.h"
+ 
++#include <cmath>
+ #include <numeric>
+ 
+ #include <libcamera/base/log.h>
+@@ -23,16 +24,34 @@ BlackLevel::BlackLevel()
+ {
+ }
+ 
++/*
++ * The tuning data's black levels are 16-bit values; the soft ISP works on
++ * 8-bit ones, kept fractional: a 10-bit pedestal of 63 is 15.75, not 15.
++ *
++ *   - BlackLevel:
++ *       blackLevel: 4032
++ *       blackLevelGain: [ 1.0, 4032, 16.0, 3968, 64.0, 3664 ]  # optional
++ *
++ * blackLevelGain, a piecewise linear function of the analogue gain, gives
++ * the level for each frame by the gain it was taken with, for sensors
++ * whose black level drifts with gain; blackLevel is the level otherwise.
++ */
+ int BlackLevel::init([[maybe_unused]] IPAContext &context,
+ 		     const ValueNode &tuningData)
+ {
+-	auto blackLevel = tuningData["blackLevel"].get<int16_t>();
+-	if (blackLevel.has_value()) {
+-		/*
+-		 * Convert 16 bit values from the tuning file to 8 bit black
+-		 * level for the SoftISP.
+-		 */
+-		definedLevel_ = blackLevel.value() >> 8;
++	auto blackLevel = tuningData["blackLevel"].get<double>();
++	if (blackLevel.has_value())
++		definedLevel_ = blackLevel.value() / 256.0;
++
++	if (tuningData.contains("blackLevelGain")) {
++		auto byGain = tuningData["blackLevelGain"].get<ipa::Pwl>();
++		if (!byGain || byGain->empty()) {
++			LOG(IPASoftIspBL, Error) << "Failed to parse 'blackLevelGain'";
++			return -EINVAL;
++		}
++		byGain_ = std::move(*byGain);
++		if (!definedLevel_)
++			definedLevel_ = byGain_.eval(byGain_.domain().start) / 256.0;
+ 	}
+ 	return 0;
+ }
+@@ -42,30 +61,30 @@ int BlackLevel::configure(IPAContext &context,
+ {
+ 	if (definedLevel_.has_value())
+ 		context.configuration.black.level = definedLevel_;
+-	else if (context.camHelper) {
+-		if (auto bl = context.camHelper->blackLevel()) {
+-			/*
+-			 * The black level from CameraSensorHelper is a 16 bit value, software ISP
+-			 * works with 8 bit pixel values, both regardless of the actual
+-			 * sensor pixel width. Hence we obtain the pixel-based black value
+-			 * by dividing the value from the helper by 256.
+-			 */
+-			context.configuration.black.level = *bl / 256;
+-		}
+-	}
+-
+ 	context.activeState.blc.level =
+ 		context.configuration.black.level.value_or(16);
+ 	return 0;
+ }
+ 
++/* The level for a frame taken at this analogue gain, 8-bit */
++float BlackLevel::levelAt(const IPAContext &context, double gain) const
++{
++	if (byGain_.empty())
++		return context.activeState.blc.level;
++	return byGain_.eval(byGain_.domain().clamp(gain)) / 256.0;
++}
++
+ void BlackLevel::prepare(IPAContext &context,
+ 			 [[maybe_unused]] const uint32_t frame,
+-			 [[maybe_unused]] IPAFrameContext &frameContext,
++			 IPAFrameContext &frameContext,
+ 			 DebayerParams *params)
+ {
++	const float level = frameContext.sensor.known
++				    ? levelAt(context, frameContext.sensor.gain)
++				    : context.activeState.blc.level;
++
+ 	/* Latch the blacklevel gain so GPUISP can apply. */
+-	params->blackLevel = RGB<double>(context.activeState.blc.level / 255.0f);
++	params->blackLevel = RGB<float>(level / 255.0f);
+ }
+ 
+ void BlackLevel::process(IPAContext &context,
+@@ -74,8 +93,15 @@ void BlackLevel::process(IPAContext &context,
+ 			 const SwIspStats *stats,
+ 			 ControlList &metadata)
+ {
++	/*
++	 * The level of the frame these statistics are of, for the algorithms
++	 * that process them after this one.
++	 */
++	if (!byGain_.empty())
++		context.activeState.blc.level = levelAt(context, frameContext.sensor.gain);
++
+ 	/* Assign each of the R G G B channels as the same black level. */
+-	const int32_t blackLevel = context.activeState.blc.level * 256;
++	const int32_t blackLevel = std::lround(context.activeState.blc.level * 256);
+ 	const int32_t blackLevels[] = {
+ 		blackLevel, blackLevel, blackLevel, blackLevel
+ 	};
+@@ -109,7 +135,7 @@ void BlackLevel::process(IPAContext &context,
+ 	const unsigned int pixelThreshold = ignoredPercentage * total;
+ 	const unsigned int histogramRatio = 256 / SwIspStats::kYHistogramSize;
+ 	const unsigned int currentBlackIdx =
+-		context.activeState.blc.level / histogramRatio;
++		static_cast<unsigned int>(context.activeState.blc.level) / histogramRatio;
+ 
+ 	for (unsigned int i = 0, seen = 0;
+ 	     i < currentBlackIdx && i < SwIspStats::kYHistogramSize;
+diff --git a/src/ipa/softisp/algorithms/blc.h b/src/ipa/softisp/algorithms/blc.h
+index 1d602927f..56fce0b8c 100644
+--- a/src/ipa/softisp/algorithms/blc.h
++++ b/src/ipa/softisp/algorithms/blc.h
+@@ -10,6 +10,8 @@
+ #include <optional>
+ #include <stdint.h>
+ 
++#include <libipa/pwl.h>
++
+ #include "algorithm.h"
+ 
+ namespace libcamera {
+@@ -34,7 +36,11 @@ public:
+ 		     ControlList &metadata) override;
+ 
+ private:
+-	std::optional<uint8_t> definedLevel_;
++	float levelAt(const IPAContext &context, double gain) const;
++
++	std::optional<float> definedLevel_;
++	/* Black level (16-bit) by analogue gain; empty without tuning */
++	ipa::Pwl byGain_;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index f39f436b5..2931c2925 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -36,7 +36,7 @@ struct IPASessionConfiguration {
+ 		utils::Duration lineDuration;
+ 	} agc;
+ 	struct {
+-		std::optional<uint8_t> level;
++		std::optional<float> level;
+ 	} black;
+ 	struct {
+ 		int32_t focus_min, focus_max;
+@@ -80,7 +80,7 @@ struct IPAActiveState {
+ 	} agc;
+ 
+ 	struct {
+-		uint8_t level;
++		float level;
+ 		int32_t lastExposure;
+ 		double lastGain;
+ 	} blc;
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index bff43fdac..805029b85 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -343,7 +343,7 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 			 * by dividing the value from the helper by 256.
+ 			 */
+ 			context_.configuration.black.level =
+-				camHelper_->blackLevel().value() / 256;
++				camHelper_->blackLevel().value() / 256.0f;
+ 		}
+ 	} else {
+ 		context_.configuration.agc.againMax = againMax;
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index f2156ebdc..a31b66a1e 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -321,8 +321,13 @@ void main(void)
+ 	/* Correct lens shading, on the linear data */
+ 	rgb *= lens_shading(textureOut);
+ 
+-	/* Apply AWB gains, and saturate each channel at sensor range */
+-	rgb = clamp(rgb * awb, vec3(0.0), vec3(1.0));
++	/*
++	 * Apply AWB gains, and saturate each channel at sensor range. Values
++	 * below black are noise around it: keep them, so that colour
++	 * correction averages the noise out rather than lifting it, tinted
++	 * by the gains, into the shadows; the tone curve clamps at black.
++	 */
++	rgb = min(rgb * awb, vec3(1.0));
+ 
+ 	/* Colour Correction Matrix */
+ 	rgb = ccm * rgb;
+diff --git a/src/libcamera/shaders/bayer_unpacked.frag b/src/libcamera/shaders/bayer_unpacked.frag
+index 72c8d560d..5c1a3901d 100644
+--- a/src/libcamera/shaders/bayer_unpacked.frag
++++ b/src/libcamera/shaders/bayer_unpacked.frag
+@@ -179,8 +179,13 @@ void main(void) {
+     /* Correct lens shading, on the linear data */
+     rgb *= lens_shading(center.xy);
+ 
+-    /* Apply AWB gains, and saturate each channel at sensor range */
+-    rgb = clamp(rgb * awb, vec3(0.0), vec3(1.0));
++    /*
++     * Apply AWB gains, and saturate each channel at sensor range. Values
++     * below black are noise around it: keep them, so that colour
++     * correction averages the noise out rather than lifting it, tinted
++     * by the gains, into the shadows; the tone curve clamps at black.
++     */
++    rgb = min(rgb * awb, vec3(1.0));
+ 
+     /* Colour Correction Matrix */
+     rgb = ccm * rgb;

@@ -1,0 +1,454 @@
+From 09c5b50f83f3efa32c909eaa55f1a624273d673d Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 20:09:11 +0000
+Subject: ipa: soft: Add lens shading correction
+
+The lens passes less light to the image corners than to its centre, and
+not equally per colour. Add an Lsc algorithm taking per-channel gain
+grids measured under several illuminants, interpolating them by the AWB
+colour temperature, and a lens shading stage in the GPU debayer that
+samples the grid as a linearly filtered texture after black level
+subtraction.
+
+The grid is fixed at 17x13 points, the layout of Qualcomm Chromatix
+lens shading tables. Gains are encoded in DebayerParams as fractions of
+the range [1, kLscGainMax] in the width of LscValue.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/debayer_params.h    |  25 ++++
+ src/ipa/softisp/algorithms/lsc.cpp            | 140 ++++++++++++++++++
+ src/ipa/softisp/algorithms/lsc.h              |  52 +++++++
+ src/ipa/softisp/algorithms/meson.build        |   1 +
+ src/libcamera/shaders/bayer_1x_packed.frag    |  20 +++
+ src/libcamera/shaders/bayer_unpacked.frag     |  20 +++
+ src/libcamera/software_isp/debayer_egl.cpp    |  35 +++++
+ src/libcamera/software_isp/debayer_egl.h      |   7 +
+ 8 files changed, 300 insertions(+)
+ create mode 100644 src/ipa/softisp/algorithms/lsc.cpp
+ create mode 100644 src/ipa/softisp/algorithms/lsc.h
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index f87201943..4aa82a2d1 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -11,6 +11,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <limits>
+ #include <stdint.h>
+ 
+ #include "libcamera/internal/matrix.h"
+@@ -29,12 +30,36 @@ struct DebayerParams {
+ 		return lut;
+ 	}
+ 
++	/*
++	 * Lens shading correction: a grid of per-channel gains, its points
++	 * spread evenly from the input image's top left corner to its bottom
++	 * right one, interpolated in between, applied to the linear data
++	 * after the black level. A gain is stored as a LscValue v standing for
++	 * 1 + v / max(LscValue) * (kLscGainMax - 1), which is how the GPU
++	 * debayer reads it too (a normalised texel).
++	 */
++	using LscValue = uint8_t;
++	static constexpr unsigned int kLscWidth = 17;
++	static constexpr unsigned int kLscHeight = 13;
++	static constexpr float kLscGainMax = 5.0f;
++
++	static constexpr LscValue lscEncode(float gain)
++	{
++		constexpr float max = std::numeric_limits<LscValue>::max();
++		float v = (gain - 1.0f) / (kLscGainMax - 1.0f) * max + 0.5f;
++		return v <= 0.0f ? 0 : v >= max ? std::numeric_limits<LscValue>::max()
++						: static_cast<LscValue>(v);
++	}
++
+ 	Matrix<float, 3, 3> combinedMatrix = { { 1.0, 0.0, 0.0,
+ 						 0.0, 1.0, 0.0,
+ 						 0.0, 0.0, 1.0 } };
+ 	RGB<float> blackLevel = RGB<float>({ 0.0, 0.0, 0.0 });
+ 	std::array<uint8_t, kToneLutSize> toneLut = identityToneLut();
+ 	RGB<float> gains = RGB<float>({ 1.0, 1.0, 1.0 });
++	/* Row major, R, G, B per point; unused unless lscEnabled */
++	bool lscEnabled = false;
++	std::array<LscValue, kLscWidth * kLscHeight * 3> lsc{};
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/lsc.cpp b/src/ipa/softisp/algorithms/lsc.cpp
+new file mode 100644
+index 000000000..a775e57eb
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/lsc.cpp
+@@ -0,0 +1,140 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Lens shading correction
++ */
++
++#include "lsc.h"
++
++#include <algorithm>
++#include <cmath>
++
++#include <libcamera/base/log.h>
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(IPASoftIspLsc)
++
++namespace ipa::softisp::algorithms {
++
++/*
++ * The colour temperature is re-evaluated for the grid only on a change of
++ * this many kelvin: shading varies slowly with it, and the debayer
++ * re-uploads the grid whenever it changes.
++ */
++static constexpr unsigned int kCtStep = 50;
++
++/* Before AWB has estimated a colour temperature */
++static constexpr unsigned int kDefaultCt = 5000;
++
++/**
++ * \class Lsc
++ * \brief Lens shading correction
++ *
++ * The lens passes less light to the corners of the image than to its centre
++ * (vignetting), and not equally for every colour (colour shading). The
++ * correction is a grid of gains per colour channel, measured on the module
++ * under a few illuminants, interpolated over the image by the debayer and
++ * between illuminants here, by the colour temperature AWB estimates:
++ *
++ *   - Lsc:
++ *       grid: [ 17, 13 ]    # points, corner to corner of the image
++ *       sets:
++ *         - ct: 2800
++ *           r: [ ... ]      # 17 x 13 gains, row major
++ *           g: [ ... ]
++ *           b: [ ... ]
++ *
++ * The grid must be the debayer's (DebayerParams::kLscWidth x kLscHeight).
++ */
++
++int Lsc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	auto grid = tuningData["grid"].get<std::vector<uint32_t>>();
++	if (!grid || grid->size() != 2 || (*grid)[0] != DebayerParams::kLscWidth ||
++	    (*grid)[1] != DebayerParams::kLscHeight) {
++		LOG(IPASoftIspLsc, Error)
++			<< "The lens shading grid must be " << DebayerParams::kLscWidth
++			<< "x" << DebayerParams::kLscHeight;
++		return -EINVAL;
++	}
++
++	for (const ValueNode &node : tuningData["sets"].asList()) {
++		Set set;
++		set.ct = node["ct"].get<uint32_t>(0);
++
++		static const char *const channels[] = { "r", "g", "b" };
++		bool valid = set.ct > 0;
++		for (unsigned int c = 0; c < 3 && valid; c++) {
++			auto gains = node[channels[c]].get<std::vector<double>>();
++			valid = gains && gains->size() == kPoints;
++			if (valid)
++				set.gains[c] = std::move(*gains);
++		}
++
++		if (!valid) {
++			LOG(IPASoftIspLsc, Error) << "Invalid lens shading set";
++			return -EINVAL;
++		}
++		sets_.push_back(std::move(set));
++	}
++
++	if (sets_.empty()) {
++		LOG(IPASoftIspLsc, Error) << "No lens shading sets";
++		return -EINVAL;
++	}
++
++	std::sort(sets_.begin(), sets_.end(),
++		  [](const Set &a, const Set &b) { return a.ct < b.ct; });
++
++	LOG(IPASoftIspLsc, Info)
++		<< "Lens shading correction, " << sets_.size() << " illuminants from "
++		<< sets_.front().ct << "K to " << sets_.back().ct << "K";
++
++	return 0;
++}
++
++/* Interpolate the sets at a colour temperature, and encode the grid. */
++void Lsc::encode(unsigned int ct, DebayerParams *params)
++{
++	auto upper = std::lower_bound(sets_.begin(), sets_.end(), ct,
++				      [](const Set &s, unsigned int t) { return s.ct < t; });
++	const Set &hi = upper == sets_.end() ? sets_.back() : *upper;
++	const Set &lo = upper == sets_.begin() ? sets_.front() : *(upper - 1);
++	const double w = hi.ct == lo.ct
++				 ? 0.0
++				 : std::clamp((static_cast<double>(ct) - lo.ct) / (hi.ct - lo.ct), 0.0, 1.0);
++
++	for (unsigned int i = 0; i < kPoints; i++)
++		for (unsigned int c = 0; c < 3; c++)
++			lsc_[i * 3 + c] = DebayerParams::lscEncode(
++				lo.gains[c][i] * (1.0 - w) + hi.gains[c][i] * w);
++
++	params->lsc = lsc_;
++	lastCt_ = ct;
++}
++
++void Lsc::prepare(IPAContext &context,
++		  [[maybe_unused]] const uint32_t frame,
++		  [[maybe_unused]] IPAFrameContext &frameContext,
++		  DebayerParams *params)
++{
++	unsigned int ct = context.activeState.awb.temperatureK;
++	if (!ct)
++		ct = kDefaultCt;
++	ct = (ct + kCtStep / 2) / kCtStep * kCtStep;
++
++	if (ct != lastCt_)
++		encode(ct, params);
++	else
++		params->lsc = lsc_;
++
++	params->lscEnabled = true;
++}
++
++REGISTER_IPA_ALGORITHM(Lsc, "Lsc")
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/lsc.h b/src/ipa/softisp/algorithms/lsc.h
+new file mode 100644
+index 000000000..c816897ad
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/lsc.h
+@@ -0,0 +1,52 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Lens shading correction
++ */
++
++#pragma once
++
++#include <array>
++#include <vector>
++
++#include "libcamera/internal/software_isp/debayer_params.h"
++
++#include "algorithm.h"
++
++namespace libcamera {
++
++namespace ipa::softisp::algorithms {
++
++class Lsc : public Algorithm
++{
++public:
++	Lsc() = default;
++	~Lsc() = default;
++
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	void prepare(IPAContext &context,
++		     const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     DebayerParams *params) override;
++
++private:
++	static constexpr unsigned int kPoints =
++		DebayerParams::kLscWidth * DebayerParams::kLscHeight;
++
++	/* The gains measured under one illuminant, per channel and point */
++	struct Set {
++		unsigned int ct;
++		std::array<std::vector<double>, 3> gains;
++	};
++
++	void encode(unsigned int ct, DebayerParams *params);
++
++	std::vector<Set> sets_;
++	unsigned int lastCt_ = 0;
++	decltype(DebayerParams::lsc) lsc_{};
++};
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/meson.build b/src/ipa/softisp/algorithms/meson.build
+index 041294360..ed8141803 100644
+--- a/src/ipa/softisp/algorithms/meson.build
++++ b/src/ipa/softisp/algorithms/meson.build
+@@ -8,4 +8,5 @@ softisp_ipa_algorithms = files([
+     'ccm.cpp',
+     'af.cpp',
+     'aperture.cpp',
++    'lsc.cpp',
+ ])
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index 62c7bba2e..110035d77 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -69,6 +69,23 @@ uniform vec3 awb;
+ uniform mat3 ccm;
+ uniform vec3 blacklevel;
+ uniform sampler2D tone_lut;
++uniform sampler2D lsc;
++uniform float lsc_enabled;
++
++/*
++ * Lens shading gains at a position in the image (0 to 1 from corner to
++ * corner): the LSC_WIDTH x LSC_HEIGHT grid's points sit at its texel
++ * centres, interpolated by linear filtering. A texel reads 0 to 1 (the
++ * stored value over the storage type's maximum) for gains of 1 to
++ * 1 + LSC_GAIN_RANGE.
++ */
++vec3 lens_shading(vec2 pos)
++{
++	vec2 grid = vec2(LSC_WIDTH, LSC_HEIGHT);
++	vec2 uv = (clamp(pos, 0.0, 1.0) * (grid - 1.0) + 0.5) / grid;
++	vec3 gain = 1.0 + texture2D(lsc, uv).rgb * LSC_GAIN_RANGE;
++	return mix(vec3(1.0), gain, lsc_enabled);
++}
+ 
+ #if defined (QUAD_BAYER)
+ vec2 quad_cell(vec2 pixel)
+@@ -280,6 +297,9 @@ void main(void)
+ 	 */
+ 	rgb = (rgb - blacklevel) / (1.0 - blacklevel);
+ 
++	/* Correct lens shading, on the linear data */
++	rgb *= lens_shading(textureOut);
++
+ 	/* Apply AWB gains, and saturate each channel at sensor range */
+ 	rgb = clamp(rgb * awb, vec3(0.0), vec3(1.0));
+ 
+diff --git a/src/libcamera/shaders/bayer_unpacked.frag b/src/libcamera/shaders/bayer_unpacked.frag
+index d40bd0030..21f9427a6 100644
+--- a/src/libcamera/shaders/bayer_unpacked.frag
++++ b/src/libcamera/shaders/bayer_unpacked.frag
+@@ -28,6 +28,23 @@ uniform vec3            awb;
+ uniform mat3            ccm;
+ uniform vec3            blacklevel;
+ uniform sampler2D       tone_lut;
++uniform sampler2D       lsc;
++uniform float           lsc_enabled;
++
++/*
++ * Lens shading gains at a position in the image (0 to 1 from corner to
++ * corner): the LSC_WIDTH x LSC_HEIGHT grid's points sit at its texel
++ * centres, interpolated by linear filtering. A texel reads 0 to 1 (the
++ * stored value over the storage type's maximum) for gains of 1 to
++ * 1 + LSC_GAIN_RANGE.
++ */
++vec3 lens_shading(vec2 pos)
++{
++    vec2 grid = vec2(LSC_WIDTH, LSC_HEIGHT);
++    vec2 uv = (clamp(pos, 0.0, 1.0) * (grid - 1.0) + 0.5) / grid;
++    vec3 gain = 1.0 + texture2D(lsc, uv).rgb * LSC_GAIN_RANGE;
++    return mix(vec3(1.0), gain, lsc_enabled);
++}
+ 
+ /*
+  * Tone curve (gamma, contrast, or a tuned curve), as a TONE_LUT_SIZE x 1
+@@ -138,6 +155,9 @@ void main(void) {
+      */
+     rgb = (rgb - blacklevel) / (1.0 - blacklevel);
+ 
++    /* Correct lens shading, on the linear data */
++    rgb *= lens_shading(center.xy);
++
+     /* Apply AWB gains, and saturate each channel at sensor range */
+     rgb = clamp(rgb * awb, vec3(0.0), vec3(1.0));
+ 
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 7d05c1341..5994a75b0 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -110,6 +110,8 @@ int DebayerEGL::getShaderVariableLocations(void)
+ 	ccmUniformDataIn_ = glGetUniformLocation(programId_, "ccm");
+ 	blackLevelUniformDataIn_ = glGetUniformLocation(programId_, "blacklevel");
+ 	toneLutUniform_ = glGetUniformLocation(programId_, "tone_lut");
++	lscUniform_ = glGetUniformLocation(programId_, "lsc");
++	lscEnabledUniform_ = glGetUniformLocation(programId_, "lsc_enabled");
+ 
+ 	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
+ 	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
+@@ -151,6 +153,15 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+ 					std::to_string(DebayerParams::kToneLutSize) + ".0";
+ 	egl_.pushEnv(shaderEnv, toneLutSize.c_str());
+ 
++	/* The lens shading grid's size and gain encoding */
++	const std::string lscDefines[] = {
++		"#define LSC_WIDTH " + std::to_string(DebayerParams::kLscWidth) + ".0",
++		"#define LSC_HEIGHT " + std::to_string(DebayerParams::kLscHeight) + ".0",
++		"#define LSC_GAIN_RANGE " + std::to_string(DebayerParams::kLscGainMax - 1.0f),
++	};
++	for (const std::string &define : lscDefines)
++		egl_.pushEnv(shaderEnv, define.c_str());
++
+ 	/*
+ 	 * Tell shaders how to re-order output taking account of how the pixels
+ 	 * are actually stored by EGL.
+@@ -512,6 +523,29 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 	egl_.activateBindTexture(*toneLut_);
+ 	glUniform1i(toneLutUniform_, toneLut_->texture_unit_uniform_id_);
+ 
++	/*
++	 * Lens shading: a grid-sized RGB texture, uploaded when it changes and
++	 * sampled with linear filtering for the interpolation between grid
++	 * points. Rows are 3 bytes per point, so drop the 4 byte alignment.
++	 */
++	if (!lsc_) {
++		lscData_ = params.lsc;
++		lsc_ = std::make_unique<eGLImage>(GL_RGB, DebayerParams::kLscWidth,
++						  DebayerParams::kLscHeight,
++						  DebayerParams::kLscWidth * 3, GL_TEXTURE3, 3);
++		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++		egl_.createTexture2D(*lsc_, lscData_.data());
++		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++	} else if (params.lscEnabled && params.lsc != lscData_) {
++		lscData_ = params.lsc;
++		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++		egl_.updateTexture2D(*lsc_, lscData_.data());
++	}
++	egl_.activateBindTexture(*lsc_);
++	glUniform1i(lscUniform_, lsc_->texture_unit_uniform_id_);
++	glUniform1f(lscEnabledUniform_, params.lscEnabled ? 1.0f : 0.0f);
++
+ 	return;
+ }
+ 
+@@ -707,6 +741,7 @@ void DebayerEGL::stop()
+ 	eglImageOutCache_.clear();
+ 	eglImageInCache_.clear();
+ 	toneLut_.reset();
++	lsc_.reset();
+ 
+ 	if (programId_)
+ 		glDeleteProgram(programId_);
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 24c382736..82de3d650 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -112,6 +112,13 @@ private:
+ 	std::unique_ptr<eGLImage> toneLut_;
+ 	std::array<uint8_t, DebayerParams::kToneLutSize> toneLutData_;
+ 
++	/* Lens shading gain grid, an RGB texture on texture unit 3 */
++	GLint lscUniform_;
++	GLint lscEnabledUniform_;
++	std::unique_ptr<eGLImage> lsc_;
++	std::array<DebayerParams::LscValue,
++		   DebayerParams::kLscWidth * DebayerParams::kLscHeight * 3> lscData_;
++
+ 	Size nativeOutputSize_;
+ 	Rectangle window_;
+ 	std::unique_ptr<SwStatsCpu> stats_;

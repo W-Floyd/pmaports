@@ -1,0 +1,71 @@
+From 8a84972f8689453fc89a38a4a820d97d16a7b429 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Tue, 8 Sep 2026 13:19:17 +0000
+Subject: libipa, sensor: Add the S5K5F1
+
+The Samsung S5K5F1 is the monochrome infrared iris sensor on the Snapdragon
+Galaxy S9. Without a helper the SoftISP cannot convert between gain code
+and gain, and logs "Failed to create camera sensor helper".
+
+Samsung's analogue gain is code/32 rather than the Sony
+1024 / (1024 - code) model: the kernel driver exposes ANALOGUE_GAIN over
+32-512, and the vendor register dump pairs code 44 with 1.375x, which is
+exactly 44/32. That gives a 1x to 16x range.
+
+The sensor's ADC is 10 bits. Black level was measured on hardware from
+frames captured with the infrared illuminator off, at 64 in 10 bits.
+
+Without an entry libcamera warns "No static properties available for
+'s5k5f1'" and publishes no SensorPhysicalSize.
+
+The pixel pitch is 1.0um square from the datasheet, which agrees with the
+2400x2400 array in a 1/5.27" optical format.
+
+The sensor delays have not been measured, so they are left empty and
+libcamera's defaults apply, exactly as for the other sensors that do the
+same. No test pattern modes are described because the register mapping for
+them is unknown.
+---
+ src/ipa/libipa/camera_sensor_helper.cpp           | 12 ++++++++++++
+ src/libcamera/sensor/camera_sensor_properties.cpp |  5 +++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 4c2c5d0be..2f928c4ae 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -911,6 +911,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov13858", CameraSensorHelperOv13858)
+ 
++class CameraSensorHelperS5k5f1 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperS5k5f1()
++	{
++		/* Measured on a Galaxy S9 iris module: 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 32 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("s5k5f1", CameraSensorHelperS5k5f1)
++
+ class CameraSensorHelperVd55g1 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 1d97f30e3..73f4ba61e 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -591,6 +591,11 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5k5f1", {
++			.unitCellSize = { 1000, 1000 },
++			.testPatternModes = {},
++			.sensorDelays = { },
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {

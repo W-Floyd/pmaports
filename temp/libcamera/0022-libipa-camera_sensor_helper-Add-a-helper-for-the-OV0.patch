@@ -1,0 +1,40 @@
+From 407293c5dfa240c83872ac8ebd74ca53a5ec171d Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 05:11:31 +0000
+Subject: libipa: camera_sensor_helper: Add a helper for the OV08F10
+
+The sensor driver's analogue gain control is 128 for 1x, as the OV08D10's.
+Without a helper the soft IPA read the control's value as the gain itself,
+up to 1984x.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ src/ipa/libipa/camera_sensor_helper.cpp | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 2f928c4ae..a4a76b860 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -749,6 +749,21 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("ov08d10", CameraSensorHelperOv08d10)
+ 
++class CameraSensorHelperOv08f10 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperOv08f10()
++	{
++		/*
++		 * The kernel driver's analogue gain control is 128 for 1x
++		 * (register 0x24 holds it shifted right by 3), up to 1984.
++		 */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 1, 0, 0, 128 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("ov08f10", CameraSensorHelperOv08f10)
++
+ class CameraSensorHelperOv08x40 : public CameraSensorHelper
+ {
+ public:

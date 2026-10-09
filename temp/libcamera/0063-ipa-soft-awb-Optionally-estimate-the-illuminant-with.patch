@@ -1,0 +1,582 @@
+From e2f0142e4264b48b64329452a781a8ea52ab46ba Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 16:48:08 +0000
+Subject: ipa: soft: awb: Optionally estimate the illuminant with an ONNX model
+
+A tuning's model: key names an ONNX model that takes the statistics' zones
+(1 x 3 x 24 x 32, the means above black over full scale) and the gain or
+the lux index, and gives the illuminant's R/G and B/G, which stand in for
+grey world's before the fit to the locus. The inputs, the output and their
+types are checked when it loads, and anything else leaves grey world in
+place. Built with the softisp-awb-onnx option, which needs onnxruntime.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ meson_options.txt                        |   5 +
+ src/ipa/softisp/algorithms/awb.cpp       |  39 +++-
+ src/ipa/softisp/algorithms/awb.h         |   5 +
+ src/ipa/softisp/algorithms/awb_model.cpp | 274 +++++++++++++++++++++++
+ src/ipa/softisp/algorithms/awb_model.h   |  74 ++++++
+ src/ipa/softisp/algorithms/meson.build   |   1 +
+ src/ipa/softisp/ipa_context.h            |   3 +
+ src/ipa/softisp/meson.build              |  15 +-
+ src/ipa/softisp/softisp.cpp              |   5 +
+ 9 files changed, 418 insertions(+), 3 deletions(-)
+ create mode 100644 src/ipa/softisp/algorithms/awb_model.cpp
+ create mode 100644 src/ipa/softisp/algorithms/awb_model.h
+
+diff --git a/meson_options.txt b/meson_options.txt
+index 845765103..cfe962cdc 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -107,6 +107,11 @@ option('rpi-awb-nn',
+         value : 'auto',
+         description : 'Enable the Raspberry Pi Neural Network AWB algorithm')
+ 
++option('softisp-awb-onnx',
++        type : 'feature',
++        value : 'auto',
++        description : 'Enable the ONNX illuminant model of the software ISP IPA auto white balance (needs onnxruntime)')
++
+ option('softisp-gpu',
+         type : 'feature',
+         value : 'auto',
+diff --git a/src/ipa/softisp/algorithms/awb.cpp b/src/ipa/softisp/algorithms/awb.cpp
+index 92f054c5f..fa043ba90 100644
+--- a/src/ipa/softisp/algorithms/awb.cpp
++++ b/src/ipa/softisp/algorithms/awb.cpp
+@@ -17,6 +17,7 @@
+ 
+ #include <libcamera/control_ids.h>
+ 
++#include "awb_model.h"
+ #include "libipa/colours.h"
+ #include "libipa/interpolator.h"
+ #include "soft/ipa_context.h"
+@@ -70,7 +71,7 @@ static constexpr double kDefaultTransverse = 0.01;
+  * the sensor's.
+  */
+ 
+-int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++int Awb::init(IPAContext &context, const ValueNode &tuningData)
+ {
+ 	if (!tuningData.contains("colourGains"))
+ 		return 0;
+@@ -120,6 +121,24 @@ int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 		return -EINVAL;
+ 	}
+ 
++	/*
++	 * model: an ONNX model of the illuminant, instead of grey world's
++	 * estimate of it, which is then fitted to the locus as before (see
++	 * AwbModel for what it takes and gives); a relative path is from the
++	 * tuning file's directory. If it cannot be used, grey world stays.
++	 *
++	 *   model: awb.onnx
++	 */
++	if (auto path = tuningData["model"].get<std::string>()) {
++		std::string file = *path;
++		if (!file.empty() && file[0] != '/' && !context.tuningDirectory.empty())
++			file = context.tuningDirectory + "/" + file;
++
++		auto model = std::make_unique<AwbModel>();
++		if (model->load(file))
++			model_ = std::move(model);
++	}
++
+ 	if (tuningData.contains("gainAdjust"))
+ 		return readGainAdjust(tuningData["gainAdjust"]);
+ 
+@@ -388,7 +407,23 @@ void Awb::process(IPAContext &context,
+ 	if (locus_.empty()) {
+ 		context.activeState.awb.temperatureK = estimateCCT(rgbGains);
+ 	} else {
+-		const Vector<double, 2> greyWorld{ { rgbGains.r(), rgbGains.b() } };
++		Vector<double, 2> greyWorld{ { rgbGains.r(), rgbGains.b() } };
++
++		/* The model's estimate of the illuminant in place of grey world's */
++		if (model_) {
++			const double scene = model_->scene() == AwbModel::Scene::LuxIndex
++						     ? context.activeState.agc.luxIndex
++						     : (frameContext.sensor.known ? frameContext.sensor.gain
++										  : context.activeState.agc.again);
++			Vector<double, 2> estimate;
++			if (scene >= 0.0 && model_->estimate(*stats, blackLevel, scene, &estimate)) {
++				LOG(IPASoftIspAwb, Debug)
++					<< "grey world R/G, B/G " << greyWorld
++					<< ", the model's " << estimate;
++				greyWorld = estimate;
++			}
++		}
++
+ 		const LocusFit fit = fitLocus(greyWorld);
+ 		context.activeState.awb.temperatureK = fit.ct;
+ 		const Vector<double, 2> adjust = gainAdjust(fit.ratios, fit.ct);
+diff --git a/src/ipa/softisp/algorithms/awb.h b/src/ipa/softisp/algorithms/awb.h
+index 81737114d..7c71b460f 100644
+--- a/src/ipa/softisp/algorithms/awb.h
++++ b/src/ipa/softisp/algorithms/awb.h
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <memory>
+ #include <vector>
+ 
+ #include "libcamera/internal/vector.h"
+@@ -15,6 +16,7 @@
+ #include <libipa/pwl.h>
+ 
+ #include "algorithm.h"
++#include "awb_model.h"
+ 
+ namespace libcamera {
+ 
+@@ -70,6 +72,9 @@ private:
+ 	/* How far off the locus, towards purple and towards green, by CT */
+ 	ipa::Pwl transversePos_;
+ 	ipa::Pwl transverseNeg_;
++
++	/* The learned illuminant estimate, if the tuning names one that loads */
++	std::unique_ptr<AwbModel> model_;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */
+diff --git a/src/ipa/softisp/algorithms/awb_model.cpp b/src/ipa/softisp/algorithms/awb_model.cpp
+new file mode 100644
+index 000000000..e0e174dee
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/awb_model.cpp
+@@ -0,0 +1,274 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * A learned illuminant estimate for the auto white balance
++ */
++
++#include "awb_model.h"
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <vector>
++
++#include <libcamera/base/log.h>
++
++#if defined(HAVE_ONNXRUNTIME)
++#include <onnxruntime_cxx_api.h>
++#endif
++
++namespace libcamera {
++
++LOG_DECLARE_CATEGORY(IPASoftIspAwb)
++
++namespace ipa::softisp::algorithms {
++
++#if defined(HAVE_ONNXRUNTIME)
++
++/* The illuminant's ratios are within these, or the model is not trusted */
++static constexpr double kMinRatio = 0.05;
++static constexpr double kMaxRatio = 20.0;
++
++static constexpr unsigned int kZoneCount = SwIspStats::kZonesX * SwIspStats::kZonesY;
++
++struct AwbModel::Impl {
++	Ort::Env env{ ORT_LOGGING_LEVEL_WARNING, "libcamera-awb" };
++	std::unique_ptr<Ort::Session> session;
++	Ort::MemoryInfo memory = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
++
++	/* The inputs in the model's order, and which of them the zones are */
++	std::array<std::string, 2> inputNames;
++	unsigned int zonesIndex = 0;
++	std::string outputName;
++	std::vector<int64_t> sceneShape;
++
++	/* 3 or 4 channels of zones, as the model's zones input has */
++	unsigned int channels = 3;
++	std::array<float, 4 * kZoneCount> zones;
++	float scene = 0.0f;
++};
++
++/* The elements of a shape, a dynamic batch of -1 counting as 1 */
++static int64_t elementCount(const std::vector<int64_t> &shape)
++{
++	int64_t n = 1;
++	for (int64_t d : shape)
++		n *= d < 0 ? 1 : d;
++	return n;
++}
++
++AwbModel::AwbModel()
++	: impl_(std::make_unique<Impl>())
++{
++}
++
++AwbModel::~AwbModel() = default;
++
++bool AwbModel::load(const std::string &path)
++{
++	try {
++		Ort::SessionOptions options;
++		options.SetIntraOpNumThreads(1);
++		options.SetInterOpNumThreads(1);
++		options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
++		impl_->session = std::make_unique<Ort::Session>(impl_->env, path.c_str(), options);
++
++		Ort::Session &session = *impl_->session;
++		Ort::AllocatorWithDefaultOptions allocator;
++
++		if (session.GetInputCount() != 2 || session.GetOutputCount() != 1) {
++			LOG(IPASoftIspAwb, Warning)
++				<< path << " has " << session.GetInputCount() << " inputs and "
++				<< session.GetOutputCount() << " outputs, not 2 and 1";
++			return false;
++		}
++
++		bool haveZones = false;
++		bool haveScene = false;
++		for (unsigned int i = 0; i < 2; i++) {
++			const std::string name = session.GetInputNameAllocated(i, allocator).get();
++			/* The shape info borrows from the type info: keep it alive */
++			Ort::TypeInfo typeInfo = session.GetInputTypeInfo(i);
++			auto info = typeInfo.GetTensorTypeAndShapeInfo();
++			const std::vector<int64_t> shape = info.GetShape();
++			impl_->inputNames[i] = name;
++
++			if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
++				LOG(IPASoftIspAwb, Warning)
++					<< path << ": input " << name << " is not a float tensor";
++				return false;
++			}
++
++			if (shape.size() == 4) {
++				if ((shape[0] != 1 && shape[0] != -1) ||
++				    (shape[1] != 3 && shape[1] != 4) ||
++				    shape[2] != static_cast<int64_t>(SwIspStats::kZonesY) ||
++				    shape[3] != static_cast<int64_t>(SwIspStats::kZonesX)) {
++					LOG(IPASoftIspAwb, Warning)
++						<< path << ": the zones input " << name
++						<< " is not N x 3 or 4 x " << SwIspStats::kZonesY
++						<< " x " << SwIspStats::kZonesX;
++					return false;
++				}
++				impl_->channels = shape[1];
++				impl_->zonesIndex = i;
++				haveZones = true;
++			} else if (elementCount(shape) == 1) {
++				if (name.find("lux") != std::string::npos)
++					scene_ = Scene::LuxIndex;
++				else if (name.find("gain") != std::string::npos)
++					scene_ = Scene::Gain;
++				else {
++					LOG(IPASoftIspAwb, Warning)
++						<< path << ": the scene input " << name
++						<< " has neither \"gain\" nor \"lux\" in its name";
++					return false;
++				}
++				impl_->sceneShape = shape;
++				for (int64_t &d : impl_->sceneShape)
++					d = d < 0 ? 1 : d;
++				haveScene = true;
++			} else {
++				LOG(IPASoftIspAwb, Warning)
++					<< path << ": input " << name << " is neither the zones nor one value";
++				return false;
++			}
++		}
++		if (!haveZones || !haveScene) {
++			LOG(IPASoftIspAwb, Warning) << path << " needs one zones and one scene input";
++			return false;
++		}
++
++		Ort::TypeInfo outType = session.GetOutputTypeInfo(0);
++		auto outInfo = outType.GetTensorTypeAndShapeInfo();
++		if (outInfo.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
++		    elementCount(outInfo.GetShape()) != 2) {
++			LOG(IPASoftIspAwb, Warning)
++				<< path << ": the output is not 2 floats (R/G, B/G)";
++			return false;
++		}
++		impl_->outputName = session.GetOutputNameAllocated(0, allocator).get();
++	} catch (const Ort::Exception &e) {
++		LOG(IPASoftIspAwb, Warning) << "Cannot load " << path << ": " << e.what();
++		impl_->session.reset();
++		return false;
++	}
++
++	LOG(IPASoftIspAwb, Info)
++		<< "Illuminant model " << path << ", scene input is the "
++		<< (scene_ == Scene::Gain ? "gain" : "lux index");
++	return true;
++}
++
++bool AwbModel::estimate(const SwIspStats &stats, double blackLevel, double sceneValue,
++			Vector<double, 2> *ratios)
++{
++	if (!impl_->session)
++		return false;
++
++	const auto start = std::chrono::steady_clock::now();
++
++	/*
++	 * The samples a zone has when none of them is saturated: all the
++	 * window's, which the histogram counts, over the zones.
++	 */
++	uint64_t sampled = 0;
++	for (uint32_t bin : stats.yHistogram)
++		sampled += bin;
++	const double nominal = std::max(static_cast<double>(sampled) / kZoneCount, 1.0);
++
++	/* Channel-major, as the tensor is: all of red, then green, then blue */
++	const double range = SwIspStats::kYLevels - blackLevel;
++	for (unsigned int i = 0; i < kZoneCount; i++) {
++		const SwIspStats::Zone &z = stats.zones[i];
++		float r = 0.0f, g = 0.0f, b = 0.0f, valid = 0.0f;
++		if (z.count) {
++			auto level = [&](uint64_t sum) {
++				const double mean = static_cast<double>(sum) / z.count - blackLevel;
++				return static_cast<float>(std::max(mean, 0.0) / range);
++			};
++			r = level(z.r);
++			g = level(z.g);
++			b = level(z.b);
++			valid = static_cast<float>(std::min(z.count / nominal, 1.0));
++		}
++		impl_->zones[i] = r;
++		impl_->zones[kZoneCount + i] = g;
++		impl_->zones[2 * kZoneCount + i] = b;
++		impl_->zones[3 * kZoneCount + i] = valid;
++	}
++	impl_->scene = static_cast<float>(sceneValue);
++
++	try {
++		const std::array<int64_t, 4> zonesShape = { 1, impl_->channels, SwIspStats::kZonesY,
++							     SwIspStats::kZonesX };
++		Ort::Value zones = Ort::Value::CreateTensor<float>(impl_->memory, impl_->zones.data(),
++								   impl_->channels * kZoneCount,
++								   zonesShape.data(), zonesShape.size());
++		Ort::Value scene = Ort::Value::CreateTensor<float>(impl_->memory, &impl_->scene, 1,
++								   impl_->sceneShape.data(),
++								   impl_->sceneShape.size());
++
++		std::array<Ort::Value, 2> inputs{ Ort::Value(nullptr), Ort::Value(nullptr) };
++		inputs[impl_->zonesIndex] = std::move(zones);
++		inputs[1 - impl_->zonesIndex] = std::move(scene);
++		const std::array<const char *, 2> inputNames = { impl_->inputNames[0].c_str(),
++								 impl_->inputNames[1].c_str() };
++		const char *outputName = impl_->outputName.c_str();
++
++		auto out = impl_->session->Run(Ort::RunOptions{ nullptr }, inputNames.data(),
++					       inputs.data(), inputs.size(), &outputName, 1);
++		const float *v = out[0].GetTensorData<float>();
++		const double rg = v[0];
++		const double bg = v[1];
++		if (!std::isfinite(rg) || !std::isfinite(bg) || rg < kMinRatio || rg > kMaxRatio ||
++		    bg < kMinRatio || bg > kMaxRatio) {
++			LOG(IPASoftIspAwb, Warning)
++				<< "The illuminant model gave R/G " << rg << ", B/G " << bg;
++			return false;
++		}
++		*ratios = { { rg, bg } };
++	} catch (const Ort::Exception &e) {
++		LOG(IPASoftIspAwb, Warning) << "The illuminant model failed: " << e.what();
++		return false;
++	}
++
++	LOG(IPASoftIspAwb, Debug)
++		<< "The illuminant model took "
++		<< std::chrono::duration_cast<std::chrono::microseconds>(
++			   std::chrono::steady_clock::now() - start).count()
++		<< " us";
++
++	return true;
++}
++
++#else /* !HAVE_ONNXRUNTIME */
++
++struct AwbModel::Impl {
++};
++
++AwbModel::AwbModel() = default;
++AwbModel::~AwbModel() = default;
++
++bool AwbModel::load(const std::string &path)
++{
++	LOG(IPASoftIspAwb, Warning)
++		<< "Not loading " << path << ": built without onnxruntime";
++	return false;
++}
++
++bool AwbModel::estimate([[maybe_unused]] const SwIspStats &stats,
++			[[maybe_unused]] double blackLevel,
++			[[maybe_unused]] double sceneValue,
++			[[maybe_unused]] Vector<double, 2> *ratios)
++{
++	return false;
++}
++
++#endif /* HAVE_ONNXRUNTIME */
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/awb_model.h b/src/ipa/softisp/algorithms/awb_model.h
+new file mode 100644
+index 000000000..0e83cf5dd
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/awb_model.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * A learned illuminant estimate for the auto white balance
++ */
++
++#pragma once
++
++#include <memory>
++#include <string>
++
++#include "libcamera/internal/software_isp/swisp_stats.h"
++#include "libcamera/internal/vector.h"
++
++namespace libcamera {
++
++namespace ipa::softisp::algorithms {
++
++/*
++ * An ONNX model that estimates the illuminant from the statistics' zones,
++ * which stands in for grey world in Awb. Without onnxruntime (the
++ * softisp-awb-onnx build option) load() always fails, and Awb keeps grey world.
++ *
++ * The model has two inputs, in either order of its list:
++ *
++ *  - the zones: a float tensor of N x C x kZonesY x kZonesX with C of 3 or 4
++ *    and N of 1 (or dynamic): the red, green and blue means of each zone,
++ *    (mean - black level) / (full scale - black level) over the 8-bit
++ *    range, 0 for a zone with no unsaturated samples; and with C of 4 a
++ *    fourth channel, the zone's number of unsaturated samples over the
++ *    number a zone has when none is saturated (0 to 1);
++ *  - the scene: a float tensor of one value (of shape [N] or [N, 1] with N
++ *    of 1 or dynamic), which is the analogue gain if the input's name
++ *    contains "gain", or the lux index (0 to 900, as Agc estimates it) if
++ *    it contains "lux".
++ *
++ * and one output of two floats (N x 2): the illuminant's R/G and B/G, as
++ * grey world's are. Any other shape or type, or an output out of range, is a
++ * mismatch.
++ */
++class AwbModel
++{
++public:
++	/* What the scene input is */
++	enum class Scene {
++		Gain,
++		LuxIndex,
++	};
++
++	AwbModel();
++	~AwbModel();
++
++	/* Load the model; false if it cannot be used, with the reason logged */
++	bool load(const std::string &path);
++	Scene scene() const { return scene_; }
++
++	/*
++	 * Estimate the illuminant's R/G and B/G of a frame's statistics, with
++	 * the black level (8-bit units) and the scene input's value; false if
++	 * the model does not give a usable one.
++	 */
++	bool estimate(const SwIspStats &stats, double blackLevel, double sceneValue,
++		      Vector<double, 2> *ratios);
++
++private:
++	struct Impl;
++	std::unique_ptr<Impl> impl_;
++	Scene scene_ = Scene::Gain;
++};
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/meson.build b/src/ipa/softisp/algorithms/meson.build
+index 531e0d39b..045c4e0ed 100644
+--- a/src/ipa/softisp/algorithms/meson.build
++++ b/src/ipa/softisp/algorithms/meson.build
+@@ -3,6 +3,7 @@
+ softisp_ipa_algorithms = files([
+     'adjust.cpp',
+     'awb.cpp',
++    'awb_model.cpp',
+     'agc.cpp',
+     'blc.cpp',
+     'ccm.cpp',
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index 1fc2ade57..c8cd2614d 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -11,6 +11,7 @@
+ #include <deque>
+ #include <optional>
+ #include <stdint.h>
++#include <string>
+ #include <utility>
+ #include <vector>
+ 
+@@ -194,6 +195,8 @@ struct IPAContext {
+ 	}
+ 
+ 	IPACameraSensorInfo sensorInfo;
++	/* The directory of the tuning file, for the files it names */
++	std::string tuningDirectory;
+ 	IPASessionConfiguration configuration;
+ 	IPAActiveState activeState;
+ 	FCQueue<IPAFrameContext> frameContexts;
+diff --git a/src/ipa/softisp/meson.build b/src/ipa/softisp/meson.build
+index 755b7eaab..a739f6588 100644
+--- a/src/ipa/softisp/meson.build
++++ b/src/ipa/softisp/meson.build
+@@ -12,10 +12,23 @@ softisp_sources = files([
+ 
+ softisp_sources += softisp_ipa_algorithms
+ 
++softisp_deps = [libcamera_private, libipa_dep]
++softisp_args = []
++
++# An optional ONNX model of the illuminant for the auto white balance
++# (as system headers: its own trip the warnings libcamera builds with)
++onnx_dep = dependency('libonnxruntime', required : get_option('softisp-awb-onnx'),
++                      include_type : 'system')
++if onnx_dep.found()
++    softisp_deps += onnx_dep
++    softisp_args += '-DHAVE_ONNXRUNTIME'
++endif
++
+ mod = shared_module(ipa_name, softisp_sources,
+                     name_prefix : '',
+                     include_directories : [ipa_includes],
+-                    dependencies : [libcamera_private, libipa_dep],
++                    dependencies : softisp_deps,
++                    cpp_args : softisp_args,
+                     install : true,
+                     install_dir : ipa_install_dir)
+ 
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index 863934408..5ad261830 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -133,6 +133,11 @@ int IPASoftIsp::init(const IPASettings &settings,
+ 
+ 	context_.sensorInfo = sensorInfo;
+ 
++	/* The files the tuning names are beside it */
++	const std::string &tuningFile = settings.configurationFile;
++	const auto slash = tuningFile.rfind('/');
++	context_.tuningDirectory = slash == std::string::npos ? "." : tuningFile.substr(0, slash);
++
+ 	/*
+ 	 * Record the focus range before the algorithms are created, so that
+ 	 * they can decide in init() whether to advertise focus controls.

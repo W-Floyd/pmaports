@@ -2,8 +2,10 @@
 maintainer="Robert Mader <robert.mader@collabora.com>"
 pkgname=libcamera
 _pkgver=0.7.2
+# upstream master the downstream patches are rebased on
+_commit=06c3e2d719490aad8ce789fb5d2ad4dfa1459bfb
 pkgver=9999$_pkgver
-pkgrel=135
+pkgrel=136
 pkgdesc="Linux camera framework"
 url="https://libcamera.org/"
 arch="all"
@@ -57,124 +59,76 @@ _tuning_files="
 	s5k3l6xx.yaml
 	s5kjn1.yaml
 	"
-source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/v$_pkgver/libcamera-v$_pkgver.tar.gz
+source="https://gitlab.freedesktop.org/camera/libcamera/-/archive/$_commit/libcamera-$_commit.tar.gz
 	0001-libcamera-simple-Enable-softISP-for-the-Pinephone.patch
 	0002-libcamera-simple-Skip-hwISP-formats-if-swISP-is-acti.patch
-	0003-software_isp-debayer_egl-Re-add-log-for-failing-DMAB.patch
-	0004-ipa-simple-Derive-AGC-minimum-gain-step-from-sensor-.patch
-	0005-debayer-Further-demote-Unsupported-input-format-log.patch
-	0006-debayer_egl-Use-untransposed-matrix-to-fix-GLES-2.0.patch
-	0007-simple-Limit-swISP-output-sizes.patch
-	0008-libcamera-Add-quad-Bayer-CFA-layout-support.patch
-	0009-ipa-libipa-Add-sensor-helpers-for-IMX320-and-IMX345.patch
-	0010-ipa-soft-Make-the-AGC-loop-parameters-tunable.patch
-	0011-libcamera-sensor-Add-properties-for-IMX320-and-IMX34.patch
-	0012-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
-	0013-ipa-libipa-Add-a-sensor-helper-for-the-S5K5F1.patch
-	0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
-	0015-software_isp-Add-contrast-autofocus.patch
-	0016-software_isp-Keep-blown-highlights-out-of-exposure-a.patch
-	0017-software_isp-af-Add-AfMode-use-dioptres-hold-a-manua.patch
-	0018-libcamera-Add-a-LensAperture-control-and-iris-capabl.patch
-	0019-software_isp-Plumb-the-aperture-through-to-the-soft-.patch
-	0020-ipa-soft-Add-an-Aperture-algorithm.patch
-	0021-libcamera-simple-Park-the-focus-lens-when-the-camera.patch
-	0022-ipa-soft-af-Hill-climb-instead-of-re-sweeping-the-wh.patch
-	0023-ipa-soft-af-Acquire-focus-with-a-fast-coarse-scan.patch
-	0024-ipa-soft-af-Refocus-only-once-the-scene-holds-still.patch
-	0025-software_isp-Apply-the-tone-curve-from-a-lookup-tabl.patch
-	0026-libcamera-libipa-camera_sensor-Add-OmniVision-OV08D1.patch
-	0027-libcamera-Create-IPA-by-name.patch
-	0028-ipa-ipa_module-Remove-pipelineName.patch
-	0029-ipa-Allow-pipelines-to-have-differently-named-IPA.patch
-	0030-pipeline-rpi-Explictly-pass-pipe-name-when-creating-.patch
-	0031-libcamera-Create-IPA-by-IPA-proxy-type-name.patch
-	0032-libcamera-V4L2Subdevice-Add-whence-argument-to-get-s.patch
-	0033-software_isp-Rename-simple-IPA-setIspParams-signal-t.patch
-	0034-camss-Add-cammss-utility-functions.patch
-	0035-camss-Add-camss-pipeline-handler.patch
-	0036-camss-Add-include-linux-camss-config.h.patch
-	0037-camss-Add-camss_params.h.patch
-	0038-camss-Add-Offline-Processing-Engine-ISP-support.patch
-	0039-camss-Drive-the-focus-lens-and-iris-from-the-soft-IP.patch
-	0040-include-linux-Update-uAPI-headers-with-CRSM.patch
-	0041-libcamera-v4l2_subdevice-Use-new-raw-formats.patch
-	0042-libcamera-v4l2_pixelformat-Update-to-latest-version-.patch
-	0043-libcamera-camera_sensor_raw-Fix-the-check-for-METADA.patch
-	0044-libcamera-v4l2_subdevice-Drop-Type-EmbeddedData.patch
-	0045-libcamera-v4l2_subdevice-Add-new-common-raw-sensor-c.patch
-	0046-libcamera-camera_sensor_raw-Check-for-CONFIG_MODEL.patch
-	0047-ipa-libipa-Add-a-PDAF-phase-estimator-for-raw-PD-str.patch
-	0048-include-linux-Add-the-S5KJN1-PDAF-metadata-layout.patch
-	0049-ipa-libipa-camera_sensor_helper-Add-S5KJN1-with-its-.patch
-	0050-libcamera-camera_sensor_raw-Use-CFA_PATTERN-ctrl-ins.patch
-	0051-libcamera-camera_sensor_raw-Enumerate-formats-using-.patch
-	0052-libcamera-v4l2_videodevice-Open-metadata-devices-wit.patch
-	0053-ipa-libipa-pdaf-Correct-the-shading-of-each-pupil-ha.patch
-	0054-ipa-soft-Measure-the-phase-from-the-sensor-s-phase-d.patch
-	0055-libcamera-delayed_controls-Read-not-yet-queued-frame.patch
-	0056-camss-Capture-the-sensor-s-phase-detection-stream.patch
-	0057-ipa-soft-af-Focus-with-phase-detection.patch
-	0058-ipa-libipa-pdaf-Measure-only-the-regions-asked-for.patch
-	0059-camss-Give-the-IPA-one-phase-detection-buffer-at-a-t.patch
-	0060-ipa-soft-af-Trust-phase-detection-measure-only-what-.patch
-	0061-ipa-libipa-pdaf-Measure-only-the-columns-the-active-.patch
-	0062-ipa-soft-Don-t-measure-the-phase-that-nothing-uses.patch
-	0063-camss-Measure-the-phase-on-every-other-frame.patch
-	0064-ipa-soft-agc-Regulate-onto-a-mean-luminance-target-f.patch
-	0065-ipa-soft-agc-Keep-highlights-from-clipping-with-dyna.patch
-	0066-ipa-soft-agc-Apply-the-DRC-gain-with-the-exposure-it.patch
-	0067-software_isp-Process-each-frame-with-its-own-paramet.patch
-	0068-camss-Tell-the-ISP-the-sensor-controls-of-each-frame.patch
-	0069-ipa-soft-Match-the-DRC-tone-curve-to-each-frame-s-ex.patch
-	0070-ipa-soft-agc-Derive-luminance-scales-from-the-statis.patch
-	0071-ipa-soft-Add-lens-shading-correction.patch
-	0072-pipeline-camss-Request-the-ISP-s-preferred-input-str.patch
-	0073-pipeline-camss-Complete-in-flight-requests-on-stop.patch
-	0074-libcamera-software_isp-Gather-statistics-after-lens-.patch
-	0075-libcamera-software_isp-debayer_egl-Gather-statistics.patch
-	0076-ipa-libipa-camera_sensor_helper-S5KJN1-gain-is-the-c.patch
-	0077-ipa-soft-awb-Take-the-colour-temperature-from-the-se.patch
-	0078-ipa-soft-awb-Keep-grey-world-within-the-band-of-real.patch
-	0079-software_isp-Add-chroma-enhancement-after-the-tone-c.patch
-	0080-ipa-soft-Keep-the-black-level-exact-by-gain-and-its-.patch
-	0081-ipa-soft-awb-Hold-the-gains-when-there-is-too-little.patch
-	0082-libcamera-software_isp-debayer_egl-Gather-statistics.patch
-	0083-ipa-soft-adjust-Take-the-DRC-tone-mapping-from-the-t.patch
-	0084-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
-	0085-ipa-soft-awb-Let-the-transverse-band-depend-on-the-c.patch
-	0086-ipa-soft-awb-Adjust-the-gains-as-the-tuning-s-gain-a.patch
-	0087-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
-	0088-pipeline-camss-Allow-a-raw-stream-alongside-the-proc.patch
-	0089-ipa-soft-agc-Add-manual-exposure-time-and-gain.patch
-	0090-ipa-soft-Select-the-colour-correction-by-lux-index.patch
-	0091-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
-	0092-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
-	0093-ipa-soft-Add-a-noise-reduction-algorithm.patch
-	0094-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
-	0095-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
-	0096-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
-	0097-pipeline-simple-Delay-the-vertical-blanking-control.patch
-	0098-ipa-soft-agc-Lengthen-the-frame-for-longer-exposures.patch
-	0099-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
-	0100-pipeline-camss-Delay-the-vertical-blanking-control.patch
-	0101-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
-	0102-ipa-soft-agc-Lengthen-the-frame-along-the-tuning-s-e.patch
-	0103-pipeline-camss-Start-each-session-from-the-default-f.patch
-	0104-ipa-soft-agc-Allow-the-longest-exposure-at-the-maxim.patch
-	0105-ipa-soft-agc-Bring-a-long-exposure-back-along-the-tu.patch
-	0106-software_isp-Sharpen-the-luma-on-the-cells-path.patch
-	0107-software_isp-Keep-a-32x24-grid-of-the-statistics-cha.patch
-	0108-ipa-soft-awb-Optionally-estimate-the-illuminant-with.patch
-	0109-software_isp-Filter-the-cells-over-time.patch
-	0110-software_isp-Weigh-the-temporal-filter-once-for-the-.patch
-	0111-software_isp-Weigh-the-spatial-filter-s-taps-once-fo.patch
-	0112-software_isp-debayer_egl-Time-the-GPU-passes.patch
-	0113-software_isp-HDR-from-frames-of-alternating-exposure.patch
-	0114-software_isp-HDR-with-a-ratio-set-by-the-highlights-.patch
+	0003-simple-Limit-swISP-output-sizes.patch
+	0004-libcamera-Add-quad-Bayer-CFA-layout-support.patch
+	0005-libcamera-V4L2Subdevice-Add-whence-argument-to-get-s.patch
+	0006-camss-Add-cammss-utility-functions.patch
+	0007-camss-Add-camss-pipeline-handler.patch
+	0008-camss-Add-include-linux-camss-config.h.patch
+	0009-camss-Add-camss_params.h.patch
+	0010-camss-Add-Offline-Processing-Engine-ISP-support.patch
+	0011-include-linux-Update-uAPI-headers-with-CRSM.patch
+	0012-libcamera-v4l2_subdevice-Use-new-raw-formats.patch
+	0013-libcamera-v4l2_pixelformat-Update-to-latest-version-.patch
+	0014-libcamera-camera_sensor_raw-Fix-the-check-for-METADA.patch
+	0015-libcamera-v4l2_subdevice-Drop-Type-EmbeddedData.patch
+	0016-libcamera-v4l2_subdevice-Add-new-common-raw-sensor-c.patch
+	0017-libcamera-camera_sensor_raw-Check-for-CONFIG_MODEL.patch
+	0018-libcamera-camera_sensor_raw-Use-CFA_PATTERN-ctrl-ins.patch
+	0019-libcamera-camera_sensor_raw-Enumerate-formats-using-.patch
+	0020-libipa-sensor-Add-IMX320-and-IMX345.patch
+	0021-libipa-sensor-Add-the-S5K5F1.patch
+	0022-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
+	0023-ipa-soft-Make-the-AGC-loop-parameters-tunable.patch
+	0024-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
+	0025-software_isp-Add-contrast-autofocus.patch
+	0026-software_isp-Keep-blown-highlights-out-of-exposure-a.patch
+	0027-libcamera-Add-a-LensAperture-control-and-the-soft-IP.patch
+	0028-software_isp-Apply-the-tone-curve-from-a-lookup-tabl.patch
+	0029-camss-Drive-the-focus-lens-and-iris-from-the-soft-IP.patch
+	0030-ipa-libipa-Add-a-PDAF-phase-estimator-for-raw-PD-str.patch
+	0031-ipa-libipa-camera_sensor_helper-Add-S5KJN1-with-its-.patch
+	0032-libcamera-v4l2_videodevice-Open-metadata-devices-wit.patch
+	0033-ipa-softisp-Focus-with-the-sensor-s-phase-detection.patch
+	0034-libcamera-delayed_controls-Read-not-yet-queued-frame.patch
+	0035-camss-Capture-the-sensor-s-phase-detection-stream.patch
+	0036-ipa-softisp-agc-Regulate-onto-a-luminance-target-wit.patch
+	0037-software_isp-Process-each-frame-with-its-own-paramet.patch
+	0038-camss-Tell-the-ISP-the-sensor-controls-of-each-frame.patch
+	0039-ipa-soft-Add-lens-shading-correction.patch
+	0040-pipeline-camss-Request-the-ISP-s-preferred-input-str.patch
+	0041-pipeline-camss-Complete-in-flight-requests-on-stop.patch
+	0042-software_isp-Gather-the-statistics-on-the-corrected-.patch
+	0043-ipa-libipa-camera_sensor_helper-S5KJN1-gain-is-the-c.patch
+	0044-ipa-softisp-awb-Take-the-colour-temperature-from-the.patch
+	0045-software_isp-Add-chroma-enhancement-after-the-tone-c.patch
+	0046-ipa-soft-Keep-the-black-level-exact-by-gain-and-its-.patch
+	0047-ipa-soft-adjust-Take-the-DRC-tone-mapping-from-the-t.patch
+	0048-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
+	0049-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
+	0050-pipeline-camss-Allow-a-raw-stream-alongside-the-proc.patch
+	0051-ipa-soft-agc-Add-manual-exposure-time-and-gain.patch
+	0052-ipa-soft-Select-the-colour-correction-by-lux-index.patch
+	0053-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
+	0054-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
+	0055-ipa-soft-Add-a-noise-reduction-algorithm.patch
+	0056-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
+	0057-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
+	0058-pipeline-simple-camss-Control-the-frame-length.patch
+	0059-ipa-softisp-agc-Lengthen-the-frame-for-longer-exposu.patch
+	0060-ipa-softisp-Take-the-sensor-s-timing-at-the-configur.patch
+	0061-software_isp-Sharpen-the-luma-on-the-cells-path.patch
+	0062-software_isp-Keep-a-32x24-grid-of-the-statistics-cha.patch
+	0063-ipa-soft-awb-Optionally-estimate-the-illuminant-with.patch
+	0064-software_isp-debayer_egl-Filter-the-cells-over-time-.patch
+	0065-software_isp-HDR-from-frames-of-alternating-exposure.patch
+	0066-software_isp-Adapt-the-soft-ISP-stack-to-upstream-s-.patch
 	$_tuning_files
 	"
-builddir="$srcdir/$pkgname-v$_pkgver"
+builddir="$srcdir/$pkgname-$_commit"
 # gstreamer tests fail
 # manual strip because ipa .sign files depend on the file contents- have to re-sign after strip
 options="!strip !check"
@@ -230,8 +184,8 @@ ipa() {
 	amove usr/share/libcamera/ipa
 
 	for _tuning_file in $_tuning_files; do
-		# The soft IPA module is named "soft" (was "simple")
-		install -Dm644 -t "$subpkgdir"/usr/share/libcamera/ipa/soft \
+		# The soft IPA module is named "softisp" (was "simple")
+		install -Dm644 -t "$subpkgdir"/usr/share/libcamera/ipa/softisp \
 			"$srcdir"/"$_tuning_file"
 	done
 
@@ -279,121 +233,73 @@ py3() {
 
 
 sha512sums="
-b317cdc96f61682ee0bf26dfb7c4d6441db9a9c5b93ab53528121a8cd44862b3d59cbaa3881bb0837e3e381564c184c7b742124aef4267eea754c6083de353c1  libcamera-v0.7.2.tar.gz
-247fe31e8c9876ec59405d2631e9c6bb3a024c3aef2d0cadf487b3b24aff05c497c967654c0a11428cd2214c15c6e73070fe957c61794700611c64ee1233163a  0001-libcamera-simple-Enable-softISP-for-the-Pinephone.patch
-93f906409ec475d92c454dff412a184e0f43c723d7150600cc529e8457aebb1fef1df7ac24c93e449d79afb962ad4dbc05fc08a31b6018944842708842546d02  0002-libcamera-simple-Skip-hwISP-formats-if-swISP-is-acti.patch
-8d122ce150803303fd6b34e909f00732914b6b2bbf38489be599ba534f58330196e121ee1ad17b0568668fb3745bb60f672bb6e7e1ff18d64bd336fefed6409d  0003-software_isp-debayer_egl-Re-add-log-for-failing-DMAB.patch
-4c24f8418c850d777460a0dccd8469539c5d22dadb5cc4d1c129dfa7118ad4c310ab0335d7d1d7737e9af501043ccce50c674d4c82da4d6a6a8c1fe10f00e49e  0004-ipa-simple-Derive-AGC-minimum-gain-step-from-sensor-.patch
-643b0ddeb819796c0662f863211c633fb2568eaae48c85fe16e60bc353cdfdbb977d42b8921fac0ebcd5cb24b2f2ba20825ec85f7e22232586b65b51815a3373  0005-debayer-Further-demote-Unsupported-input-format-log.patch
-660673ec409fba7dce55e41df014adbdc46ab489fc3d2c447b2c99f9698e15238e640e5c1e5cb911afd120b8d17026b23a663db070db7aaf1d62aa0ae1d806c6  0006-debayer_egl-Use-untransposed-matrix-to-fix-GLES-2.0.patch
-77023246a164dbd1a6d2f6db18f3089138a61460e0897c3f6c1f26a685127a56243fe7ed1aa537e480769924c958ec963c8216f9a6718411f4a6ff8c2468cddb  0007-simple-Limit-swISP-output-sizes.patch
-eddfe6a1af7eada3526dc6bd9ae4ec2ea17a3a1266d32d7f19984742a98c82bd48359eb57ea09965de681f2b0746a740eb35212a128eeb36349d3f166b4f2b46  0008-libcamera-Add-quad-Bayer-CFA-layout-support.patch
-afdcb528f1648546236f6a1a38bb7f1c719e0177677d6f769662d1607b386bf180ff87f733a7bff2dd544a115701faa1607573170ed0a5115f18f19b752f2c85  0009-ipa-libipa-Add-sensor-helpers-for-IMX320-and-IMX345.patch
-8f243a1e2dbd2bea6c521b711cb3851ba8b0a03af434adb5fef8ebf230f19f015abf95ad0db7074a188b3a84f4067dbc8c374fe6e7df131d0251e6ca52c92cf7  0010-ipa-soft-Make-the-AGC-loop-parameters-tunable.patch
-701ceb9189ac7d8e412c77d7602db71c66fcb4f7db8279e0a96b5c9e34e4946bb666853d80a45c2c95edfb603a6111c17412ca0eed246619ef9174782176e5a1  0011-libcamera-sensor-Add-properties-for-IMX320-and-IMX34.patch
-e555b42e6f82245df45e2bebee9494b183e3ff3ca6bf4a7c632588394c0cdc6facfc916a935ca1798c3aa6d25c05110190de0193bd948ba0f3e3df6cc8f884b5  0012-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
-8e6f9c5c38fc576f7728b6f6abe9cbbadf0d680efdb95f8b87366375e916eac5dcac2ebfb7c1ad7824371d2d12ee17cc240012e6ddac66d6b05c7b3f7f191c14  0013-ipa-libipa-Add-a-sensor-helper-for-the-S5K5F1.patch
-c35a5a1d6b1205f6cfb0b4c1cad3d230f6c8744da356477f6b26567123cd6e06e2b6f7112f7fc949eff692bd47276ff495bd5042daff31b2ab71b080bc6a0351  0014-libcamera-sensor-Add-properties-for-the-S5K5F1.patch
-7af243acb4d3501a908205644def89195fab41119e0fdf7c1bfd32bed683fdeeaa2db9af17e3357bf517742c40c987c4cfdf1c662cd4c84ee86c1dedbfaf1a3b  0015-software_isp-Add-contrast-autofocus.patch
-70e78bd5c1b7cdd40b0a3ba4cdb21cde2e65f54099e22b9dc783ff585d210cf879b16f6144cf1ad483cabe074658f4e6136e029c47dc0f32776ea069948d0d33  0016-software_isp-Keep-blown-highlights-out-of-exposure-a.patch
-e168b280df21743b693f04d02c269e7835299171a94cf68b8827d28259eeeb3f432c0c8ea180fa0772eafc4742aa4886711568eeb452a03b77288ad7cdc7b164  0017-software_isp-af-Add-AfMode-use-dioptres-hold-a-manua.patch
-ed202411fe7040a1f67c4c7e9eb906f12f73098290ef45c2b564bfb089dd55f14215932a2227d28a5db164512dfb65c5ae401ba7153be5f0ccca991ffce503d8  0018-libcamera-Add-a-LensAperture-control-and-iris-capabl.patch
-ab390260ac282f04acb90267555f05b8c27bc52705ddfb6d788736aef4e34924703f50b1f9335deaa8d38c41a8fb97970abffab19b04ecc29b8976d116769972  0019-software_isp-Plumb-the-aperture-through-to-the-soft-.patch
-94d2f708638ac9744e35bd73343ec17150bae1861404754c9febab95e34ee5a6535b692f2fcdef324445c305f2c0665a2ba976ce63986d0f020bae367a5fa66c  0020-ipa-soft-Add-an-Aperture-algorithm.patch
-2c91661b1d317b322ab68cae713d0ee547521f8822b15c1c518174852f1d8d217d184286e915dc8481d49afc9d3ecc871af70fff6a8ed7c027876d84f2fdfc9e  0021-libcamera-simple-Park-the-focus-lens-when-the-camera.patch
-61cba1d28a02b92a3c42dc31c7a78fdea26b46a1abcabe441d1a00971b126138fa1cab853bfb0939034b43bd7061be991fb2635c64335d5ae22f816342ce1727  0022-ipa-soft-af-Hill-climb-instead-of-re-sweeping-the-wh.patch
-b95c354c280de15c2a3285f8f7f747cc3c144e9baee0e264951d228c62485f766fb50470d3e0fce59a9b58112a33935f2b75233789e167c99c569afb7c185b45  0023-ipa-soft-af-Acquire-focus-with-a-fast-coarse-scan.patch
-d4b03c0f56abbbe2b0a89bb6e5a19e4c61e777340a409194260601cabfadb337b915580b1faa4ce32448c171118f16c599977213f8155824537d322c217572f1  0024-ipa-soft-af-Refocus-only-once-the-scene-holds-still.patch
-f7c2f2b0dcbf09aa4963cc602509a256a90bc6c9e229a789cd61d257f005b187ef6de24bdfc21cb64034520bfdc9610c4325350eba0052c545fa8c1bf6891bc8  0025-software_isp-Apply-the-tone-curve-from-a-lookup-tabl.patch
-b1b30e1da0621ac5679476ef38a4b0c8d988c7d02a26b0821fcb6e86be76c6f857215b64311cc75f441d45ea5bc9bf0e1f4cf2eeee6f673cc6056ab25df6a096  0026-libcamera-libipa-camera_sensor-Add-OmniVision-OV08D1.patch
-c52084b3ec2fa332d5cb3ef28cf64950357fbf71368650f1c030ce4756b74a20d095ca479be77795bb1b9974330aeb8884ad2e70db42fe1e6eb7d8174f8d6b6c  0027-libcamera-Create-IPA-by-name.patch
-01428fc609cfc17d3a5cbed0dc1f6397833cfdcc055c40e3c2a34e6bde58ff3e10f76ada2ea00bd4bc9802a129657277cbb3afd28ae4379e61563ebcdea9cf98  0028-ipa-ipa_module-Remove-pipelineName.patch
-4b71f198e47032901dfcc18d0403cab1bede86172a1f502f0292f32f085b71609470dc83defd24cd70f63f0f7ba3683f147c4ce6213eb268cd888d960f0f3802  0029-ipa-Allow-pipelines-to-have-differently-named-IPA.patch
-0117998a809b69645fbfd195d15f0c838f27d1a857536078de8be6b9a1a8e5ddcfd42fc7b45b4adc6c8068f1ac988405786d5e97d5d0058f82e6b92f447bf575  0030-pipeline-rpi-Explictly-pass-pipe-name-when-creating-.patch
-97030fb7d06a1396438963d1fc2265485777042c281dea85579dd75a40b925b6266e1d21c662d979f8a8339e0d98d03b2e5edd804802773b5a16beafd7ee583b  0031-libcamera-Create-IPA-by-IPA-proxy-type-name.patch
-eaabe952ca8a215c2d34e4bd819325dc41160e4eb8b6829ac1ce36b049a463764da4a143454391580f5ea02eef0161cc3727e06c6dec7a302310f6db63e2976f  0032-libcamera-V4L2Subdevice-Add-whence-argument-to-get-s.patch
-ff9e8f5c80b494753f9c4f94263e47ac5c373eecf1d73462218319024d462ae2747209573664c45f6f63d8129b3f0fad3edbe7d908c29ef297fc83101081a6e6  0033-software_isp-Rename-simple-IPA-setIspParams-signal-t.patch
-2f54bffca2fdcc6208751a7aebf0bffaf31b4c197c352abacf75a3b19260908b328e871fc911ed3ebaf8938585c8a40b60879edfa0187f80844c8cdd7f076f9f  0034-camss-Add-cammss-utility-functions.patch
-5896676e516d977a08e2482d431a34c9611d0d15d697afb1b71b81b00a8bd3382d3b281f16d9aa234b979f7d12d123e778e0e5abef5261afaf9e91ae694883d2  0035-camss-Add-camss-pipeline-handler.patch
-9fbc358812dc034b9c80901cca1bdbe3421ae2f4ad3272db7adae8a70a5efbd293c411db8e9b9f543616cd9f1f76a036b81964bac68862ec5846c6bc972073b5  0036-camss-Add-include-linux-camss-config.h.patch
-0f0a49aa1dde6f0f590aba66044095ca32a4165ad1cf7d1c0e3818a4369bfc197cd1a7f113c58b3ddf7fee575c448e3fc22f4abf6fcda7884cd319be2cc8186e  0037-camss-Add-camss_params.h.patch
-56e08ba03d1287c33523a575cfd9145ab0acb9442d4552b10edbaec7990108d14a006449cf757238923155b05b33bde3c4e892bf9ef98bc274f96432eb291fa8  0038-camss-Add-Offline-Processing-Engine-ISP-support.patch
-b040448ad15fc3b15c7d6c68fbd60fa5721b4277b6222fbebd0693984a767a76e5283b7a384b81383d50412ca9b8f811b857fd6510e194bbb4016f459aa11e03  0039-camss-Drive-the-focus-lens-and-iris-from-the-soft-IP.patch
-2cb17c417e6a51a983e13f6b20f6cb3f0e443dbff6790a3ed15a8de05a4b45188100318d48b9b63642871654ace6d00a38da02b0f403e624d15c276ddf4daa4b  0040-include-linux-Update-uAPI-headers-with-CRSM.patch
-f420db6e602dd079d94281f235c9471485f21a54564ea4cd41affcd0dffd7a74c3345f721fb43eb9ad3bb7767bb00ed6b6dd6269a7779f39206cc7a457b22321  0041-libcamera-v4l2_subdevice-Use-new-raw-formats.patch
-4c0a7c6238e259aee08f4ff99b9c8700f7a2cec3cce555f0abced7cae4381e3738530a58703278f1666dbf845eca74659b15342f0deb04d284e1643c1243bae9  0042-libcamera-v4l2_pixelformat-Update-to-latest-version-.patch
-f83445ab48b689185740239e34f2c27420414a45e2db25f8bf4a9efbaa24f98da2b7059798a32b3f43648790ff6c99132324b57a46dad55abdb04a7622181e34  0043-libcamera-camera_sensor_raw-Fix-the-check-for-METADA.patch
-fd9f88b7a8805c8eb28e77c14945d186ef63c20e89b04e81614e20020f9fccaad613a5e2304eecbebef69d60e61d8f610ecba9a1e03819ef6ab085c857efb95f  0044-libcamera-v4l2_subdevice-Drop-Type-EmbeddedData.patch
-4f4dcbacd2a755c90159594e1ae335272a3251576a5414b8de905e3a27c272b9db244c99d5eafa6540f85a3d3560794f74284f8282e42f2f26a3ef2fb3647dea  0045-libcamera-v4l2_subdevice-Add-new-common-raw-sensor-c.patch
-eca3b038c56139d85ddf0041a6881d78e462d957eb9ec107df9a44e49033c4500c021b644470dd0896929bc3a46b42e797f101baeb632328ab47c07ee50882a9  0046-libcamera-camera_sensor_raw-Check-for-CONFIG_MODEL.patch
-035e674480cabaeabc21c369503d251f29621f1908824b9d712d7d20dc3ffc6e873cb9ee5701d97f082881ad89b69a65b12dd79893fd1fd4f100ed514d50f88e  0047-ipa-libipa-Add-a-PDAF-phase-estimator-for-raw-PD-str.patch
-033343520960570a72da665a133675e7a25250005cd57583944574a1909d8cf5a4c2c364ee4891a39d95c3a152f480f915a0aafaf8167310b09252341629fffa  0048-include-linux-Add-the-S5KJN1-PDAF-metadata-layout.patch
-8c74359f393ffc8672312a10f3246039fcb6a17b89324842401c7b29483e4c072c54831a6357714155164ea1ac01ba8e19be0a9106403b3f3f3d68cc50149df5  0049-ipa-libipa-camera_sensor_helper-Add-S5KJN1-with-its-.patch
-ce0f2ea1fbe2841f2cd4130d62810f42cc6f5939804588e99889237a87da569ab385245176cef7ad06deaf916c5b9af8ac6a48977c37798535abfcd44d9e0572  0050-libcamera-camera_sensor_raw-Use-CFA_PATTERN-ctrl-ins.patch
-95f864de6a79b3f2ef7bbefe70d6091c73d48853c6caa310ed058b78297c5181b760760269ce4a612b1d99f7f01ab889905b00b80fb22114901f42deb5f78a7f  0051-libcamera-camera_sensor_raw-Enumerate-formats-using-.patch
-b4976bd29ef8745089b0c80f663b8e4c1c43ee4fd1a99d643336287e25c4262488dd5e55e2f27842747e788ace5c4134cb6fdd03c42f0067dd0f5a2439c90705  0052-libcamera-v4l2_videodevice-Open-metadata-devices-wit.patch
-0dd692283080e01d9730300916f7308b7b9f33b349e2b11c655e6fa8f2d4e87bb612e03a74121de5e71529000d2c99a73d9c709dad0eb8e0f9dd77dfbc4e2c6b  0053-ipa-libipa-pdaf-Correct-the-shading-of-each-pupil-ha.patch
-8e3def1b653cf3f83c838f1ac36e4df6d6ffc56af7fb5bbb55e515c56f56a33bb6d1844158562b07be1bdfbb267149eac945a44de06e42c96f2324e698101615  0054-ipa-soft-Measure-the-phase-from-the-sensor-s-phase-d.patch
-a59b1268f25d13df5732cdde902022dd66d7b9510ff5a6dc0097fd35d21f0e4bccd87562085b0252f2ae07d40b858e45a816152b442fdd877c214f89569145f2  0055-libcamera-delayed_controls-Read-not-yet-queued-frame.patch
-2ddbf29cea66750ce144d1544a0dd0a233961bd9cd18cd42da9e78a610519c85c5d269031ba618f7624d75c33c5623ea87485e38bb4b973df6f147fcbb0a2793  0056-camss-Capture-the-sensor-s-phase-detection-stream.patch
-cc62349d3086cc2400e037e59f2e30893c1390df77ec19d16680514fb16b274f322efc0ba98c47fb29212b7348250ec94bcc182b92b03d768de6c87a1e355e23  0057-ipa-soft-af-Focus-with-phase-detection.patch
-a78726fbc1272dc5ec6fd31bb3b14b07aef413a3599a928b27b3faa83d54ea0418d35a9eb1c40c43546cd1a5330712e4845a8fb422855a77750f3ef13f4caad8  0058-ipa-libipa-pdaf-Measure-only-the-regions-asked-for.patch
-e59b8e1de51c09c07bdb6d2477124b05d827eb4ff3bfde80c27ff7054d0acdeca866c9d5106d6ebca3eb83e8f62b48edfc92bffd97c2d1b584ad994d4ea55326  0059-camss-Give-the-IPA-one-phase-detection-buffer-at-a-t.patch
-6f19175fce91fc1856982ecf27883c716244a86030176986b347ff12b76f3644dd97d89c678e236241c8f0f57ae67bc332da369aa20c7f8c56401252c91edc18  0060-ipa-soft-af-Trust-phase-detection-measure-only-what-.patch
-00cea16fd835029d1de81c996dbd53f79fc237dbed8d970c29e38ab6daa785adcb74878c9eb81951408298d9abd48fa291f51dd3053ccd83e6be816b90d878b7  0061-ipa-libipa-pdaf-Measure-only-the-columns-the-active-.patch
-5a412ce1c051b6d5689abb29e0a9d0cb40398060b65d0dbe4d25490958b6fdc4c08fbd0603abf9d627878e57d144692ebcb1aa990f2709fffd8e1d6787696a23  0062-ipa-soft-Don-t-measure-the-phase-that-nothing-uses.patch
-dbab72949e00d3502d6fba80bc18b01349de12f677110a7910f824fc075a9e37042caed9c3aa05233ca3c96f83f2e0e7f1eaa1aba3b6f4a4951d2c7b9c37de3d  0063-camss-Measure-the-phase-on-every-other-frame.patch
-19ecfea00e7fd858a08b343a50a2089ed7706e95fda7ef1069904fd1a578af6dde260d81733872d6c1192038e336c9cf5c9b8e67c1583880859689ae25a55a8a  0064-ipa-soft-agc-Regulate-onto-a-mean-luminance-target-f.patch
-73c6bc3de077406628cec060dd07909389a7b679c357cd469b5192c46ad9366f5d5da88d2821c52c583ad9ff97d02ce585246cfc9c2986232a9621207f36a2c3  0065-ipa-soft-agc-Keep-highlights-from-clipping-with-dyna.patch
-c5682305e531d40da6e4f361a660fc811f2aad288224c48aeeb6b1c111c2c7d0230c08cf548a29ad70eb509624536bd09e9fc731c20b80c7b55d3b461d2f11b5  0066-ipa-soft-agc-Apply-the-DRC-gain-with-the-exposure-it.patch
-8a8e76e9fefdb00c62d97e52ed50fec7616854b674809cdf498f6609fad61d29e621d86e141b8c9b6fecdbd25a3879cca02d4c508c908e99be7f97c21a47d721  0067-software_isp-Process-each-frame-with-its-own-paramet.patch
-60837fdc3e387831176dce5fe356f9b58b629ff79dde6b844fe02a6add0eaff315957fe02800ed35edc77b89c99eba8a719a9c6007ec84b24958c841170a1314  0068-camss-Tell-the-ISP-the-sensor-controls-of-each-frame.patch
-91136dc4294ff50671286d91ff2fe18c8dee6a45ed837e8af001913883f2265899e324738281d3abf9cfd4c7a95740895e629529119d3f58d38ba968d2f75f7a  0069-ipa-soft-Match-the-DRC-tone-curve-to-each-frame-s-ex.patch
-93a854777772ef7e8c3e86a1d2d885de373876f89217315e6e09cb2de2b78ad38e1b0f816b3923c31cadff27d901161f6b6d44d1313e1093b2e4704c0fbdcdd6  0070-ipa-soft-agc-Derive-luminance-scales-from-the-statis.patch
-46ee1f720f48969e812dfc0627f9f1d198ea504b9d7119ea28c03684d20acd10ba8ffe69435a5128646c0896c7b6fa81515f85b05f05a6e957b62269d1605a25  0071-ipa-soft-Add-lens-shading-correction.patch
-aefcc8ae8f42fc349207409495a2a6d20526c25736fea9cdc6cefa94f61786db149f4d7b3c27536c79ad3c4fcb4c5d2e4f3a2ae97a4d687db5c5a67ae950979f  0072-pipeline-camss-Request-the-ISP-s-preferred-input-str.patch
-4eb2720386597932ff2df546a0ea3bb273ddb58d73d7bdab20a4c95efc0fb4920f9985bdbbf4dcae78b6973dbe89f9848562ac7a3685ce4d64dc5f26af935d19  0073-pipeline-camss-Complete-in-flight-requests-on-stop.patch
-4ef05df8499c4a69f344a07f443a17d13e9fe658aa60a20d4da321154944fcc845211a56c10c86b86a14ebc7207dda225acf92e941c51e06a3722855bfdaa086  0074-libcamera-software_isp-Gather-statistics-after-lens-.patch
-4abe366859aa08c011966f6c4947210d066d4b02a035eabccaa7b52fe336f74cd334188e4f03695f7161a1cddff39793d91fb0b307163548fff7b679eabb4513  0075-libcamera-software_isp-debayer_egl-Gather-statistics.patch
-0859631d3f6144a3858d390b60fa74a088be4ac0e4d216fd0aa4bc0f4de54619e9515314ddf993385b678b5eb94e3e8d4d307d3d6df90ff7dc81cda58d97ee06  0076-ipa-libipa-camera_sensor_helper-S5KJN1-gain-is-the-c.patch
-2cbe1a3ca2e95b39f8b1ba915a847e383a08fcca93f6e536b0a02c7162c3db85984bddada0ee8feb96d9a208e433179be80a7baa91b2c1a8fb9bced62c379d78  0077-ipa-soft-awb-Take-the-colour-temperature-from-the-se.patch
-3cb4a6e510e4e7386118e5ebdc80f15f8a53631478434dd46c36eeb0237441645050768ef26b3a26a9886f5e7f7acba71626c45256afa53529b2a2795a5a4db3  0078-ipa-soft-awb-Keep-grey-world-within-the-band-of-real.patch
-2287bd83641254a433912638d25f61ba8d524eacd4dd3a2bf1ac28d6f384f944d26802669f3625af6da19a345a4dd84bee295c9b45b6f9c91475e95dbf32808b  0079-software_isp-Add-chroma-enhancement-after-the-tone-c.patch
-c087c78b862d2210b58a179ca18c904c6144033df93c6906394dd32b1922d8ba9af94b471130eb89ac7d21abbaa9b6afc1055473f1244c2d13ad825642f098ce  0080-ipa-soft-Keep-the-black-level-exact-by-gain-and-its-.patch
-5b022716cfff0ce28e9f155aff3321d02e29abdbd72d511a71951317dad26b3b154a7a14c90308f0560c7ce9f941968bea690db7c5940bb6b3cc8649d56b8165  0081-ipa-soft-awb-Hold-the-gains-when-there-is-too-little.patch
-35c372626eb0a975847abc14ef325dedd2f257c74b7e9515bdd924c02494efab76ae55cf47a5b7445fd80330317fffa5df4b6080a15668b069e5f694cd732d8d  0082-libcamera-software_isp-debayer_egl-Gather-statistics.patch
-3ee0fb2cbae6117e6cc8c9ed7020d7c35e22d183b740a6a5e894f530102b588da53880e347f6486333b873491705500395bdf7ee2d3f01f68c505e99232ba203  0083-ipa-soft-adjust-Take-the-DRC-tone-mapping-from-the-t.patch
-0e913e469c516fd7d0d0fee5d4ea5a7f4d465d3dafc8129b542fb7ec76f6bd44a86cdabf046ad0c0ab6007036659bf5bbf39abfa4b84c8fda59abc0d9e1716bc  0084-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
-11b99ce5a3182004f760492201c4e971974b145fbb422f51ba3bad58cb859526d64613c2990040247f10bb3b9502e54d6f35362285cbf06ddef6f75e20966c88  0085-ipa-soft-awb-Let-the-transverse-band-depend-on-the-c.patch
-01e58380d278dea0d3daf655fa945de547bf6c6f4d0406bb554d002facaf0f29ae4251702a91a9c7049886d882fd51edde0f618c35054df38cb60842fae83b25  0086-ipa-soft-awb-Adjust-the-gains-as-the-tuning-s-gain-a.patch
-cc05b7949e8eba088aa1d39bbe9deba507a4a7ad9d5b9577286f2cfec45cf163d1322e3c656ff34b3b4cfe5bba44ef2c82cc665e391e4cd27c5799f5400c592a  0087-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
-1f02276fdd17fcf608ba5bd0e899b87d04f369335abec4aa1361568ebd51fc64a57ed042c4a426c2a72fe5511ecad5f1411674c3375ac469d7c344e23520ee6c  0088-pipeline-camss-Allow-a-raw-stream-alongside-the-proc.patch
-ae872a2bc19eec6aa6879e30dca5c64a67e4c49ef6b93ad47f0f05daf961f1aa8fb47a28d3e1bf0590523864883f155f917f56b990ff15ee5a88268f56438ad2  0089-ipa-soft-agc-Add-manual-exposure-time-and-gain.patch
-d1a9f3e4c26336a4d62e75b5852adbe0bef4f38ac1b872c2c23277c4b0342d4e52d582e84b17246f2ef011b253fa1bc80db08fa7e41230548a84946c3feec0e3  0090-ipa-soft-Select-the-colour-correction-by-lux-index.patch
-259bab56fe7c16f99ae9ba969a9e81efc09ea4080b90c12a5109f950935e1c2e2e24a1148120065780bd88bbd0ebf985f1f98619f5aba460baaaf2cd57706911  0091-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
-5849686f262067da0846dde05af22cec5b9965b7c76aa26127cd3f3fc36cb63ee8ed8e5d01d242c51667008dc2aca375019132adc346dcdcc429d926b4723cc7  0092-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
-c122de6f7a64067483a5d8a599db30776c3cdfc50ed2ec7a550d6c8d80194f9471df5ec0c08a6c3899f973b774968da99bd22b80753a0ac47d9bbe025709465a  0093-ipa-soft-Add-a-noise-reduction-algorithm.patch
-6e98238f2d12eb0be0f11713630f2f9e4f0eaa7f15316c3e46cae79d953f822abe754305f444170ff68f30f42659cea3a25c1fcc57abcc6101dc614bc1ff732f  0094-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
-2de11d056afbd1859d759fcbf22f808fec1e0b2bed3272c67a9077e69c2d029fad4e54f1824985ca4154d825b94f0811e8c128fba54a7259e74b339e8efcaf33  0095-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
-aed769b0bf3c0febb32a5a3f7c99eba3eca643a579ee7f8d582fa71e094c7e1ea9e4c0d06101ab6b6ee735ab69d28e125c6c0e76575b71c61cb2af3f42521472  0096-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
-16f1c3d30d5af76ac5f5e87f09c0f4b0a50f5195572e1f39d9d443125b3df60f7d8ae17521914304ad3da687adec39fc32783677683720e476a95a5421c9a82b  0097-pipeline-simple-Delay-the-vertical-blanking-control.patch
-0fef1dcf103f309a605b4ec51a809ffe7196562dcb5f6b2ba7563b1683e496c7083f272817e848a8ae811d88e1cc7a12d07d5a8c64b98ad5aa6ef0249950f152  0098-ipa-soft-agc-Lengthen-the-frame-for-longer-exposures.patch
-f642553a29f49241deca0f2a8dfc74736c4271f6fdfbfc9de4994227c3813f49b85403fa290d6fd76f5654b2ec2dd97a6da41f6ce0a4ba1a3e1aa2cc2eeb97ef  0099-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
-25a525f6c3b66289cf88f83320bd63dd33703ec208b8244ca1720c016bfb8c5d9cba595ee207d646c4610362e38ecd3bfeff72ecd18985d4cf489d58678d2f73  0100-pipeline-camss-Delay-the-vertical-blanking-control.patch
-b38194e4c4c006e68cf9ecec7357373c036024994ec1be7224cd35671a54ebb75f3df49ec89fce7f920df4a0c3973167b96e43675cffae2d234d23cb67ee18c6  0101-ipa-soft-Take-the-sensor-s-timing-at-the-configured-.patch
-f57536218680dc74a14c8666f6753ec1f5926b0848e9b143063581682f4dd19126b70dca3891a1afc02d823c1065cae62d5fb5f03b608801a042495e3f76eb44  0102-ipa-soft-agc-Lengthen-the-frame-along-the-tuning-s-e.patch
-302891cd0152bcd7c1aa770d347b5cbaf568e7057d4f88e2b443c96c2d55c09e754c9eaa8a3367adaa768ea3e64415ca077b376d7dda0104ada2e70c6e8d11a4  0103-pipeline-camss-Start-each-session-from-the-default-f.patch
-7c39ec13bd6697a7d241e7af5da4be981ebdcf151c0e4426350cba10582f14dab0ad64bd37d2ce2e280b18b0c2365f576c17f56f3760011330d98f0ec6dda7ee  0104-ipa-soft-agc-Allow-the-longest-exposure-at-the-maxim.patch
-4f9587614a306f72ea34b686e90a8fd6c96438ca3bdfa8e128883809276ddff2015562ca8a617e64bea76f2d63185029cd7d466211f61466206e47b7153ebb83  0105-ipa-soft-agc-Bring-a-long-exposure-back-along-the-tu.patch
-c04e3ccfcc4fe1e5271057b7027a119b9336c53de1c9eb6503b28b2d1ce772800c69c8f520e8d5325079fa291ed5bfa0af909a4b72e1d45f526c9d374d0289f9  0106-software_isp-Sharpen-the-luma-on-the-cells-path.patch
-6e6fb95223a26ac1515ad4092333ed66e1c9e501655ac116e841006b1417783ff204888ca607d844b54ed354254f057194ee9a5a0e631f37443b9dcaa7aa359d  0107-software_isp-Keep-a-32x24-grid-of-the-statistics-cha.patch
-7bcc767a480f7bf1844eb7d927a4b92bdc59997ebba035751877a612ae5cbb6e9bc7067958f08766c72be24ffb7b67c742cc3cb85c82a7531a08067e794e1440  0108-ipa-soft-awb-Optionally-estimate-the-illuminant-with.patch
-5e5f15e6fa0f038b743c0b72ee14e3e2304719b430f13afda03186525ada65f20ef753174be23d29598b2daf234a559604f44ef0b3ec2afa178824eb638bbec3  0109-software_isp-Filter-the-cells-over-time.patch
-d59ac82ea8ad926cadcb5f5e5023a13926fc81f0206c73239bd858c3dd74e624655868674785ced5449d1d2db09c8eaccb977263b38d53cbdb4a3fcfdae30dbe  0110-software_isp-Weigh-the-temporal-filter-once-for-the-.patch
-53194fdcdc7cd699a5be1207eeac416a16bae28741afc06d70c7c4c12d6b781c8b15e99632a6c668d74e8d243a14f222ecd67198b464e3d60e13f3203a45dc6b  0111-software_isp-Weigh-the-spatial-filter-s-taps-once-fo.patch
-4a9ad7dc8be002df2cb00088a1e3c336161bcff0b4b038ff7e72274a888b51472ebe84de2ed8f437e688413a42464eb799421101487a74c7a2db8f073bf38600  0112-software_isp-debayer_egl-Time-the-GPU-passes.patch
-f92432876fc42ef88c0a7696298d9f3b04f486c10a122bf2d0c53a369fd5f43105321c578c0831b776824a419dd2d5e266fcdad0768e60512b7e1443fed57809  0113-software_isp-HDR-from-frames-of-alternating-exposure.patch
-c784191e275246de389e83ea7f7ea4ce091890edecc55f86a55d8ae59e1aeac127e2044a139dd27edca17cd603e0dceefa31da5023ea3c1959a06bc945c680c3  0114-software_isp-HDR-with-a-ratio-set-by-the-highlights-.patch
+d79b6c40858e9457fa3f6dd3eecddcb2748595fff23d48a90f6b4bca185d9e8f163941676a914a68d03a8bd33c58587b2023cf5f1d8b037e18a95caedd4cb3b8  libcamera-06c3e2d719490aad8ce789fb5d2ad4dfa1459bfb.tar.gz
+f5551c5cb86a3dc1739ec7c7b616ea623c77d2ff297bfa06a95e66674d0fd020b667296bb53132af51aa0dda92047ab57bdebd56de134ae7bef9033b28228f42  0001-libcamera-simple-Enable-softISP-for-the-Pinephone.patch
+5c074c8a00ece9f6df99585863f893fe76c756b25220c7fe87649db3617fac214ebfc5ca8cf5533ed64c0373c85e0252a9e0f3c6933ff03d3080e6a6ad1f5f67  0002-libcamera-simple-Skip-hwISP-formats-if-swISP-is-acti.patch
+db044f3b4870b6382f3c85d21bb4c437490bc9cc9f1680e354c92f19ec7f46b349f94c2e14bee30b6556993a17796fb1af17b16b0e9d113ff4630ef8f2c846d4  0003-simple-Limit-swISP-output-sizes.patch
+05249a8edaa333274602c595924a25ec6751a60006b5fdbf27b4d7a0a9295dcdfe13d8ebae733dd10d8eb489073b988da8885100511c029829f74e97371acd82  0004-libcamera-Add-quad-Bayer-CFA-layout-support.patch
+dc887cba1a5330dfcea9aa1ae9fe35f71ef66691cf4cce61b1471b61446cc2f10e6b868040b5a4450236067b262a45eed6ed85c8564e8d80c2d381f16c0b0245  0005-libcamera-V4L2Subdevice-Add-whence-argument-to-get-s.patch
+18cbc39c606cc2ed450547e200fbde07b705f9f08e0fdf8bcc5d9d80e5257fe78c38c263828b2bddd81fa60d6702afee6304f7b6c3f00e0ae68ede6c52f5b984  0006-camss-Add-cammss-utility-functions.patch
+084b7d9b373d5a742f1e88362985ba68493cca7d10bd207b52cc0c1271618a9debaa61280403d20df691df987152c38c571bf90fcbc83a130bed6da2cfadcd38  0007-camss-Add-camss-pipeline-handler.patch
+b59575152316791c7e17ae89450f86b9dea0433c7a269316d23fe6ee513c9189aa856f24d0d94cbb008ea1a7005abae9a8e6b88447f7854be44de5a0fbbd1881  0008-camss-Add-include-linux-camss-config.h.patch
+c88e999d55d0fb5f3222b8229d427bf493a195b601263f16d1c3e4366975cd9f0db48ebf804d956dfd04302eebf8450fd215fc94e08f589bab9b06fe972c8426  0009-camss-Add-camss_params.h.patch
+e0ae1d6be8d577164fb0ff796d3e61408eb4e4af4a1645b30f190aca2fd508c6ead813c631245ba015816bfb8a4ec1cbd7050837da7f29d34479c3b832c498ed  0010-camss-Add-Offline-Processing-Engine-ISP-support.patch
+1af72a6d0bc6e34f8f77a96e8aa1babe07f69096dfcc3a0d5b0a9853aa42f98a98b6c244a411a24dea6ce31fd46b332787660d8b9ccffe351df469b3ba7fcfac  0011-include-linux-Update-uAPI-headers-with-CRSM.patch
+2097022d54ab95f9485fc1a757c9c41d7ea72f112d6ee0f93b0b4712448ca81d5fdbe2ab2c2f7e6d75cc96dc6c1a54ff033aa1d1c087177d0af5c5d18190c3c7  0012-libcamera-v4l2_subdevice-Use-new-raw-formats.patch
+9a6d993feb0ce20b339240da667f8e445b1b3c6588269dbb929045271cb61b9df17ea4e307faa1689ae4d7cf8888e011946552a342dcf29a1d7e99e136fb8d3e  0013-libcamera-v4l2_pixelformat-Update-to-latest-version-.patch
+67785794db2cf6a6fb02f0676d87ac8de6c2c2285dd7d3b7977cc668986865247b7da4c493692a4eab9a3b6f29057a2950a595daf5cb6a25db76a662d6959169  0014-libcamera-camera_sensor_raw-Fix-the-check-for-METADA.patch
+b39017877c2a2d94b03e3a3931865bb324c2f8eefd008e7807d8b0710e29e8ef5d9d3a11a2772e3927f2c10d19c6da225be1a14c216a9460339912dbd566e101  0015-libcamera-v4l2_subdevice-Drop-Type-EmbeddedData.patch
+ff6c01bb920554fe10bb8c0a4846a329c716e95659ecec963e90401ae6ef1082a633b4d1fea68a84ef6abe405a9b3e4ca791298b25a7be44d36e696102713d56  0016-libcamera-v4l2_subdevice-Add-new-common-raw-sensor-c.patch
+dfd425b8fe44b8ccf17d4dc3f2bd514d11c8efa3a69f16b2483c4417fad78fb366583775ddc60ea2e80b9583f6ddd29227e029d77d2985832528b94d9c7e35fc  0017-libcamera-camera_sensor_raw-Check-for-CONFIG_MODEL.patch
+36cbc064ac8e9d8ac62d0179976f33fc3dae55d8e8497c4b57249bb2ba1a3fee8b434da067d4c42cd82e78aa07141c6173167d532f5dff438b986353af58ed7f  0018-libcamera-camera_sensor_raw-Use-CFA_PATTERN-ctrl-ins.patch
+a947f7424c599fd5e3bd28db5e894b1da1c34b84de912e0c0cc32d495b164ea38611db966132a674edee6cab9dacd2796933b4c0c2e0eca6fe81f467883c959f  0019-libcamera-camera_sensor_raw-Enumerate-formats-using-.patch
+818f6db65f59b4ee164c83b04b964f02b581699bfa87ba0e41aa5ab7d7330886030d639c4e34df7fc09b17f27066d3fff6df23a3b80f39b1b976587da6ea8756  0020-libipa-sensor-Add-IMX320-and-IMX345.patch
+c5e2d33449e2aaf103c9fa38709fd350f1ba3e5cff6c9f0b5a29333daed6dcdd8e11937d64e6df6f743e4a97753a9dedb11a597229d391175f10140d25f31ce7  0021-libipa-sensor-Add-the-S5K5F1.patch
+344ceaab2d3ce4af3b5ea37304051e8c147c691472ba033b32779df1c54209a57345e95433ff23a258e43891e5125291e7dce66c1ecb315d08bc0103fe2b66c6  0022-libipa-camera_sensor_helper-Add-a-helper-for-the-OV0.patch
+59cff42cba1e5e4c153f55ba0bd04385e26c87f3004bbec4101115614142691de737d50668603b072dbb69a81c2f118aa880a7b03208aa1c953909c57816ef4b  0023-ipa-soft-Make-the-AGC-loop-parameters-tunable.patch
+79f40007314d72c2e67e4311f223b9ceb2a3834689b683a19eb3951ba9c34b0361678f1df0225f21cee0db2359f22c26c4339f518899ec38679e3418c2dbe272  0024-libcamera-simple-Keep-the-passthrough-for-monochrome.patch
+3c203cafde17eb00358f1777d186e779810305acb7f27368d7708df6c9becc7167e4fca1f540f7262c8f0852a4dd5e97b127d65fb52cc5dca8ce4aa3f7b0d6b6  0025-software_isp-Add-contrast-autofocus.patch
+49e99c250b937ab762c19f5bf0b774755ca696b296da8f225aaa876c5e156713a086b1549d1dc7accdfd1a194f6d3fd530927b47f58ca1148c0fc49aa2ac7e40  0026-software_isp-Keep-blown-highlights-out-of-exposure-a.patch
+b1da1076de7f4c840a37e054628c0d0506f458cd07fb306bfe5568e8e375beb6e0f717fca0bfb077a84a1c699055e0452fe13cc75002e3c519ef3790501e2c24  0027-libcamera-Add-a-LensAperture-control-and-the-soft-IP.patch
+112d1469af5da5f3b3dd75e4c4edf115c3343a4211e7c6b78c857e7bcef97120b12cf579b7709550066d29ac0dda205c48b409fec4e4e372f7d42e9c04e8b91a  0028-software_isp-Apply-the-tone-curve-from-a-lookup-tabl.patch
+1b619a6a709e3cd4cce0b12cfc3e8ec2d881e1f97782f95a315bc553bf42e55d0c8ad9d484e5291881a29eeae324457ff9d2681a05c114f4db5b7627e5863c73  0029-camss-Drive-the-focus-lens-and-iris-from-the-soft-IP.patch
+8a9a26072a1e24beab3d308247fe25f7817952fe7c2172248d80330acfe5fba13861ac9e909b9dd4e6bc8fb973c63beeaad334b8d2b6d1a7c9528f35612a2006  0030-ipa-libipa-Add-a-PDAF-phase-estimator-for-raw-PD-str.patch
+f69324be480038c3dcce34545c762f1140fea041f8d9da2497cc7031d525253fbc428a1a552d3ac5bc20b6189a141782f6fb58bbfb26c8725f66fcbe306f9600  0031-ipa-libipa-camera_sensor_helper-Add-S5KJN1-with-its-.patch
+db53686b5d2aca672e7114f1ca6485d57713499eee4c2b5b2029c22eba8d059a3995310dcb750113f918d18ca38e257e0d501ca480ceb589986ae9dcbcd258e5  0032-libcamera-v4l2_videodevice-Open-metadata-devices-wit.patch
+273e1a4c2a548f495ca15786c69b06a505e0922db44c6c4a6d99ba7957db26813549f0b61a18fc15c67467460ddbf31935209ac4ed3f87300e9917c4202ddfe0  0033-ipa-softisp-Focus-with-the-sensor-s-phase-detection.patch
+3cd1c4d7fabc380a2a63fe4d28886ab8af12b6c798603558db0f97623cba60f4253ad92b1f2f55b3ffbc24cb84483c1eb42e0afadf74c7d1fa989ef07a21534b  0034-libcamera-delayed_controls-Read-not-yet-queued-frame.patch
+2870399a716ca2e1c37de1d97041b4e33ea8d07bc1e65cdad5cfcdbf220df7d33a763258801f446412bae5267eb04a52bd8a600551627831f40718f6efb3f446  0035-camss-Capture-the-sensor-s-phase-detection-stream.patch
+950c449e19689a85051ccadea4695d84d0d0dd1526f5118aa05a8b58d1189e4e035f839f6ebfc82ae90ac99e8085b3673199dae81e2b3d43290748360562037d  0036-ipa-softisp-agc-Regulate-onto-a-luminance-target-wit.patch
+2289cb01b002f1ff3aec42a487d717ff8d574f0708c32eb686dd2dfde75cdf299c16dc4473b4cf1394ecfa16861e9db5df37279984b7f8ffb942e04acf058a0d  0037-software_isp-Process-each-frame-with-its-own-paramet.patch
+7b058dc0b89377da29c6f9bdfbf5e61c472bd1001adf145219db85e51199ff855d1ea40460fc8417b47af4f179487e09449e0c351c474b60e3e5f3f7829ad48a  0038-camss-Tell-the-ISP-the-sensor-controls-of-each-frame.patch
+45aef47fa7f2a31cee5897db29acb0f533a1e6142998fed1f9fbe77abf331ca5550dca5efb33bf1c24235b12ba43d7c84a95f06f1459ad62da5dbf770c5c8e6c  0039-ipa-soft-Add-lens-shading-correction.patch
+b63cfba6a1d2a7e1504e068c8f4befa81dfb261b99b11cbd0906b831f59b80227429ef3287b17bd5af1f7f572fb10598cede3ea637f8ce99de18ec1cede7eec3  0040-pipeline-camss-Request-the-ISP-s-preferred-input-str.patch
+8758969fad3cdc83db3331cd4754df826a833f03fb88b32e986dae683152e45dfe4d4aacccbdb39f642ac57ca48b13b8e4246a9eaa8e15e87f5854e763f370c1  0041-pipeline-camss-Complete-in-flight-requests-on-stop.patch
+42c6255ca703297e5e24eececf500a57e967b947896b2c9bf1ba790612886e3e119bc36b71a3f48c4a1c04ee2c4ddf3e48fe6cf997ac66ee99c29a25dc7cecb4  0042-software_isp-Gather-the-statistics-on-the-corrected-.patch
+ed120df3bb8d822eb2655a6e3946c98dfdd6133d7ebedeffa387f5390e45568be6150773562f90449368bb6c6061330eebc010efb0dc18287e393284e58f5722  0043-ipa-libipa-camera_sensor_helper-S5KJN1-gain-is-the-c.patch
+b7d979bd8a03ec0e4b4f967b11eec7dfc891089cf0be524efee44f0a222bc160fd5d9bc11c4c3a020bef4916c6e3a9bd9e76c9f3c570548218bff9102a37d4db  0044-ipa-softisp-awb-Take-the-colour-temperature-from-the.patch
+48c5c08a921c0fc173836ace5abaa6ecef3ab26d2507be7187bc5ae938f00ea61fde4cbaae378878dd09114c417ee0e0ea28d8c4d86ab7771fcd0a2006c2c692  0045-software_isp-Add-chroma-enhancement-after-the-tone-c.patch
+6b6d5cc1f6548304edc63a51f871309eafbd22eaf85491d82efb9e799646ee59ea14b369c04812e02fe6cdf3e98a6c91a71fefc3fce05d27ce30986c0c74adfb  0046-ipa-soft-Keep-the-black-level-exact-by-gain-and-its-.patch
+52a362e833213281199a2ecf0a97d2dc78e38791adca13532552c3631793bcba58057000c6e2f1de010199e7eb1969449de667965ae888e7d71370b7f151218e  0047-ipa-soft-adjust-Take-the-DRC-tone-mapping-from-the-t.patch
+6b44dda156a85c0313acd541921bfe39e792061396dde1ce68b5cbff57438ab59af18954f20d5c75d307af5d842f90e1fafb6cd69f1f97ba018df9db5906fecd  0048-software_isp-Don-t-queue-frames-to-the-stopped-worke.patch
+b3436d2b4689847746d6f16f9c8caad4573fa5f994dc907f13c1e7a4a331c77a9937271297cd582e147bc8062e748695c921f3367a75b0334ae9fd715df2752e  0049-ipa-soft-Lift-the-shadows-with-a-dark-boost.patch
+5f525a457e59ca9c6f65848d8c01893389adc6cb562027ef086e8f2daea434352411127862bac02a1cdbdd0dee844f4f8d888ee389b89e93a67c40e2e0aafb04  0050-pipeline-camss-Allow-a-raw-stream-alongside-the-proc.patch
+083449679217a454bd8c53921742d92b4d3d35ee993ca540c775b4d264e4ebabef318c77c89ec36fb6573c69c2c916c889029ec4e7a606c8d8e26567e860cd8a  0051-ipa-soft-agc-Add-manual-exposure-time-and-gain.patch
+ce7a271253c5119346702cd24c44e59022d331d687915423e458be3be4ed2f12ab1e661a1cee7afff28bb5ce08902a6f2ed749ac765cdaaf62e06ffe0941c613  0052-ipa-soft-Select-the-colour-correction-by-lux-index.patch
+0d414aea6fbda2614772739529e21b665e5ea119200b23379452f1640685b54a152a679e64bd97b941954d7a31af609681c4160f4f6792e911cf5b53dafcd083  0053-ipa-soft-Select-the-chroma-tone-curve-DRC-tone-mappi.patch
+da463302aef855d5914ee03fa41648ba5cb2955d79bd96fe1d5c88d05b6b1f55ba8c2a39b53f462ce6663614d596426c4850967ab0d2b057355139bbfab72a95  0054-software_isp-debayer_egl-Bin-the-raw-frame-in-2x2-ce.patch
+4fc98d97cd5b2d2efcb0e557d0eb35aeabd576c2eef721150cf12259afd43bdea1b55ac391b2178d8ab66769ff9120d8ce80ad93c4a1699e47966d3f90b50abb  0055-ipa-soft-Add-a-noise-reduction-algorithm.patch
+5b44bd5fb9d50e5f71b5c646cfbfd817c712ced2e896a5f2611a61d433f15068d1fbec365e1c410cc4ca530fe376acceb4db838f036069e1caab4a36cc3ae580  0056-software_isp-debayer_egl-Run-the-CPU-statistics-on-t.patch
+40b7469979bf62f5aaf6359a67f7ea334d8c3cac95150d45d63f5f3d6cbc6ad6800b5b514b77e575c0f6d20329d2dc18ad296b3fd3fefab0086bbf498b1c4b47  0057-ipa-soft-agc-Select-the-luma-and-histogram-targets-b.patch
+4c26837ce9bc0ed8b092562ac2354416ec2b48f8e20fb9148dd0d83a5ee96fa94dbab3a69ffa82094168bb39a44ed67a1105f782e0531994314dab631f5e2aca  0058-pipeline-simple-camss-Control-the-frame-length.patch
+deeea99ea48fb08df477fc22d4cd03adfa27f1aa11fcc404e3106c78432d3f267a350ff5188fcc4c8bacb34d93c15c16176de79d8c743ff1aef492a96bb94149  0059-ipa-softisp-agc-Lengthen-the-frame-for-longer-exposu.patch
+22c0c0a072dfd40b44a94c23bd4a6ba7fa03f497590438e57e82fecc9ff6bd6c2c2d7059a841fc91e8d71d40b8f801cfbb6e284075516fa57cb10ceba8baa805  0060-ipa-softisp-Take-the-sensor-s-timing-at-the-configur.patch
+60401cf705f450f8d70b714bce2b4e807f9e3e258a6f060cd7109ebbb4035e2ad8f8d102d75d52595ad8e9b87d8253d7e4d05c1b16ea33e815b15aff78c2cb4a  0061-software_isp-Sharpen-the-luma-on-the-cells-path.patch
+6a708b736d8801789ed9b029c8c8f13953e599bf96579ba340fc8f9f387c8d7e86df917917c5b7b3ac2cdc92b4c000f94d6c3e8818a350879bacb1c4c37702db  0062-software_isp-Keep-a-32x24-grid-of-the-statistics-cha.patch
+55332f52ee1aaca9ede8f8e9a9a9eb9d742aea8b73e1eabb6e8373fb7fdd9fb2cae3f3387b764bc05400998ef0de6dddbfecfb0b114dd5bc0f7e7424f8509ea2  0063-ipa-soft-awb-Optionally-estimate-the-illuminant-with.patch
+cff484f4c42e1592d6a5bd26a6f4d4721c829a19f41fbc718109377968781e846fbd9bfdf917024baed192449a085653d3c0025374b44f66b5dd7cbc903793e9  0064-software_isp-debayer_egl-Filter-the-cells-over-time-.patch
+4aa8fcd8b59ae96ee10d1f4b35a0e48491c9464224f9aa4be1d5c975c99a077fad467df1da4057c4a0bbee7b824f24ce52776c1bd818c02e5cfc9f962ff36f57  0065-software_isp-HDR-from-frames-of-alternating-exposure.patch
+dd78bc71c431f8a22059e6e44d10051a151880c61979248966a79539f82ce7fcb9dca464eadc6910b9a45b4a388fa617097aeac2ca1360a8487485b6953f08e1  0066-software_isp-Adapt-the-soft-ISP-stack-to-upstream-s-.patch
 2ee566653b17d565d2c0de67cbe6ebad25df5aac6051cad78e6bae52016fa2ca0247e964d735ac776b3e0bd447ead9c4fcb26cd7629228cdba3ceb91b46f378f  hi846.yaml
 578dfd7c239590a85fe8f2092f9e6dd2d45472264f1621aa3a813ddebbd8ce3c663b259684a90bf0e2d074df448073daca78dd788e65064554614502b6b1f350  imx320.yaml
 acba0299c6f9dbb983d7bb8dbe64b98896665b2228ab584876e3cbbb6c58a583851fb8540a7eae1eebc76f37cf9eb4a4afecf434c3803b3d1ea5ec10725d4cbd  imx345.yaml

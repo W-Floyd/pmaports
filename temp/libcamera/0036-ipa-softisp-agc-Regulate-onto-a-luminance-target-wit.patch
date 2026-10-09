@@ -1,0 +1,716 @@
+From 78b070ae90c3b6ae7976e8e504aa542922613ce5 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sat, 26 Sep 2026 18:02:36 +0000
+Subject: ipa: softisp: agc: Regulate onto a luminance target, with dynamic
+ range compression
+
+The AGC aims the mean sample value of a five bin histogram of the raw
+image at the middle of its range, which puts the mean linear luminance
+around 40-50% of full scale. Vendor AEC tunings aim much lower (a luma
+target around a fifth of full scale on Qualcomm's), and a tone curve
+taken from such a tuning is made for that exposure: combined with the
+default target, anything bright in the scene comes out blown.
+
+Add an optional meanTarget: the linear mean luminance above black, as a
+fraction of full scale, to regulate onto instead. The correction is the
+ratio in stops, taken straight (damped to 0.85) when more than 0.6 stop
+off and half-way within the step limit when closer, with no correction
+within 0.1 stop.
+
+With a mean luminance target alone, a scene with bright areas in it is
+exposed for its mean and the bright areas clip. Vendor AECs adjust the
+target from the histogram and, rather than darkening the whole image to
+save the highlights, expose lower and let the tone mapping lift the rest
+back up (Qualcomm's ADRC: its metering tuning gives a ceiling for the
+brightest few percent of the pixels and a largest gain, around 2.4 in
+daylight).
+
+Add an optional histogram block to the Agc tuning, after the parameters
+of Qualcomm's histogram luma target (its implementation is not public):
+the mean level of the brightest pixels in a range (0-5%), scaled back up
+by the DRC gain in effect, is compared with a ceiling. Above it, exposure
+is held below the target by their ratio, up to maxDrcGain and filtered,
+and the target itself moves down by at most the lower bound of
+targetAdj; below it, a flat scene, the target rises by up to the upper
+bound. The DRC gain is kept in the active state, and Adjust applies it
+at the start of the tone curve, on the linear input, as
+x * g / (1 + (g - 1) * x): shadows and mid-tones are scaled back up by
+the gain, white stays white.
+
+The tone curve took a new DRC gain at once, while the exposure lowered
+for it reaches the sensor frames later: the image brightened, then
+darkened back as the exposure caught up, on every change. Worse, the
+next statistics, of frames still taken at the old exposure, were scaled
+by the new gain, so the loop overestimated the highlights and swung
+back and forth.
+
+Remember, for each exposure decision, its exposure x gain and the DRC
+gain it was made for, and when a frame's statistics come in, look up the
+DRC gain its actual exposure was decided for: that one is what the tone
+curve uses and what the highlights are scaled by. Change the gain only
+by 10% or more at a time, past the exposure loop's own dead band, so
+that every gain comes with an exposure that tells it apart.
+
+Clipped highlights read no brighter than full scale however bright they
+are, which held the gain at about their ratio to the ceiling: keep
+raising it by a quarter per update while they clip, up to the maximum.
+
+The DRC tone curve changed in steps against the exposure, never in the
+same frame: brightness pulsed on every step, as a staircase. With the
+frame's actual exposure known when its parameters are computed, give
+each frame the tone curve gain that brings its mean up to the target
+without DRC, predicted from the last frame with statistics and the two
+frames' exposure x gain, and at most the DRC gain its exposure was
+decided for. The curve then follows the exposure exactly, whatever steps
+the exposure loop takes, and the DRC gain no longer needs the dead band
+that made each change a step of its own.
+
+Name the number of luminance levels in SwIspStats and derive the full
+scale and histogram bin width from it, instead of 255 and 256 literals.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ .../internal/software_isp/swisp_stats.h       |   5 +
+ src/ipa/softisp/algorithms/adjust.cpp         |  57 +++-
+ src/ipa/softisp/algorithms/adjust.h           |   5 +-
+ src/ipa/softisp/algorithms/agc.cpp            | 263 +++++++++++++++++-
+ src/ipa/softisp/algorithms/agc.h              |  25 +-
+ src/ipa/softisp/ipa_context.h                 |  25 ++
+ src/ipa/softisp/softisp.cpp                   |  19 +-
+ 7 files changed, 380 insertions(+), 19 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/swisp_stats.h b/include/libcamera/internal/software_isp/swisp_stats.h
+index ea8b37947..9e180f648 100644
+--- a/include/libcamera/internal/software_isp/swisp_stats.h
++++ b/include/libcamera/internal/software_isp/swisp_stats.h
+@@ -35,6 +35,11 @@ struct SwIspStats {
+ 	 * \brief Number of bins in the yHistogram
+ 	 */
+ 	static constexpr unsigned int kYHistogramSize = 64;
++	/**
++	 * \brief Number of luminance levels the histogram spans: values 0 to
++	 * kYLevels - 1, kYLevels / kYHistogramSize to a bin
++	 */
++	static constexpr unsigned int kYLevels = 256;
+ 	/**
+ 	 * \brief Type of the histogram.
+ 	 */
+diff --git a/src/ipa/softisp/algorithms/adjust.cpp b/src/ipa/softisp/algorithms/adjust.cpp
+index 7ee2000a2..7a59bd154 100644
+--- a/src/ipa/softisp/algorithms/adjust.cpp
++++ b/src/ipa/softisp/algorithms/adjust.cpp
+@@ -32,20 +32,28 @@ LOG_DEFINE_CATEGORY(IPASoftIspAdjust)
+  * \param[in] gamma The display gamma, e.g. 2.2, used when \a curve is null
+  * \param[in] contrastExp Exponent of the contrast S-curve, 1 for none
+  * \param[in] curve A tone curve mapping [0, 1] to [0, 1], or nullptr
++ * \param[in] drcGain The dynamic range compression gain, 1 for none
+  *
+- * The contrast S-curve is applied first, then either \a curve or the gamma
+- * encoding x^(1/gamma).
++ * Dynamic range compression comes first, on the linear input: when exposure
++ * has been reduced by \a drcGain to keep highlights from clipping, it scales
++ * the shadows and mid-tones back up by that much while leaving white at
++ * white, with x * g / (1 + (g - 1) * x). The contrast S-curve follows, then
++ * either \a curve or the gamma encoding x^(1/gamma).
+  *
+  * \return The tone lookup table
+  */
+-ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve)
++ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
++		float drcGain)
+ {
+ 	ToneLut lut;
+ 	const double last = lut.size() - 1.0;
++	const double g = std::max(drcGain, 1.0f);
+ 
+ 	for (unsigned int i = 0; i < lut.size(); i++) {
+ 		double x = i / last;
+ 
++		x = x * g / (1.0 + (g - 1.0) * x);
++
+ 		/* Simple S-curve around mid-grey */
+ 		if (x < 0.5)
+ 			x = 0.5 * std::pow(x / 0.5, contrastExp);
+@@ -149,6 +157,42 @@ void Adjust::applySaturation(Matrix<float, 3, 3> &matrix, float saturation)
+ 		ycbcr2rgb * saturationMatrix * rgb2ycbcr * matrix;
+ }
+ 
++/*
++ * The DRC gain for a frame's tone curve: what brings the frame's mean up to
++ * the target without DRC, predicted from the last frame with statistics and
++ * the two frames' exposure x gain, and at most the DRC gain the frame's
++ * exposure was decided for. Following the frame's actual exposure makes the
++ * curve change in the same frame as the exposure, whatever steps the
++ * exposure loop takes, so the image does not pulse; the cap keeps it from
++ * acting as extra digital gain when the exposure falls short for other
++ * reasons.
++ */
++double Adjust::drcGain(const IPAContext &context, const IPAFrameContext &frameContext)
++{
++	const auto &agc = context.activeState.agc;
++
++	if (agc.drcHistory.empty() || agc.lastProduct <= 0.0 || agc.plainTarget <= 0.0)
++		return std::max(agc.drcGain, 1.0);
++
++	const double product = frameContext.sensor.known
++				       ? frameContext.sensor.exposure * frameContext.sensor.gain
++				       : agc.lastProduct;
++
++	double cap = agc.drcGain;
++	for (auto it = agc.drcHistory.rbegin(); it != agc.drcHistory.rend(); ++it) {
++		if (std::abs(it->first - product) <= 0.02 * product) {
++			cap = it->second;
++			break;
++		}
++	}
++
++	if (cap <= 1.0)
++		return 1.0;
++
++	const double expected = agc.lastMean * product / agc.lastProduct;
++	return std::clamp(agc.plainTarget / expected, 1.0, cap);
++}
++
+ void Adjust::prepare(IPAContext &context,
+ 		     [[maybe_unused]] const uint32_t frame,
+ 		     IPAFrameContext &frameContext,
+@@ -168,13 +212,16 @@ void Adjust::prepare(IPAContext &context,
+ 	/* Map contrast 0..2 to an exponent 0..infinity, avoiding tan(pi/2). */
+ 	const float contrastExp = tan(std::clamp(contrast * M_PI_4, 0.0, M_PI_2 - 0.00001));
+ 	const bool fromCurve = !curve_.empty() && !gammaSet_;
++	/* Rebuild for DRC changes of half a percent or more. */
++	const float drc = std::round(drcGain(context, frameContext) * 200) / 200;
+ 
+ 	if (!lutValid_ || gamma != lutGamma_ || contrastExp != lutContrastExp_ ||
+-	    fromCurve != lutFromCurve_) {
+-		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr);
++	    fromCurve != lutFromCurve_ || drc != lutDrc_) {
++		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr, drc);
+ 		lutGamma_ = gamma;
+ 		lutContrastExp_ = contrastExp;
+ 		lutFromCurve_ = fromCurve;
++		lutDrc_ = drc;
+ 		lutValid_ = true;
+ 	}
+ 	params->toneLut = lut_;
+diff --git a/src/ipa/softisp/algorithms/adjust.h b/src/ipa/softisp/algorithms/adjust.h
+index 948188c5c..9b7dfbefb 100644
+--- a/src/ipa/softisp/algorithms/adjust.h
++++ b/src/ipa/softisp/algorithms/adjust.h
+@@ -26,7 +26,8 @@ constexpr float kDefaultGamma = 2.2f;
+ 
+ using ToneLut = std::array<uint8_t, DebayerParams::kToneLutSize>;
+ 
+-ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve);
++ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
++		float drcGain = 1.0f);
+ 
+ class Adjust : public Algorithm
+ {
+@@ -52,6 +53,7 @@ public:
+ 
+ private:
+ 	void applySaturation(Matrix<float, 3, 3> &ccm, float saturation);
++	double drcGain(const IPAContext &context, const IPAFrameContext &frameContext);
+ 
+ 	/* Tone curve from the tuning file, used unless Gamma is set. */
+ 	ipa::Pwl curve_;
+@@ -62,6 +64,7 @@ private:
+ 	float lutGamma_ = 0.0f;
+ 	float lutContrastExp_ = 0.0f;
+ 	bool lutFromCurve_ = false;
++	float lutDrc_ = 1.0f;
+ 	bool lutValid_ = false;
+ };
+ 
+diff --git a/src/ipa/softisp/algorithms/agc.cpp b/src/ipa/softisp/algorithms/agc.cpp
+index 46f68dde5..259d15727 100644
+--- a/src/ipa/softisp/algorithms/agc.cpp
++++ b/src/ipa/softisp/algorithms/agc.cpp
+@@ -9,7 +9,9 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <optional>
+ #include <stdint.h>
++#include <vector>
+ 
+ #include <libcamera/base/log.h>
+ 
+@@ -21,6 +23,11 @@ LOG_DEFINE_CATEGORY(IPASoftIspExposure)
+ 
+ namespace ipa::softisp::algorithms {
+ 
++/* The statistics' luminance scale: the top level, and the levels per bin */
++static constexpr double kYMax = SwIspStats::kYLevels - 1;
++static constexpr unsigned int kYBinWidth =
++	SwIspStats::kYLevels / SwIspStats::kYHistogramSize;
++
+ /*
+  * The number of bins to use for the optimal exposure calculations.
+  */
+@@ -78,6 +85,13 @@ static constexpr float kDefaultExpMaxRatio = 4.0;
+  */
+ static constexpr float kAcquireError = 0.5;
+ 
++/*
++ * With a mean luminance target: no correction within kMeanSatisfactory stops
++ * of it (the hysteresis), and a direct one beyond kMeanAcquire stops.
++ */
++static constexpr double kMeanSatisfactory = 0.1;
++static constexpr double kMeanAcquire = 0.6;
++
+ Agc::Agc()
+ 	: exposureOptimal_(kExposureOptimal),
+ 	  exposureSatisfactory_(kDefaultExposureSatisfactory),
+@@ -116,6 +130,58 @@ int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 	if (ratio.has_value())
+ 		maxRatio_ = std::max(ratio.value(), 1.0f);
+ 
++	/*
++	 * meanTarget, 0 to 1: regulate the linear mean luminance above black
++	 * onto it, instead of the mean sample value of the histogram onto
++	 * exposureOptimal. A vendor tuning's AEC luma target is this, and a
++	 * tone curve taken from the same tuning is made for it: the default
++	 * mean sample value target exposes around a stop brighter.
++	 */
++	auto mean = tuningData["meanTarget"].get<double>();
++	if (mean.has_value() && *mean > 0.0 && *mean < 1.0)
++		meanTarget_ = *mean;
++
++	/*
++	 * histogram: adjusts the mean luminance target from the brightest
++	 * pixels, after the histogram luma target of Qualcomm's AEC metering
++	 * (its parameters, not its implementation, which is not public):
++	 *
++	 *   histogram:
++	 *     satRef: 0.706          # brightest pixels' ceiling, above black
++	 *     satRange: [ 0, 0.05 ]  # the brightest 0-5% of the pixels
++	 *     pushupRange: [ 0, 0.04 ]
++	 *     targetAdj: [ 0.97, 1.15 ]
++	 *     maxDrcGain: 2.4
++	 *     filter: 0.5
++	 *
++	 * When the brightest pixels would sit above satRef, exposure is held
++	 * below the target by up to maxDrcGain (dynamic range compression),
++	 * and the tone curve lifts the rest of the image back by as much;
++	 * when they sit below it, a flat scene, the target rises by up to
++	 * targetAdj's upper bound.
++	 */
++	const ValueNode &hist = tuningData["histogram"];
++	auto satRef = hist["satRef"].get<double>();
++	auto satRange = hist["satRange"].get<std::vector<double>>();
++	auto upRange = hist["pushupRange"].get<std::vector<double>>();
++	auto adj = hist["targetAdj"].get<std::vector<double>>();
++	if (meanTarget_ && satRef && *satRef > 0.0 && satRange && satRange->size() == 2 &&
++	    upRange && upRange->size() == 2 && adj && adj->size() == 2) {
++		hist_ = HistTuning{
++			.satRef = *satRef,
++			.satStart = (*satRange)[0], .satEnd = (*satRange)[1],
++			.upStart = (*upRange)[0], .upEnd = (*upRange)[1],
++			.minAdj = std::min((*adj)[0], 1.0), .maxAdj = std::max((*adj)[1], 1.0),
++			.maxDrc = std::max(hist["maxDrcGain"].get<double>(1.0), 1.0),
++			.filter = std::clamp(hist["filter"].get<double>(0.0), 0.0, 0.99),
++		};
++	}
++
++	if (meanTarget_)
++		LOG(IPASoftIspExposure, Info)
++			<< "Regulating the mean luminance onto " << *meanTarget_
++			<< (hist_ ? ", adjusted from the histogram" : "");
++
+ 	LOG(IPASoftIspExposure, Debug)
+ 		<< "AGC: optimal " << exposureOptimal_
+ 		<< ", satisfactory " << exposureSatisfactory_
+@@ -126,20 +192,166 @@ int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 	return 0;
+ }
+ 
++namespace {
++
++/*
++ * The mean level of the pixels ranked between the fractions start and end
++ * of the pixels from the bright end of the histogram, as a fraction of the
++ * range above black. Empty if the range holds no pixels.
++ */
++std::optional<double> brightMean(const SwIspStats *stats, double black,
++				 double start, double end)
++{
++	const auto &hist = stats->yHistogram;
++	constexpr unsigned int kBinWidth = kYBinWidth;
++	double total = 0.0;
++
++	for (unsigned int i = 0; i < hist.size(); i++)
++		total += hist[i];
++
++	const double from = start * total;
++	const double to = end * total;
++	double seen = 0.0, sum = 0.0, count = 0.0;
++
++	for (unsigned int i = hist.size(); i-- > 0 && seen < to;) {
++		const double c = hist[i];
++		const double overlap = std::min(seen + c, to) - std::max(seen, from);
++		if (overlap > 0.0) {
++			const double level = i * kBinWidth + kBinWidth / 2.0;
++			sum += overlap * std::max(level - black, 0.0);
++			count += overlap;
++		}
++		seen += c;
++	}
++
++	if (count <= 0.0)
++		return {};
++
++	return sum / count / (kYMax - black);
++}
++
++} /* namespace */
++
++/* A saturation position this close to full scale is clipped */
++static constexpr double kClipped = 0.95;
++/* How far to raise the DRC gain at once while the highlights clip */
++static constexpr double kClippedStep = 1.25;
++/* Exposure decisions remembered, a few frames' worth */
++static constexpr unsigned int kDrcHistory = 16;
++/* Relative tolerance matching a frame's exposure to a decision */
++static constexpr double kDrcMatch = 0.02;
++
++/*
++ * Tell which DRC gain is in effect in the frame whose statistics these are:
++ * the one its exposure was decided for. The brightest pixels are judged
++ * with it; the tone curve looks it up for each frame likewise (Adjust).
++ */
++void Agc::trackDrc(IPAContext &context, const IPAFrameContext &frameContext)
++{
++	const double product = frameContext.sensor.exposure * frameContext.sensor.gain;
++	const auto &history = context.activeState.agc.drcHistory;
++
++	for (auto it = history.rbegin(); it != history.rend(); ++it) {
++		if (std::abs(it->first - product) <= kDrcMatch * product) {
++			context.activeState.agc.drcGain = it->second;
++			return;
++		}
++	}
++}
++
++/*
++ * The mean luminance target, adjusted from the histogram (see init()), for
++ * the DRC gain decided here. The histogram is of a frame taken with the DRC
++ * gain in effect in it (see trackDrc()), so the brightest pixels are scaled
++ * back up by that one to judge the scene as the plain target would expose
++ * it.
++ */
++double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
++{
++	const double black = context.activeState.blc.level;
++	const double applied = std::max(context.activeState.agc.drcGain, 1.0);
++
++	std::optional<double> sat = brightMean(stats, black, hist_->satStart, hist_->satEnd);
++	if (!sat)
++		return *meanTarget_ / drcDecided_;
++
++	const double scene = *sat * applied;
++	double want = std::clamp(scene / hist_->satRef, 1.0, hist_->maxDrc);
++
++	/*
++	 * Clipped highlights read no brighter than full scale, however bright
++	 * they are: keep raising the gain while they clip.
++	 */
++	if (*sat >= kClipped)
++		want = std::clamp(std::max(want, applied * kClippedStep), 1.0, hist_->maxDrc);
++
++	drcDecided_ = hist_->filter * drcDecided_ + (1.0 - hist_->filter) * want;
++	/* Close to none: none */
++	if (want == 1.0 && drcDecided_ < 1.01)
++		drcDecided_ = 1.0;
++
++	double adj;
++	if (scene > hist_->satRef) {
++		/* Saturating: the target itself gives little, DRC the rest */
++		adj = std::clamp(hist_->satRef / scene, hist_->minAdj, 1.0);
++	} else {
++		/* A flat scene, with no bright pixels: expose it brighter */
++		std::optional<double> up = brightMean(stats, black, hist_->upStart, hist_->upEnd);
++		adj = up && *up > 0.0
++			      ? std::clamp(hist_->satRef / (*up * applied), 1.0, hist_->maxAdj)
++			      : 1.0;
++	}
++
++	LOG(IPASoftIspExposure, Debug)
++		<< "brightest " << scene << " of " << hist_->satRef
++		<< (*sat >= kClipped ? " (clipped)" : "")
++		<< ": DRC gain " << drcDecided_ << ", in effect " << applied
++		<< ", target adjusted by " << adj;
++
++	context.activeState.agc.plainTarget = *meanTarget_ * adj;
++	return *meanTarget_ * adj / drcDecided_;
++}
++
+ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+-			 double exposureMSV, double meanY)
++			 double exposureMSV, double meanY, double meanTarget)
+ {
+ 	int32_t &exposure = frameContext.sensor.exposure;
+ 	double &again = frameContext.sensor.gain;
+ 
+ 	double error = exposureOptimal_ - exposureMSV;
+-
+-	if (std::abs(error) <= exposureSatisfactory_)
+-		return;
+-
+ 	double factor;
+ 
+-	if (std::abs(error) > kAcquireError) {
++	if (meanTarget_) {
++		/*
++		 * Regulate the linear mean luminance above black onto the
++		 * target. The histogram is of the raw data, before the tone
++		 * curve, so this is the quantity a vendor AEC luma target
++		 * refers to, and the one a tone curve tuned alongside it
++		 * expects in mid-grey.
++		 */
++		const double black = context.activeState.blc.level;
++		const double mean = std::max((meanY - black) / (kYMax - black), 1e-3);
++		const double stops = std::log2(meanTarget / mean);
++
++		error = stops;
++		if (std::abs(stops) <= kMeanSatisfactory)
++			return;
++
++		if (std::abs(stops) > kMeanAcquire) {
++			/*
++			 * Far off: aim straight at the target, a little short,
++			 * as clipped highlights make the mean read low.
++			 */
++			factor = std::exp2(stops * 0.85);
++			factor = std::clamp<double>(factor, 1.0 / maxRatio_, maxRatio_);
++		} else {
++			/* Close: half the way, bounded, to settle without hunting */
++			factor = std::exp2(stops * 0.5);
++			factor = std::clamp<double>(factor, 1.0 - maxStep_, 1.0 + maxStep_);
++		}
++	} else if (std::abs(error) <= exposureSatisfactory_) {
++		return;
++	} else if (std::abs(error) > kAcquireError) {
+ 		/*
+ 		 * Far from the target, so aim straight at it rather than
+ 		 * stepping towards it. The mean luminance is proportional to
+@@ -155,7 +367,7 @@ void Agc::updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+ 		const double black = context.activeState.blc.level;
+ 		const double targetY = black +
+ 				       (exposureOptimal_ - 0.5) / kExposureBinsCount *
+-					       (255.0 - black);
++					       (kYMax - black);
+ 		const double num = std::max(targetY - black, 1.0);
+ 		const double den = std::max(meanY - black, 1.0);
+ 
+@@ -236,8 +448,18 @@ void Agc::process(IPAContext &context,
+ 		context.activeState.agc.exposure = frameContext.sensor.exposure;
+ 		context.activeState.agc.again = frameContext.sensor.gain;
+ 		context.activeState.agc.valid = true;
++
++		/* A new session starts without DRC */
++		context.activeState.agc.drcGain = 1.0;
++		context.activeState.agc.drcHistory.clear();
++		context.activeState.agc.lastProduct = 0.0;
++		drcDecided_ = 1.0;
+ 	}
+ 
++	/* The DRC gain the tone curve must use from now on */
++	if (hist_)
++		trackDrc(context, frameContext);
++
+ 	if (!stats->valid) {
+ 		/*
+ 		 * Use the new exposure and gain values calculated the last time
+@@ -254,7 +476,7 @@ void Agc::process(IPAContext &context,
+ 	 */
+ 	const auto &histogram = stats->yHistogram;
+ 	const unsigned int blackLevelHistIdx =
+-		context.activeState.blc.level / (256 / SwIspStats::kYHistogramSize);
++		context.activeState.blc.level / kYBinWidth;
+ 	const unsigned int histogramSize =
+ 		SwIspStats::kYHistogramSize - blackLevelHistIdx;
+ 	const unsigned int yHistValsPerBin = histogramSize / kExposureBinsCount;
+@@ -289,7 +511,7 @@ void Agc::process(IPAContext &context,
+ 	 * are too blunt for that: they saturate, so a completely blown frame
+ 	 * and a mildly bright one ask for corrections of a similar size.
+ 	 */
+-	constexpr unsigned int kBinWidth = 256 / SwIspStats::kYHistogramSize;
++	constexpr unsigned int kBinWidth = kYBinWidth;
+ 	uint64_t ySum = 0;
+ 	uint64_t yCount = 0;
+ 	for (unsigned int i = 0; i < SwIspStats::kYHistogramSize; i++) {
+@@ -299,7 +521,28 @@ void Agc::process(IPAContext &context,
+ 	}
+ 	double meanY = yCount ? static_cast<double>(ySum) / yCount : 0.0;
+ 
+-	updateExposure(context, frameContext, exposureMSV, meanY);
++	double target = 0.0;
++	if (meanTarget_)
++		target = hist_ ? histTarget(context, stats) : *meanTarget_;
++
++	/*
++	 * This frame's mean and exposure, to predict other frames' mean from
++	 * their exposure (the DRC tone curve, in Adjust).
++	 */
++	auto &agc = context.activeState.agc;
++	const double black = context.activeState.blc.level;
++	agc.lastMean = std::max((meanY - black) / (kYMax - black), 1e-3);
++	agc.lastProduct = frameContext.sensor.exposure * frameContext.sensor.gain;
++
++	updateExposure(context, frameContext, exposureMSV, meanY, target);
++
++	/* Remember which DRC gain the exposure now set goes with */
++	if (hist_) {
++		agc.drcHistory.emplace_back(frameContext.sensor.exposure * frameContext.sensor.gain,
++					    drcDecided_);
++		if (agc.drcHistory.size() > kDrcHistory)
++			agc.drcHistory.pop_front();
++	}
+ }
+ 
+ REGISTER_IPA_ALGORITHM(Agc, "Agc")
+diff --git a/src/ipa/softisp/algorithms/agc.h b/src/ipa/softisp/algorithms/agc.h
+index 9ed84d2a8..84fa477e5 100644
+--- a/src/ipa/softisp/algorithms/agc.h
++++ b/src/ipa/softisp/algorithms/agc.h
+@@ -7,6 +7,8 @@
+ 
+ #pragma once
+ 
++#include <optional>
++
+ #include "algorithm.h"
+ 
+ namespace libcamera {
+@@ -27,14 +29,35 @@ public:
+ 		     ControlList &metadata) override;
+ 
+ private:
++	/*
++	 * Histogram luma target adjustment, with a mean luminance target:
++	 * brightness levels as fractions of the range above black, pixel
++	 * ranges as fractions of the pixels counted from the bright end.
++	 */
++	struct HistTuning {
++		double satRef;			/* the brightest pixels' ceiling */
++		double satStart, satEnd;	/* pixels saturation is judged on */
++		double upStart, upEnd;		/* pixels flat scenes are judged on */
++		double minAdj, maxAdj;		/* bounds of the target adjustment */
++		double maxDrc;			/* the largest DRC gain */
++		double filter;			/* weight of the previous DRC gain */
++	};
++
++	double histTarget(IPAContext &context, const SwIspStats *stats);
++	void trackDrc(IPAContext &context, const IPAFrameContext &frameContext);
+ 	void updateExposure(IPAContext &context, IPAFrameContext &frameContext,
+-			    double exposureMSV, double meanY);
++			    double exposureMSV, double meanY, double meanTarget);
+ 
+ 	float exposureOptimal_;
+ 	float exposureSatisfactory_;
+ 	float proportionalGain_;
+ 	float maxStep_;
+ 	float maxRatio_;
++	std::optional<double> meanTarget_;
++	std::optional<HistTuning> hist_;
++
++	/* The DRC gain exposure is being set for */
++	double drcDecided_ = 1.0;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index 80d6b25f5..f39f436b5 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -8,8 +8,10 @@
+ #pragma once
+ 
+ #include <array>
++#include <deque>
+ #include <optional>
+ #include <stdint.h>
++#include <utility>
+ #include <vector>
+ 
+ #include <libcamera/controls.h>
+@@ -57,6 +59,24 @@ struct IPAActiveState {
+ 		int32_t exposure;
+ 		double again;
+ 		bool valid;
++		/*
++		 * Dynamic range compression: how far exposure is held below
++		 * the mean luminance target to keep highlights from clipping,
++		 * which the tone curve then makes up for. 0 or 1 for none.
++		 * drcGain is the one in effect in the last frame with
++		 * statistics; drcHistory pairs recent exposure decisions'
++		 * exposure x gain with the DRC gain each was made for.
++		 */
++		double drcGain;
++		std::deque<std::pair<double, double>> drcHistory;
++		/*
++		 * The mean luminance target without DRC, and the last frame
++		 * with statistics' mean (both above black, 0 to 1) and exposure
++		 * x gain, to predict another frame's mean from its exposure.
++		 */
++		double plainTarget;
++		double lastMean;
++		double lastProduct;
+ 	} agc;
+ 
+ 	struct {
+@@ -103,6 +123,11 @@ struct IPAFrameContext : public FrameContext {
+ 	struct {
+ 		int32_t exposure;
+ 		double gain;
++		/*
++		 * The exposure and gain are the ones the sensor uses for the
++		 * frame (from the pipeline), not the ones last decided.
++		 */
++		bool known;
+ 	} sensor;
+ 
+ 	struct {
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index df290d44d..bff43fdac 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -72,7 +72,7 @@ public:
+ 	void stop() override;
+ 
+ 	void queueRequest(const uint32_t frame, const ControlList &controls) override;
+-	void computeParams(const uint32_t frame) override;
++	void computeParams(const uint32_t frame, const ControlList &sensorControls) override;
+ 	void processStats(const uint32_t frame, const uint32_t bufferId,
+ 			  const ControlList &sensorControls) override;
+ 
+@@ -386,11 +386,26 @@ void IPASoftIsp::queueRequest(const uint32_t frame, const ControlList &controls)
+ 		algo->queueRequest(context_, frame, frameContext, controls);
+ }
+ 
+-void IPASoftIsp::computeParams(const uint32_t frame)
++void IPASoftIsp::computeParams(const uint32_t frame, const ControlList &sensorControls)
+ {
+ 	context_.activeState.combinedMatrix = Matrix<float, 3, 3>::identity();
+ 
+ 	IPAFrameContext &frameContext = context_.frameContexts.get(frame);
++
++	/*
++	 * The exposure the frame was actually taken with, when the pipeline
++	 * knows it, so that what depends on it (the DRC tone curve) matches
++	 * this very frame.
++	 */
++	const ControlValue &exposure = sensorControls.get(V4L2_CID_EXPOSURE);
++	const ControlValue &gain = sensorControls.get(V4L2_CID_ANALOGUE_GAIN);
++	frameContext.sensor.known = exposure.type() == ControlTypeInteger32 &&
++				    gain.type() == ControlTypeInteger32;
++	if (frameContext.sensor.known) {
++		frameContext.sensor.exposure = exposure.get<int32_t>();
++		const int32_t code = gain.get<int32_t>();
++		frameContext.sensor.gain = camHelper_ ? camHelper_->gain(code) : code;
++	}
+ 	for (const auto &algo : algorithms())
+ 		algo->prepare(context_, frame, frameContext, params_);
+ 	params_->combinedMatrix = context_.activeState.combinedMatrix;

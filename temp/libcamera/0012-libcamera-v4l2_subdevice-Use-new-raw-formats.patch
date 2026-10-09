@@ -1,0 +1,79 @@
+From f6b0fdff460e53ba8cf948e90c9925cc39aa102f Mon Sep 17 00:00:00 2001
+From: Jai Luthra <jai.luthra@ideasonboard.com>
+Date: Fri, 12 Jun 2026 18:04:11 +0530
+Subject: libcamera: v4l2_subdevice: Use new raw formats
+
+Signed-off-by: Jai Luthra <jai.luthra@ideasonboard.com>
+(cherry picked from commit 41b56accf6282c06d9303fcf7584268939cfbc64)
+---
+ src/libcamera/v4l2_subdevice.cpp | 55 ++++++++++++++++++++++++++------
+ 1 file changed, 45 insertions(+), 10 deletions(-)
+
+diff --git a/src/libcamera/v4l2_subdevice.cpp b/src/libcamera/v4l2_subdevice.cpp
+index 8f9d4dbd9..dad5ee78e 100644
+--- a/src/libcamera/v4l2_subdevice.cpp
++++ b/src/libcamera/v4l2_subdevice.cpp
+@@ -791,18 +791,53 @@ const std::map<uint32_t, MediaBusFormatInfo> mediaBusFormatInfo{
+ 		.bitsPerPixel = 24,
+ 		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
+ 	} },
+-	{ MEDIA_BUS_FMT_CCS_EMBEDDED, {
+-		.name = "CCS_EMBEDDED",
+-		.code = MEDIA_BUS_FMT_CCS_EMBEDDED,
+-		.type = MediaBusFormatInfo::Type::EmbeddedData,
+-		.bitsPerPixel = 0,
++	{ MEDIA_BUS_FMT_RAW_8, {
++		.name = "RAW_8",
++		.code = MEDIA_BUS_FMT_RAW_8,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 8,
+ 		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
+ 	} },
+-	{ MEDIA_BUS_FMT_OV2740_EMBEDDED, {
+-		.name = "OV2740_EMBEDDED",
+-		.code = MEDIA_BUS_FMT_CCS_EMBEDDED,
+-		.type = MediaBusFormatInfo::Type::EmbeddedData,
+-		.bitsPerPixel = 0,
++	{ MEDIA_BUS_FMT_RAW_10, {
++		.name = "RAW_10",
++		.code = MEDIA_BUS_FMT_RAW_10,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 10,
++		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
++	} },
++	{ MEDIA_BUS_FMT_RAW_12, {
++		.name = "RAW_12",
++		.code = MEDIA_BUS_FMT_RAW_12,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 12,
++		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
++	} },
++	{ MEDIA_BUS_FMT_RAW_14, {
++		.name = "RAW_14",
++		.code = MEDIA_BUS_FMT_RAW_14,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 14,
++		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
++	} },
++	{ MEDIA_BUS_FMT_RAW_16, {
++		.name = "RAW_16",
++		.code = MEDIA_BUS_FMT_RAW_16,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 16,
++		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
++	} },
++	{ MEDIA_BUS_FMT_RAW_20, {
++		.name = "RAW_20",
++		.code = MEDIA_BUS_FMT_RAW_20,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 20,
++		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
++	} },
++	{ MEDIA_BUS_FMT_RAW_24, {
++		.name = "RAW_24",
++		.code = MEDIA_BUS_FMT_RAW_24,
++		.type = MediaBusFormatInfo::Type::Image,
++		.bitsPerPixel = 24,
+ 		.colourEncoding = PixelFormatInfo::ColourEncodingRAW,
+ 	} },
+ };

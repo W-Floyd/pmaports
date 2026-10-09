@@ -1,8 +1,7 @@
-From ac12b49c67cec00b3562321f5376cb274c81c7d3 Mon Sep 17 00:00:00 2001
+From 323efbb75e7c2f8abff6405d3a01336a85268c7d Mon Sep 17 00:00:00 2001
 From: Robert Mader <robert.mader@collabora.com>
 Date: Mon, 6 May 2024 21:21:57 +0200
-Subject: [PATCH 02/39] libcamera: simple: Skip hwISP formats if swISP is
- active
+Subject: libcamera: simple: Skip hwISP formats if swISP is active
 
 On devices like the Pinephone libcamera will advertise support for
 formats provided by the HW ISP and the SW ISP at the same time. The
@@ -16,7 +15,7 @@ Signed-off-by: Robert Mader <robert.mader@collabora.com>
  1 file changed, 1 insertion(+), 3 deletions(-)
 
 diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
-index 24538649c..b96b8b529 100644
+index 11c1d8f03..bbe05a6fc 100644
 --- a/src/libcamera/pipeline/simple/simple.cpp
 +++ b/src/libcamera/pipeline/simple/simple.cpp
 @@ -745,9 +745,7 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)

@@ -1,0 +1,31 @@
+From 4a4213674ecb6eb8c6710ecd9a5a43140492343b Mon Sep 17 00:00:00 2001
+From: Robert Mader <robert.mader@collabora.com>
+Date: Sat, 8 Aug 2026 13:42:36 +0200
+Subject: simple: Limit swISP output sizes
+
+~/.config/libcamera/configuration.yaml
+---
+ src/libcamera/pipeline/simple/simple.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index bbe05a6fc..bbae5f734 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -752,6 +752,16 @@ void SimpleCameraData::tryPipeline(unsigned int code, const Size &size)
+ 			config.outputSizes = config.captureSize;
+ 		}
+ 
++		const GlobalConfiguration &configuration = pipe()->cameraManager()->_d()->configuration();
++		if (auto maxOutputWidth = configuration.configuration()["pipelines"]["simple"]["max_output_width"].get<unsigned int>()) {
++			if (config.outputSizes.max.width > maxOutputWidth.value())
++				config.outputSizes.max.width = maxOutputWidth.value();
++		}
++		if (auto maxOutputHeight = configuration.configuration()["pipelines"]["simple"]["max_output_height"].get<unsigned int>()) {
++			if (config.outputSizes.max.height > maxOutputHeight.value())
++				config.outputSizes.max.height = maxOutputHeight.value();
++		}
++
+ 		configs_.push_back(config);
+ 	}
+ }

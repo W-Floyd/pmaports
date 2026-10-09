@@ -1,0 +1,1404 @@
+From 013cb1acfd4313d439383adb32a1bc49e2b79e53 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Fri, 9 Oct 2026 14:56:11 +0000
+Subject: software_isp: Adapt the soft ISP stack to upstream's interfaces
+
+Rebasing onto upstream (EGL context handling, the IPA context's camera
+sensor helper and sensor controls, the IPA's configure() returning its
+controls, std::span, RGB<double> parameters, the softisp name) leaves the
+stack's own algorithms (AGC, AWB, CCM) on their own context members, which
+this commit reconciles with the new interfaces.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/debayer_params.h    |   4 +-
+ .../internal/software_isp/software_isp.h      |  11 +-
+ .../internal/software_isp/swstats_cpu.h       |   2 +-
+ include/libcamera/ipa/softisp.mojom           |   4 +-
+ src/ipa/libipa/pdaf.cpp                       |  19 +--
+ src/ipa/libipa/pdaf.h                         |  16 +--
+ src/ipa/softisp/algorithms/aperture.cpp       |   3 +-
+ src/ipa/softisp/algorithms/awb.cpp            |   4 +-
+ src/ipa/softisp/algorithms/blc.cpp            |  14 +-
+ src/ipa/softisp/ipa_context.h                 |   9 +-
+ src/ipa/softisp/softisp.cpp                   |  83 +++++-------
+ src/libcamera/pipeline/camss/camss.cpp        |   5 +-
+ .../pipeline/camss/camss_isp_ope.cpp          |  16 ++-
+ src/libcamera/pipeline/camss/camss_isp_ope.h  |   8 +-
+ .../pipeline/camss/camss_isp_soft.cpp         |   4 +-
+ src/libcamera/pipeline/camss/camss_isp_soft.h |   1 +
+ src/libcamera/pipeline/camss/camss_params.h   |   4 +-
+ src/libcamera/pipeline/camss/camss_util.h     |   2 +-
+ src/libcamera/pipeline/simple/simple.cpp      |  26 ++--
+ src/libcamera/sensor/camera_sensor_raw.cpp    | 127 ++++++++++--------
+ src/libcamera/software_isp/debayer_egl.cpp    |  79 ++++-------
+ src/libcamera/software_isp/debayer_egl.h      |   6 +-
+ src/libcamera/software_isp/software_isp.cpp   |   3 +-
+ test/ipa/libipa/pdaf.cpp                      |   3 +-
+ 24 files changed, 227 insertions(+), 226 deletions(-)
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index b4f162fc9..8270cba96 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -60,9 +60,9 @@ struct DebayerParams {
+ 	Matrix<float, 3, 3> combinedMatrix = { { 1.0, 0.0, 0.0,
+ 						 0.0, 1.0, 0.0,
+ 						 0.0, 0.0, 1.0 } };
+-	RGB<float> blackLevel = RGB<float>({ 0.0, 0.0, 0.0 });
++	RGB<double> blackLevel = RGB<double>({ 0.0, 0.0, 0.0 });
+ 	std::array<uint8_t, kToneLutSize> toneLut = identityToneLut();
+-	RGB<float> gains = RGB<float>({ 1.0, 1.0, 1.0 });
++	RGB<double> gains = RGB<double>({ 1.0, 1.0, 1.0 });
+ 	/* Row major, R, G, B per point; unused unless lscEnabled */
+ 	bool lscEnabled = false;
+ 	std::array<LscValue, kLscWidth * kLscHeight * 3> lsc{};
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 8c0358813..311db3542 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -25,8 +25,8 @@
+ #include <libcamera/geometry.h>
+ #include <libcamera/pixel_format.h>
+ 
+-#include <libcamera/ipa/soft_ipa_interface.h>
+-#include <libcamera/ipa/soft_ipa_proxy.h>
++#include <libcamera/ipa/softisp_ipa_interface.h>
++#include <libcamera/ipa/softisp_ipa_proxy.h>
+ 
+ #include "libcamera/internal/camera_sensor.h"
+ #include "libcamera/internal/dma_buf_allocator.h"
+@@ -65,7 +65,8 @@ public:
+ 
+ 	int configure(const StreamConfiguration &inputCfg,
+ 		      const std::vector<std::reference_wrapper<const StreamConfiguration>> &outputCfgs,
+-		      const ipa::softisp::IPAConfigInfo &configInfo);
++		      const ipa::softisp::IPAConfigInfo &configInfo,
++		      ControlInfoMap *ipaControls);
+ 
+ 	int exportBuffers(const Stream *stream, unsigned int count,
+ 			  std::vector<std::unique_ptr<FrameBuffer>> *buffers);
+@@ -98,7 +99,7 @@ public:
+ 	Signal<unsigned int> pdafProcessed;
+ 
+ private:
+-	void saveIspParams();
++	void saveIspParams(uint32_t frame);
+ 	void setSensorCtrls(const ControlList &sensorControls,
+ 			    const ControlList &lensControls,
+ 			    const ControlList &irisControls);
+@@ -112,7 +113,7 @@ private:
+ 	DmaBufAllocator dmaHeap_;
+ 	bool ccmEnabled_;
+ 
+-	std::unique_ptr<ipa::softisp::IPAProxySoft> ipa_;
++	std::unique_ptr<ipa::softisp::IPAProxySoftIsp> ipa_;
+ 	std::deque<FrameBuffer *> queuedInputBuffers_;
+ 	std::deque<FrameBuffer *> queuedOutputBuffers_;
+ 	/* Frames waiting for the IPA's parameters: input, output */
+diff --git a/include/libcamera/internal/software_isp/swstats_cpu.h b/include/libcamera/internal/software_isp/swstats_cpu.h
+index bcfcaae6a..64d4468f8 100644
+--- a/include/libcamera/internal/software_isp/swstats_cpu.h
++++ b/include/libcamera/internal/software_isp/swstats_cpu.h
+@@ -140,7 +140,7 @@ private:
+ 	bool lscEnabled_ = false;
+ 	decltype(DebayerParams::lsc) lscValues_{};
+ 	std::array<float, DebayerParams::kLscWidth * DebayerParams::kLscHeight * 3> lscGrid_{};
+-	RGB<float> lscBlack_ = RGB<float>({ 0.0, 0.0, 0.0 });
++	RGB<double> lscBlack_ = RGB<double>({ 0.0, 0.0, 0.0 });
+ 	Size inputSize_;
+ 	/* Per sample of a line: the grid column left of it, and the weight right */
+ 	std::vector<std::pair<unsigned int, float>> lscColumns_;
+diff --git a/include/libcamera/ipa/softisp.mojom b/include/libcamera/ipa/softisp.mojom
+index a30de7c40..4f8e2acf5 100644
+--- a/include/libcamera/ipa/softisp.mojom
++++ b/include/libcamera/ipa/softisp.mojom
+@@ -27,7 +27,7 @@ interface IPASoftIspInterface {
+ 	start() => (int32 ret);
+ 	stop();
+ 	configure(IPAConfigInfo configInfo)
+-		=> (int32 ret);
++		=> (int32 ret, libcamera.ControlInfoMap ipaControls);
+ 
+ 	[async] queueRequest(uint32 frame, libcamera.ControlList sensorControls);
+ 	/*
+@@ -57,7 +57,7 @@ interface IPASoftIspEventInterface {
+ 	setSensorControls(libcamera.ControlList sensorControls,
+ 			  libcamera.ControlList lensControls,
+ 			  libcamera.ControlList irisControls);
+-	setIspParams();
++	paramsComputed(uint32 frame);
+ 	metadataReady(uint32 frame, libcamera.ControlList metadata);
+ 	pdafProcessed(uint32 bufferId);
+ };
+diff --git a/src/ipa/libipa/pdaf.cpp b/src/ipa/libipa/pdaf.cpp
+index 3e3598975..e2578b7c9 100644
+--- a/src/ipa/libipa/pdaf.cpp
++++ b/src/ipa/libipa/pdaf.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "pdaf.h"
+ 
++#include <span>
+ #include <algorithm>
+ #include <cmath>
+ #include <errno.h>
+@@ -230,8 +231,8 @@ int PdafPhase::setActiveRegions(const std::vector<bool> &active)
+  *
+  * \return 0 on success, or -EINVAL if the grids do not match \a grid
+  */
+-int PdafPhase::setShading(const Size &grid, Span<const float> left,
+-			  Span<const float> right)
++int PdafPhase::setShading(const Size &grid, std::span<const float> left,
++			  std::span<const float> right)
+ {
+ 	const size_t n = static_cast<size_t>(grid.width) * grid.height;
+ 
+@@ -244,7 +245,7 @@ int PdafPhase::setShading(const Size &grid, Span<const float> left,
+ 	const double imageWidth = width * layout_.blockSize.width + 2.0 * layout_.offset.x;
+ 	const double imageHeight = rows * layout_.blockSize.height + 2.0 * layout_.offset.y;
+ 
+-	auto sample = [&](Span<const float> map, double gx, double gy) {
++	auto sample = [&](std::span<const float> map, double gx, double gy) {
+ 		unsigned int x0 = std::min<unsigned int>(gx, grid.width - 2);
+ 		unsigned int y0 = std::min<unsigned int>(gy, grid.height - 2);
+ 		double fx = gx - x0, fy = gy - y0;
+@@ -284,8 +285,8 @@ int PdafPhase::setShading(const Size &grid, Span<const float> left,
+  * bits of each in a byte of their own, followed by the least significant
+  * bits of a group of samples (4, 2 and 4 samples respectively).
+  */
+-void PdafPhase::unpackCsi2(Span<const uint8_t> line, unsigned int bitDepth,
+-			   Span<uint16_t> samples)
++void PdafPhase::unpackCsi2(std::span<const uint8_t> line, unsigned int bitDepth,
++			   std::span<uint16_t> samples)
+ {
+ 	size_t n = samples.size();
+ 
+@@ -333,7 +334,7 @@ void PdafPhase::unpackCsi2(Span<const uint8_t> line, unsigned int bitDepth,
+  * \param[in] bytesPerLine The buffer's line stride
+  * \return 0 on success, or -EINVAL if the buffer is too small for the layout
+  */
+-int PdafPhase::process(Span<const uint8_t> buffer, unsigned int bytesPerLine)
++int PdafPhase::process(std::span<const uint8_t> buffer, unsigned int bytesPerLine)
+ {
+ 	const Size size = layout_.bufferSize();
+ 
+@@ -351,7 +352,7 @@ int PdafPhase::process(Span<const uint8_t> buffer, unsigned int bytesPerLine)
+ 	for (unsigned int y = rowStart_ * nlines; y < rowEnd_ * nlines; y++)
+ 		unpackCsi2(buffer.subspan(y * bytesPerLine + skip, bytesPerLine - skip),
+ 			   layout_.bitDepth,
+-			   Span<uint16_t>(unpacked_).subspan(y * size.width + colStart_,
++			   std::span<uint16_t>(unpacked_).subspan(y * size.width + colStart_,
+ 							     colEnd_ - colStart_));
+ 
+ 	return process(unpacked_, size.width);
+@@ -363,7 +364,7 @@ int PdafPhase::process(Span<const uint8_t> buffer, unsigned int bytesPerLine)
+  * \param[in] stride The number of elements from one line to the next
+  * \return 0 on success, or -EINVAL if there are too few samples
+  */
+-int PdafPhase::process(Span<const uint16_t> samples, unsigned int stride)
++int PdafPhase::process(std::span<const uint16_t> samples, unsigned int stride)
+ {
+ 	const Size size = layout_.bufferSize();
+ 
+@@ -384,7 +385,7 @@ int PdafPhase::process(Span<const uint16_t> samples, unsigned int stride)
+ 	return 0;
+ }
+ 
+-void PdafPhase::buildSignals(Span<const uint16_t> samples, unsigned int stride)
++void PdafPhase::buildSignals(std::span<const uint16_t> samples, unsigned int stride)
+ {
+ 	const unsigned int width = layout_.blocks.width;
+ 	const unsigned int rows = layout_.blocks.height;
+diff --git a/src/ipa/libipa/pdaf.h b/src/ipa/libipa/pdaf.h
+index 6d61c6c59..5a10b80af 100644
+--- a/src/ipa/libipa/pdaf.h
++++ b/src/ipa/libipa/pdaf.h
+@@ -10,7 +10,7 @@
+ #include <stdint.h>
+ #include <vector>
+ 
+-#include <libcamera/base/span.h>
++#include <span>
+ 
+ #include <libcamera/geometry.h>
+ 
+@@ -51,22 +51,22 @@ public:
+ 	PdafPhase(const PdafLayout &layout, const Size &grid,
+ 		  unsigned int maxShift = 6);
+ 
+-	int setShading(const Size &grid, Span<const float> left,
+-		       Span<const float> right);
++	int setShading(const Size &grid, std::span<const float> left,
++		       std::span<const float> right);
+ 	int setActiveRegions(const std::vector<bool> &active);
+ 
+-	int process(Span<const uint8_t> buffer, unsigned int bytesPerLine);
+-	int process(Span<const uint16_t> samples, unsigned int stride);
++	int process(std::span<const uint8_t> buffer, unsigned int bytesPerLine);
++	int process(std::span<const uint16_t> samples, unsigned int stride);
+ 
+ 	const Size &grid() const { return grid_; }
+ 	const std::vector<PdafData> &regions() const { return regions_; }
+ 	PdafData combined(double minConf = 0.0) const;
+ 
+-	static void unpackCsi2(Span<const uint8_t> line, unsigned int bitDepth,
+-			       Span<uint16_t> samples);
++	static void unpackCsi2(std::span<const uint8_t> line, unsigned int bitDepth,
++			       std::span<uint16_t> samples);
+ 
+ private:
+-	void buildSignals(Span<const uint16_t> samples, unsigned int stride);
++	void buildSignals(std::span<const uint16_t> samples, unsigned int stride);
+ 	PdafData regionPhase(unsigned int rx, unsigned int ry) const;
+ 
+ 	PdafLayout layout_;
+diff --git a/src/ipa/softisp/algorithms/aperture.cpp b/src/ipa/softisp/algorithms/aperture.cpp
+index 09a3cfc70..6d48d178e 100644
+--- a/src/ipa/softisp/algorithms/aperture.cpp
++++ b/src/ipa/softisp/algorithms/aperture.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "aperture.h"
+ 
++#include <span>
+ #include <algorithm>
+ #include <cmath>
+ #include <sstream>
+@@ -172,7 +173,7 @@ int Aperture::init(IPAContext &context, const ValueNode &tuningData)
+ 			values.push_back(ControlValue(static_cast<float>(f)));
+ 
+ 		context.ctrlMap[&controls::LensAperture] =
+-			ControlInfo(Span<const ControlValue>(values),
++			ControlInfo(std::span<const ControlValue>(values),
+ 				    ControlValue(static_cast<float>(fNumberDef_)));
+ 	} else {
+ 		context.ctrlMap[&controls::LensAperture] =
+diff --git a/src/ipa/softisp/algorithms/awb.cpp b/src/ipa/softisp/algorithms/awb.cpp
+index b2f3ebee7..4cafa0e82 100644
+--- a/src/ipa/softisp/algorithms/awb.cpp
++++ b/src/ipa/softisp/algorithms/awb.cpp
+@@ -20,7 +20,7 @@
+ #include "awb_model.h"
+ #include "libipa/colours.h"
+ #include "libipa/interpolator.h"
+-#include "soft/ipa_context.h"
++#include "ipa_context.h"
+ 
+ namespace libcamera {
+ 
+@@ -311,7 +311,7 @@ void Awb::prepare(IPAContext &context,
+ 	auto &gains = context.activeState.awb.gains;
+ 
+ 	frameContext.gains = gains;
+-	params->gains = gains;
++	params->gains = RGB<double>({ gains.r(), gains.g(), gains.b() });
+ }
+ 
+ void Awb::process(IPAContext &context,
+diff --git a/src/ipa/softisp/algorithms/blc.cpp b/src/ipa/softisp/algorithms/blc.cpp
+index 7ebddd60c..485734fd9 100644
+--- a/src/ipa/softisp/algorithms/blc.cpp
++++ b/src/ipa/softisp/algorithms/blc.cpp
+@@ -61,6 +61,18 @@ int BlackLevel::configure(IPAContext &context,
+ {
+ 	if (definedLevel_.has_value())
+ 		context.configuration.black.level = definedLevel_;
++	else if (context.camHelper) {
++		if (auto bl = context.camHelper->blackLevel()) {
++			/*
++			 * The black level from CameraSensorHelper is a 16 bit value, software ISP
++			 * works with 8 bit pixel values, both regardless of the actual
++			 * sensor pixel width. Hence we obtain the pixel-based black value
++			 * by dividing the value from the helper by 256.
++			 */
++			context.configuration.black.level = *bl / 256;
++		}
++	}
++
+ 	context.activeState.blc.level =
+ 		context.configuration.black.level.value_or(16);
+ 	return 0;
+@@ -84,7 +96,7 @@ void BlackLevel::prepare(IPAContext &context,
+ 				    : context.activeState.blc.level;
+ 
+ 	/* Latch the blacklevel gain so GPUISP can apply. */
+-	params->blackLevel = RGB<float>(level / 255.0f);
++	params->blackLevel = RGB<double>(level / 255.0f);
+ }
+ 
+ void BlackLevel::process(IPAContext &context,
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index 269d60143..4dc8f137e 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -2,13 +2,14 @@
+ /*
+  * Copyright (C) 2024-2026 Red Hat, Inc.
+  *
+- * Simple pipeline IPA Context
++ * Software ISP IPA Context
+  */
+ 
+ #pragma once
+ 
+ #include <array>
+ #include <deque>
++#include <memory>
+ #include <optional>
+ #include <stdint.h>
+ #include <string>
+@@ -21,6 +22,10 @@
+ #include "libcamera/internal/matrix.h"
+ #include "libcamera/internal/vector.h"
+ 
++#include <libipa/agc.h>
++#include <libipa/awb.h>
++#include <libipa/camera_sensor_helper.h>
++#include <libipa/ccm.h>
+ #include <libipa/fc_queue.h>
+ #include <libipa/pdaf.h>
+ 
+@@ -227,6 +232,8 @@ struct IPAContext {
+ 	}
+ 
+ 	IPACameraSensorInfo sensorInfo;
++	ControlInfoMap sensorControls;
++	std::unique_ptr<CameraSensorHelper> camHelper;
+ 	/* The directory of the tuning file, for the files it names */
+ 	std::string tuningDirectory;
+ 	IPASessionConfiguration configuration;
+diff --git a/src/ipa/softisp/softisp.cpp b/src/ipa/softisp/softisp.cpp
+index c4f5967b1..2b9960862 100644
+--- a/src/ipa/softisp/softisp.cpp
++++ b/src/ipa/softisp/softisp.cpp
+@@ -2,9 +2,10 @@
+ /*
+  * Copyright (C) 2023, Linaro Ltd
+  *
+- * Simple Software Image Processing Algorithm module
++ * Software ISP Image Processing Algorithm module
+  */
+ 
++#include <span>
+ #include <chrono>
+ #include <cmath>
+ #include <map>
+@@ -25,7 +26,7 @@
+ 
+ #include <libcamera/ipa/ipa_interface.h>
+ #include <libcamera/ipa/ipa_module_info.h>
+-#include <libcamera/ipa/soft_ipa_interface.h>
++#include <libcamera/ipa/softisp_ipa_interface.h>
+ 
+ #include "libcamera/internal/framebuffer.h"
+ #include "libcamera/internal/mapped_framebuffer.h"
+@@ -34,6 +35,7 @@
+ #include "libcamera/internal/yaml_parser.h"
+ 
+ #include "algorithms/adjust.h"
++#include "libipa/agc.h"
+ #include "libipa/camera_sensor_helper.h"
+ #include "libipa/pdaf.h"
+ 
+@@ -68,7 +70,8 @@ public:
+ 		 const ControlInfoMap &irisControls,
+ 		 ControlInfoMap *ipaControls,
+ 		 bool *ccmEnabled) override;
+-	int configure(const IPAConfigInfo &configInfo) override;
++	int configure(const IPAConfigInfo &configInfo,
++		      ControlInfoMap *ipaControls) override;
+ 
+ 	int start() override;
+ 	void stop() override;
+@@ -94,7 +97,6 @@ private:
+ 
+ 	DebayerParams *params_;
+ 	SwIspStats *stats_;
+-	std::unique_ptr<CameraSensorHelper> camHelper_;
+ 	ControlInfoMap sensorInfoMap_;
+ 	ControlInfoMap lensInfoMap_;
+ 	ControlInfoMap irisInfoMap_;
+@@ -140,14 +142,15 @@ int IPASoftIsp::init(const IPASettings &settings,
+ 			ControlInfoMap *ipaControls,
+ 			bool *ccmEnabled)
+ {
+-	camHelper_ = CameraSensorHelperFactoryBase::create(settings.sensorModel);
+-	if (!camHelper_) {
++	context_.camHelper = CameraSensorHelperFactoryBase::create(settings.sensorModel);
++	if (!context_.camHelper) {
+ 		LOG(IPASoftIsp, Warning)
+ 			<< "Failed to create camera sensor helper for "
+ 			<< settings.sensorModel;
+ 	}
+ 
+ 	context_.sensorInfo = sensorInfo;
++	context_.sensorControls = sensorControls;
+ 
+ 	/* The files the tuning names are beside it */
+ 	const std::string &tuningFile = settings.configurationFile;
+@@ -236,22 +239,6 @@ int IPASoftIsp::init(const IPASettings &settings,
+ 	ControlInfoMap::Map ctrlMap = context_.ctrlMap;
+ 	*ipaControls = ControlInfoMap(std::move(ctrlMap), controls::controls);
+ 
+-	/*
+-	 * Check if the sensor driver supports the controls required by the
+-	 * Soft IPA.
+-	 * Don't save the min and max control values yet, as e.g. the limits
+-	 * for V4L2_CID_EXPOSURE depend on the configured sensor resolution.
+-	 */
+-	if (sensorControls.find(V4L2_CID_EXPOSURE) == sensorControls.end()) {
+-		LOG(IPASoftIsp, Error) << "Don't have exposure control";
+-		return -EINVAL;
+-	}
+-
+-	if (sensorControls.find(V4L2_CID_ANALOGUE_GAIN) == sensorControls.end()) {
+-		LOG(IPASoftIsp, Error) << "Don't have gain control";
+-		return -EINVAL;
+-	}
+-
+ 	return 0;
+ }
+ 
+@@ -302,7 +289,7 @@ void IPASoftIsp::updateApertureRange()
+ 			   << context_.configuration.aperture.iris_max << "]";
+ }
+ 
+-int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
++int IPASoftIsp::configure(const IPAConfigInfo &configInfo, ControlInfoMap *ipaControls)
+ {
+ 	/*
+ 	 * The sensor's timing at the configured format: the one init() had is
+@@ -349,9 +336,9 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 	int32_t againMax = gainInfo.max().get<int32_t>();
+ 	int32_t againDef = gainInfo.def().get<int32_t>();
+ 
+-	if (camHelper_) {
+-		context_.configuration.agc.againMin = camHelper_->gain(againMin);
+-		context_.configuration.agc.againMax = camHelper_->gain(againMax);
++	if (context_.camHelper) {
++		context_.configuration.agc.againMin = context_.camHelper->gain(againMin);
++		context_.configuration.agc.againMax = context_.camHelper->gain(againMax);
+ 		context_.configuration.agc.again10 = std::max(context_.configuration.agc.againMin, 1.0);
+ 		/*
+ 		 * The minimum gain step must reflect what the sensor can
+@@ -366,17 +353,17 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 		 * smaller one, so that non-uniform gain models are covered.
+ 		 */
+ 		context_.configuration.agc.againMinStep = std::min(
+-			std::abs(camHelper_->gain(againMin + 1) - camHelper_->gain(againMin)),
+-			std::abs(camHelper_->gain(againMax) - camHelper_->gain(againMax - 1)));
+-		if (camHelper_->blackLevel().has_value()) {
++			std::abs(context_.camHelper->gain(againMin + 1) - context_.camHelper->gain(againMin)),
++			std::abs(context_.camHelper->gain(againMax) - context_.camHelper->gain(againMax - 1)));
++		if (context_.camHelper->blackLevel().has_value()) {
+ 			/*
+-			 * The black level from camHelper_ is a 16 bit value, software ISP
++			 * The black level from the camera helper is a 16 bit value, software ISP
+ 			 * works with 8 bit pixel values, both regardless of the actual
+ 			 * sensor pixel width. Hence we obtain the pixel-based black value
+ 			 * by dividing the value from the helper by 256.
+ 			 */
+ 			context_.configuration.black.level =
+-				camHelper_->blackLevel().value() / 256.0f;
++				context_.camHelper->blackLevel().value() / 256.0f;
+ 		}
+ 	} else {
+ 		context_.configuration.agc.againMax = againMax;
+@@ -391,12 +378,7 @@ int IPASoftIsp::configure(const IPAConfigInfo &configInfo)
+ 			return ret;
+ 	}
+ 
+-	LOG(IPASoftIsp, Info)
+-		<< "Exposure " << context_.configuration.agc.exposureMin << "-"
+-		<< context_.configuration.agc.exposureMax
+-		<< ", gain " << context_.configuration.agc.againMin << "-"
+-		<< context_.configuration.agc.againMax
+-		<< " (" << context_.configuration.agc.againMinStep << ")";
++	*ipaControls = { ControlInfoMap::Map(context_.ctrlMap), controls::controls };
+ 
+ 	return 0;
+ }
+@@ -460,7 +442,7 @@ void IPASoftIsp::computeParams(const uint32_t frame, const ControlList &sensorCo
+ 	if (frameContext.sensor.known) {
+ 		frameContext.sensor.exposure = exposure.get<int32_t>();
+ 		const int32_t code = gain.get<int32_t>();
+-		frameContext.sensor.gain = camHelper_ ? camHelper_->gain(code) : code;
++		frameContext.sensor.gain = context_.camHelper ? context_.camHelper->gain(code) : code;
+ 	}
+ 	if (context_.activeState.agc.hdr.active)
+ 		hdrExposureOf(frame, frameContext);
+@@ -482,11 +464,11 @@ void IPASoftIsp::computeParams(const uint32_t frame, const ControlList &sensorCo
+ 		hdr.longNext = !hdr.longNext;
+ 		ControlList ctrls(sensorInfoMap_);
+ 		const int32_t asked = hdr.longNext ? hdr.plan.longExposure : hdr.plan.shortExposure;
+-		const int32_t gainCode = static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(hdr.plan.gain)
++		const int32_t gainCode = static_cast<int32_t>(context_.camHelper ? context_.camHelper->gainCode(hdr.plan.gain)
+ 									 : hdr.plan.gain);
+ 		ctrls.set(V4L2_CID_EXPOSURE, asked);
+ 		ctrls.set(V4L2_CID_ANALOGUE_GAIN, gainCode);
+-		hdrAsked_[frame] = { asked, camHelper_ ? camHelper_->gain(gainCode) : gainCode };
++		hdrAsked_[frame] = { asked, context_.camHelper ? context_.camHelper->gain(gainCode) : gainCode };
+ 		while (hdrAsked_.size() > 16)
+ 			hdrAsked_.erase(hdrAsked_.begin());
+ 		/* This ask is for the frame two after this one (see hdrExposureOf()) */
+@@ -503,15 +485,15 @@ void IPASoftIsp::computeParams(const uint32_t frame, const ControlList &sensorCo
+ }
+ 
+ void IPASoftIsp::processStats(const uint32_t frame,
+-				 [[maybe_unused]] const uint32_t bufferId,
+-				 const ControlList &sensorControls)
++			      [[maybe_unused]] const uint32_t bufferId,
++			      const ControlList &sensorControls)
+ {
+ 	IPAFrameContext &frameContext = context_.frameContexts.get(frame);
+ 
+ 	frameContext.sensor.exposure =
+ 		sensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>();
+ 	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
+-	frameContext.sensor.gain = camHelper_ ? camHelper_->gain(again) : again;
++	frameContext.sensor.gain = context_.camHelper ? context_.camHelper->gain(again) : again;
+ 	if (context_.activeState.agc.hdr.active)
+ 		hdrExposureOf(frame, frameContext);
+ 
+@@ -544,7 +526,7 @@ void IPASoftIsp::processStats(const uint32_t frame,
+ 		auto &againNew = frameContext.sensor.gain;
+ 		ctrls.set(V4L2_CID_EXPOSURE, frameContext.sensor.exposure);
+ 		ctrls.set(V4L2_CID_ANALOGUE_GAIN,
+-			  static_cast<int32_t>(camHelper_ ? camHelper_->gainCode(againNew) : againNew));
++			  static_cast<int32_t>(context_.camHelper ? context_.camHelper->gainCode(againNew) : againNew));
+ 		/* The frame length, for exposures longer than the sensor's default frame allows */
+ 		if (context_.configuration.agc.exposureCap)
+ 			ctrls.set(V4L2_CID_VBLANK, context_.activeState.agc.vblank);
+@@ -565,7 +547,7 @@ int IPASoftIsp::mapPdafBuffers(const std::vector<IPABuffer> &buffers,
+ 				  const uint32_t width, const uint32_t height,
+ 				  const uint32_t bytesPerLine)
+ {
+-	if (!camHelper_ || !camHelper_->pdafLayout()) {
++	if (!context_.camHelper || !context_.camHelper->pdafLayout()) {
+ 		LOG(IPASoftIsp, Error) << "No PDAF layout known for this sensor";
+ 		return -ENOTSUP;
+ 	}
+@@ -576,7 +558,7 @@ int IPASoftIsp::mapPdafBuffers(const std::vector<IPABuffer> &buffers,
+ 		return -ENOTSUP;
+ 	}
+ 
+-	const PdafLayout &layout = *camHelper_->pdafLayout();
++	const PdafLayout &layout = *context_.camHelper->pdafLayout();
+ 	const Size size = layout.bufferSize();
+ 	if (width < size.width || height < size.height ||
+ 	    bytesPerLine < (size.width * layout.bitDepth + 7) / 8) {
+@@ -638,8 +620,8 @@ void IPASoftIsp::processPdaf(const uint32_t frame, const uint32_t bufferId)
+ 
+ 	if (it != pdafBuffers_.end() && pdafPhase_) {
+ 		const auto start = std::chrono::steady_clock::now();
+-		Span<uint8_t> data = it->second.planes()[0];
+-		int ret = pdafPhase_->process(Span<const uint8_t>(data.data(), data.size()),
++		std::span<uint8_t> data = it->second.planes()[0];
++		int ret = pdafPhase_->process(std::span<const uint8_t>(data.data(), data.size()),
+ 					      pdafBytesPerLine_);
+ 		const auto took = std::chrono::steady_clock::now() - start;
+ 
+@@ -648,7 +630,7 @@ void IPASoftIsp::processPdaf(const uint32_t frame, const uint32_t bufferId)
+ 		pdaf.frame = frame;
+ 		pdaf.grid = pdafPhase_->grid();
+ 		pdaf.regions = pdafPhase_->regions();
+-		pdaf.pitch = camHelper_->pdafLayout()->blockSize.width;
++		pdaf.pitch = context_.camHelper->pdafLayout()->blockSize.width;
+ 
+ 		PdafData all = pdafPhase_->combined();
+ 		LOG(IPASoftIsp, Debug)
+@@ -675,8 +657,7 @@ extern "C" {
+ const struct IPAModuleInfo ipaModuleInfo = {
+ 	IPA_MODULE_API_VERSION,
+ 	0,
+-	"simple",
+-	"simple",
++	"softisp",
+ };
+ 
+ IPAInterface *ipaCreate()
+diff --git a/src/libcamera/pipeline/camss/camss.cpp b/src/libcamera/pipeline/camss/camss.cpp
+index d661a29e9..ea6f5b2a1 100644
+--- a/src/libcamera/pipeline/camss/camss.cpp
++++ b/src/libcamera/pipeline/camss/camss.cpp
+@@ -10,6 +10,7 @@
+  * Copyright (C) 2019, Google Inc.
+  */
+ 
++#include <span>
+ #include <algorithm>
+ #include <chrono>
+ #include <memory>
+@@ -121,7 +122,7 @@ public:
+ 	PipelineHandlerCamss(CameraManager *manager);
+ 
+ 	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
+-								   Span<const StreamRole> roles) override;
++								   std::span<const StreamRole> roles) override;
+ 	int configure(Camera *camera, CameraConfiguration *config) override;
+ 
+ 	int exportFrameBuffers(Camera *camera, Stream *stream,
+@@ -319,7 +320,7 @@ PipelineHandlerCamss::PipelineHandlerCamss(CameraManager *manager)
+ }
+ 
+ std::unique_ptr<CameraConfiguration>
+-PipelineHandlerCamss::generateConfiguration(Camera *camera, Span<const StreamRole> roles)
++PipelineHandlerCamss::generateConfiguration(Camera *camera, std::span<const StreamRole> roles)
+ {
+ 	CamssCameraData *data = cameraData(camera);
+ 	std::unique_ptr<CamssCameraConfiguration> config =
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.cpp b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+index fcf2c08b0..874acba7e 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "camss_isp_ope.h"
+ 
++#include <span>
+ #include <string.h>
+ 
+ #include <libcamera/base/log.h>
+@@ -81,6 +82,7 @@ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> ope
+ 			 ControlInfoMap *ispControls)
+ 	: opeMediaDev_(std::move(opeMediaDev)), sensor_(sensor), frameInfos_(frameInfos)
+ {
++	ispControls_ = ispControls;
+ 	sharedParams_ = SharedMemObject<DebayerParams>("softIsp_params");
+ 	if (!sharedParams_) {
+ 		LOG(Camss, Error) << "Failed to create shared memory for parameters";
+@@ -100,7 +102,7 @@ CamssIspOpe::CamssIspOpe(PipelineHandler *pipe, std::shared_ptr<MediaDevice> ope
+ 					   statsReady.emit(frame, statsBufferId);
+ 				   });
+ 
+-	ipa_ = pipe->createIPA<ipa::softisp::IPAProxySoft>("simple", 0, 0);
++	ipa_ = pipe->createIPA<ipa::softisp::IPAProxySoftIsp>(0, 0);
+ 	if (!ipa_) {
+ 		LOG(Camss, Error) << "Creating IPA failed";
+ 		return;
+@@ -163,7 +165,7 @@ int CamssIspOpe::mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>>
+ 	std::vector<IPABuffer> ipaBuffers;
+ 
+ 	for (unsigned int i = 0; i < buffers.size(); i++) {
+-		Span<const FrameBuffer::Plane> planes = buffers[i]->planes();
++		std::span<const FrameBuffer::Plane> planes = buffers[i]->planes();
+ 
+ 		buffers[i]->setCookie(i);
+ 		ipaBuffers.emplace_back(i, std::vector<FrameBuffer::Plane>(planes.begin(),
+@@ -457,7 +459,7 @@ StreamConfiguration CamssIspOpe::validate(const StreamConfiguration &raw, const
+ int CamssIspOpe::configure(const StreamConfiguration &inputCfg,
+ 			   const StreamConfiguration &outputCfg)
+ {
+-	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_, true));
++	int ret = ipa_->configure(camssSoftIpaConfigInfo(sensor_, true), ispControls_);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -520,7 +522,7 @@ int CamssIspOpe::allocateBuffers(unsigned int bufferCount)
+ 	/* Lambda function for future re-use with statsBuffers. */
+ 	auto pushBuffers = [&](const std::vector<std::unique_ptr<FrameBuffer>> &buffers) {
+ 		for (const std::unique_ptr<FrameBuffer> &buffer : buffers) {
+-			Span<const FrameBuffer::Plane> planes = buffer->planes();
++			std::span<const FrameBuffer::Plane> planes = buffer->planes();
+ 
+ 			buffer->setCookie(ipaBufferId++);
+ 			ipaBuffers_.emplace_back(buffer->cookie(),
+@@ -606,9 +608,9 @@ void CamssIspOpe::paramsComputed(uint32_t frame)
+ 	auto awbGains = params.block<ipa::camss::CamssBlocks::AwbGains>();
+ 	DebayerParams debayerParams = *sharedParams_;
+ 	/* Convert gains to 15uQ10 and store */
+-	awbGains->r_gain = std::clamp(debayerParams.gains.r(), 0.0f, 31.0f) * 1024;
+-	awbGains->g_gain = std::clamp(debayerParams.gains.g(), 0.0f, 31.0f) * 1024;
+-	awbGains->b_gain = std::clamp(debayerParams.gains.b(), 0.0f, 31.0f) * 1024;
++	awbGains->r_gain = std::clamp(debayerParams.gains.r(), 0.0, 31.0) * 1024;
++	awbGains->g_gain = std::clamp(debayerParams.gains.g(), 0.0, 31.0) * 1024;
++	awbGains->b_gain = std::clamp(debayerParams.gains.b(), 0.0, 31.0) * 1024;
+ 	/* Convert blacklevel to 0-65535 (u16) and store */
+ 	awbGains->r_sub = debayerParams.blackLevel.r() * 65535;
+ 	awbGains->g_sub = debayerParams.blackLevel.g() * 65535;
+diff --git a/src/libcamera/pipeline/camss/camss_isp_ope.h b/src/libcamera/pipeline/camss/camss_isp_ope.h
+index 0dfcd5462..9be9979d9 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_ope.h
++++ b/src/libcamera/pipeline/camss/camss_isp_ope.h
+@@ -10,8 +10,8 @@
+ #include <memory>
+ #include <vector>
+ 
+-#include <libcamera/ipa/soft_ipa_interface.h>
+-#include <libcamera/ipa/soft_ipa_proxy.h>
++#include <libcamera/ipa/softisp_ipa_interface.h>
++#include <libcamera/ipa/softisp_ipa_proxy.h>
+ 
+ /* FIXME drop once using own camss IPA, which will map on IPA side */
+ #include "libcamera/internal/mapped_framebuffer.h"
+@@ -77,6 +77,8 @@ public:
+ 	void stop() override;
+ 
+ private:
++	ControlInfoMap *ispControls_ = nullptr;
++
+ 	static constexpr Size kMinOutputSize = Size(24, 16);
+ 	static constexpr unsigned int PROC_PAD_INPUT = 0;
+ 	static constexpr unsigned int PROC_PAD_PARAMS = 1;
+@@ -114,7 +116,7 @@ private:
+ 	std::unique_ptr<V4L2VideoDevice> params_;
+ 	std::unique_ptr<V4L2VideoDevice> input_;
+ 	std::unique_ptr<V4L2VideoDevice> output_;
+-	std::unique_ptr<ipa::softisp::IPAProxySoft> ipa_;
++	std::unique_ptr<ipa::softisp::IPAProxySoftIsp> ipa_;
+ 	std::vector<std::unique_ptr<FrameBuffer>> paramBuffers_;
+ 	std::vector<IPABuffer> ipaBuffers_;
+ 	/* FIXME drop once using own camss IPA, which will map on IPA side */
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.cpp b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+index 19e642a9b..7bd9b288f 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.cpp
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.cpp
+@@ -40,7 +40,7 @@ LOG_DECLARE_CATEGORY(Camss)
+  */
+ CamssIspSoft::CamssIspSoft(PipelineHandler *pipe, CameraSensor *sensor,
+ 			   CamssFrames *frameInfos, ControlInfoMap *ispControls)
+-	: sensor_(sensor), frameInfos_(frameInfos)
++	: sensor_(sensor), frameInfos_(frameInfos), ispControls_(ispControls)
+ {
+ 	swIsp_ = std::make_unique<SoftwareIsp>(pipe, sensor, ispControls);
+ 
+@@ -187,7 +187,7 @@ int CamssIspSoft::configure(const StreamConfiguration &inputCfg,
+ 
+ 	/* \todo refactor SoftwareIsp to remove the need to pass this */
+ 	return swIsp_->configure(inputCfg, outputCfgs,
+-				 camssSoftIpaConfigInfo(sensor_, true));
++				 camssSoftIpaConfigInfo(sensor_, true), ispControls_);
+ }
+ 
+ int CamssIspSoft::allocateBuffers([[maybe_unused]] unsigned int bufferCount)
+diff --git a/src/libcamera/pipeline/camss/camss_isp_soft.h b/src/libcamera/pipeline/camss/camss_isp_soft.h
+index 6d3317775..390f9e448 100644
+--- a/src/libcamera/pipeline/camss/camss_isp_soft.h
++++ b/src/libcamera/pipeline/camss/camss_isp_soft.h
+@@ -58,6 +58,7 @@ private:
+ 	std::unique_ptr<SoftwareIsp> swIsp_;
+ 	CameraSensor *sensor_;
+ 	class CamssFrames *frameInfos_;
++	ControlInfoMap *ispControls_;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/camss/camss_params.h b/src/libcamera/pipeline/camss/camss_params.h
+index c09d2c4c2..e5ea3f7f4 100644
+--- a/src/libcamera/pipeline/camss/camss_params.h
++++ b/src/libcamera/pipeline/camss/camss_params.h
+@@ -7,6 +7,8 @@
+ 
+ #pragma once
+ 
++#include <span>
++
+ #include <linux/camss-config.h>
+ #include <linux/videodev2.h>
+ 
+@@ -56,7 +58,7 @@ struct param_traits {
+ class CamssParams : public V4L2Params<details::param_traits>
+ {
+ public:
+-	CamssParams(Span<uint8_t> data)
++	CamssParams(std::span<uint8_t> data)
+ 		: V4L2Params(data, V4L2_ISP_PARAMS_VERSION_V1)
+ 	{
+ 	}
+diff --git a/src/libcamera/pipeline/camss/camss_util.h b/src/libcamera/pipeline/camss/camss_util.h
+index 94ed90568..7d8e545aa 100644
+--- a/src/libcamera/pipeline/camss/camss_util.h
++++ b/src/libcamera/pipeline/camss/camss_util.h
+@@ -7,7 +7,7 @@
+ 
+ #pragma once
+ 
+-#include <libcamera/ipa/soft_ipa_interface.h>
++#include <libcamera/ipa/softisp_ipa_interface.h>
+ 
+ namespace libcamera {
+ 
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 9f490744f..91b2ea11f 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -420,7 +420,7 @@ public:
+ 	SimplePipelineHandler(CameraManager *manager);
+ 
+ 	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
+-								   Span<const StreamRole> roles) override;
++								   std::span<const StreamRole> roles) override;
+ 	int configure(Camera *camera, CameraConfiguration *config) override;
+ 
+ 	int exportFrameBuffers(Camera *camera, Stream *stream,
+@@ -1464,7 +1464,7 @@ SimplePipelineHandler::SimplePipelineHandler(CameraManager *manager)
+ }
+ 
+ std::unique_ptr<CameraConfiguration>
+-SimplePipelineHandler::generateConfiguration(Camera *camera, Span<const StreamRole> roles)
++SimplePipelineHandler::generateConfiguration(Camera *camera, std::span<const StreamRole> roles)
+ {
+ 	SimpleCameraData *data = cameraData(camera);
+ 	std::unique_ptr<CameraConfiguration> config =
+@@ -1674,7 +1674,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			configInfo.irisControls = data->sensor_->irisLens()->controls();
+ 		else
+ 			configInfo.irisControls = ControlInfoMap();
+-		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo);
++		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo, &data->controlInfo_);
+ 	}
+ }
+ 
+@@ -1978,16 +1978,6 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+ 		}
+ 	}
+ 
+-	if (info.swIspEnabled) {
+-		/*
+-		 * When the software ISP is enabled, the simple pipeline handler
+-		 * exposes the raw stream, giving a total of two streams. This
+-		 * is mutually exclusive with the presence of a converter.
+-		 */
+-		ASSERT(!converter_);
+-		numStreams = 2;
+-	}
+-
+ 	swIspEnabled_ = info.swIspEnabled;
+ 	const GlobalConfiguration &configuration = cameraManager()->_d()->configuration();
+ 	for (const ValueNode &entry :
+@@ -2003,6 +1993,16 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+ 		}
+ 	}
+ 
++	if (swIspEnabled_) {
++		/*
++		 * When the software ISP is enabled, the simple pipeline handler
++		 * exposes the raw stream, giving a total of two streams. This
++		 * is mutually exclusive with the presence of a converter.
++		 */
++		ASSERT(!converter_);
++		numStreams = 2;
++	}
++
+ 	/* Locate the sensors. */
+ 	std::vector<MediaEntity *> sensors = locateSensors(media.get());
+ 	if (sensors.empty()) {
+diff --git a/src/libcamera/sensor/camera_sensor_raw.cpp b/src/libcamera/sensor/camera_sensor_raw.cpp
+index ecbe75ede..b9bc1aa93 100644
+--- a/src/libcamera/sensor/camera_sensor_raw.cpp
++++ b/src/libcamera/sensor/camera_sensor_raw.cpp
+@@ -75,7 +75,7 @@ public:
+ 	std::vector<Size> sizes(unsigned int mbusCode) const override;
+ 	Size resolution() const override;
+ 
+-	V4L2SubdeviceFormat getFormat(Span<const unsigned int> mbusCodes,
++	V4L2SubdeviceFormat getFormat(std::span<const unsigned int> mbusCodes,
+ 				      const Size &size,
+ 				      const Size maxSize) const override;
+ 	int setFormat(V4L2SubdeviceFormat *format,
+@@ -98,7 +98,7 @@ public:
+ 	Orientation mountingOrientation() const override { return mountingOrientation_; }
+ 
+ 	const ControlInfoMap &controls() const override;
+-	ControlList getControls(Span<const uint32_t> ids) override;
++	ControlList getControls(std::span<const uint32_t> ids) override;
+ 	int setControls(ControlList *ctrls) override;
+ 
+ 	const std::vector<controls::draft::TestPatternModeEnum> &
+@@ -142,10 +142,12 @@ private:
+ 	std::vector<controls::draft::TestPatternModeEnum> testPatternModes_;
+ 	controls::draft::TestPatternModeEnum testPatternMode_;
+ 
+-	Size pixelArraySize_;
++	Rectangle pixelArrayArea_;
++	Rectangle readableArea_;
+ 	Rectangle activeArea_;
+ 	BayerFormat::Order cfaPattern_;
+-	bool supportFlips_;
++	bool supportHFlips_;
++	bool supportVFlips_;
+ 	bool flipsAlterBayerOrder_;
+ 	Orientation mountingOrientation_;
+ 
+@@ -170,8 +172,9 @@ private:
+  */
+ 
+ CameraSensorRaw::CameraSensorRaw(const MediaEntity *entity)
+-	: entity_(entity), staticProps_(nullptr), supportFlips_(false),
+-	  flipsAlterBayerOrder_(false), properties_(properties::properties)
++	: entity_(entity), staticProps_(nullptr), supportHFlips_(false),
++	  supportVFlips_(false), flipsAlterBayerOrder_(false),
++	  properties_(properties::properties)
+ {
+ }
+ 
+@@ -431,7 +434,17 @@ std::optional<int> CameraSensorRaw::init()
+ 		return { ret };
+ 	}
+ 
+-	pixelArraySize_ = rect.size();
++	/*
++	 * \todo Implement querying the physical sensor size based on pad 1,
++	 * stream 0. See
++	 * https://lore.kernel.org/linux-media/20260409201501.975242-23-sakari.ailus@linux.intel.com/
++	 */
++	LOG(CameraSensor, Warning) << "PixelArrayArea might be incorrect";
++	pixelArrayArea_ = Rectangle(0, 0,
++				    rect.x + rect.width,
++				    rect.y + rect.height);
++
++	readableArea_ = rect;
+ 
+ 	ret = subdev_->getSelection(streams_.image.sink, V4L2_SEL_TGT_CROP_DEFAULT,
+ 				    &activeArea_);
+@@ -513,25 +526,30 @@ std::optional<int> CameraSensorRaw::init()
+ 		return -EINVAL;
+ 	}
+ 
+-	/*
+-	 * Verify if sensor supports horizontal/vertical flips
+-	 *
+-	 * \todo Handle horizontal and vertical flips independently.
+-	 */
+-	const struct v4l2_query_ext_ctrl *hflipInfo = subdev_->controlInfo(V4L2_CID_HFLIP);
+-	const struct v4l2_query_ext_ctrl *vflipInfo = subdev_->controlInfo(V4L2_CID_VFLIP);
+-	if (hflipInfo && !(hflipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY) &&
+-	    vflipInfo && !(vflipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY)) {
+-		supportFlips_ = true;
+-
+-		if (hflipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT ||
+-		    vflipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT)
+-			flipsAlterBayerOrder_ = true;
+-	}
++	/* Verify if sensor supports horizontal/vertical flips. */
++	auto queryFlip = [&](uint32_t id, const char *name) -> std::pair<bool, bool> {
++		const struct v4l2_query_ext_ctrl *flipInfo = subdev_->controlInfo(id);
++		if (!flipInfo || flipInfo->flags & V4L2_CTRL_FLAG_READ_ONLY) {
++			LOG(CameraSensor, Debug)
++				<< "Camera sensor does not support " << name << " flip";
++			return { false, false };
++		}
+ 
+-	if (!supportFlips_)
+-		LOG(CameraSensor, Debug)
+-			<< "Camera sensor does not support horizontal/vertical flip";
++		return { true, flipInfo->flags & V4L2_CTRL_FLAG_MODIFY_LAYOUT };
++	};
++
++	auto hflip = queryFlip(V4L2_CID_HFLIP, "horizontal");
++	auto vflip = queryFlip(V4L2_CID_VFLIP, "vertical");
++
++	if (hflip.first && vflip.first && (hflip.second != vflip.second)) {
++		LOG(CameraSensor, Error)
++			<< "Flips with differing alter bayer order properties"
++			<< " are unsupported. Disabling flipping.";
++	} else {
++		supportHFlips_ = hflip.first;
++		supportVFlips_ = vflip.first;
++		flipsAlterBayerOrder_ = hflip.second || vflip.second;
++	}
+ 
+ 	/*
+ 	 * 5. Discover ancillary devices.
+@@ -689,7 +707,8 @@ int CameraSensorRaw::initProperties()
+ 		mountingOrientation_ = Orientation::Rotate0;
+ 	}
+ 
+-	properties_.set(properties::PixelArraySize, pixelArraySize_);
++	properties_.set(properties::PixelArrayArea, pixelArrayArea_);
++	properties_.set(properties::PixelArrayReadableArea, readableArea_);
+ 	properties_.set(properties::PixelArrayActiveAreas, { activeArea_ });
+ 
+ 	/* Color filter array pattern. */
+@@ -822,7 +841,7 @@ Size CameraSensorRaw::resolution() const
+ }
+ 
+ V4L2SubdeviceFormat
+-CameraSensorRaw::getFormat(Span<const unsigned int> mbusCodes,
++CameraSensorRaw::getFormat(std::span<const unsigned int> mbusCodes,
+ 			   const Size &size, Size maxSize) const
+ {
+ 	unsigned int desiredArea = size.width * size.height;
+@@ -881,14 +900,16 @@ CameraSensorRaw::getFormat(Span<const unsigned int> mbusCodes,
+ int CameraSensorRaw::setFormat(V4L2SubdeviceFormat *format, Transform transform)
+ {
+ 	/* Configure flips if the sensor supports that. */
+-	if (supportFlips_) {
+-		ControlList flipCtrls(subdev_->controls());
+-
++	ControlList flipCtrls(subdev_->controls());
++	if (supportHFlips_)
+ 		flipCtrls.set(V4L2_CID_HFLIP,
+ 			      static_cast<int32_t>(!!(transform & Transform::HFlip)));
++
++	if (supportVFlips_)
+ 		flipCtrls.set(V4L2_CID_VFLIP,
+ 			      static_cast<int32_t>(!!(transform & Transform::VFlip)));
+ 
++	if (!flipCtrls.empty()) {
+ 		int ret = subdev_->setControls(&flipCtrls);
+ 		if (ret)
+ 			return ret;
+@@ -1048,29 +1069,19 @@ int CameraSensorRaw::setEmbeddedDataEnabled(bool enable)
+ int CameraSensorRaw::sensorInfo(IPACameraSensorInfo *info) const
+ {
+ 	info->model = model();
++	info->pixelArrayArea = pixelArrayArea_;
+ 
+ 	/*
+-	 * The active area size is a static property, while the crop
+-	 * rectangle needs to be re-read as it depends on the sensor
+-	 * configuration.
++	 * The active area is a static property, while the crop rectangle needs
++	 * to be re-read as it depends on the sensor configuration.
+ 	 */
+-	info->activeAreaSize = { activeArea_.width, activeArea_.height };
++	info->activeArea = activeArea_;
+ 
+ 	int ret = subdev_->getSelection(streams_.image.sink, V4L2_SEL_TGT_CROP,
+ 					&info->analogCrop);
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * IPACameraSensorInfo::analogCrop::x and IPACameraSensorInfo::analogCrop::y
+-	 * are defined relatively to the active pixel area, while V4L2's
+-	 * TGT_CROP target is defined in respect to the full pixel array.
+-	 *
+-	 * Compensate it by subtracting the active area offset.
+-	 */
+-	info->analogCrop.x -= activeArea_.x;
+-	info->analogCrop.y -= activeArea_.y;
+-
+ 	/* The bit depth and image size depend on the currently applied format. */
+ 	V4L2SubdeviceFormat format{};
+ 	ret = subdev_->getFormat(streams_.image.source, &format);
+@@ -1116,17 +1127,8 @@ int CameraSensorRaw::sensorInfo(IPACameraSensorInfo *info) const
+ Transform CameraSensorRaw::computeTransform(Orientation *orientation) const
+ {
+ 	/*
+-	 * If we cannot do any flips we cannot change the native camera mounting
+-	 * orientation.
+-	 */
+-	if (!supportFlips_) {
+-		*orientation = mountingOrientation_;
+-		return Transform::Identity;
+-	}
+-
+-	/*
+-	 * Now compute the required transform to obtain 'orientation' starting
+-	 * from the mounting rotation.
++	 * Compute the required transform to obtain 'orientation' starting from
++	 * the mounting rotation.
+ 	 *
+ 	 * As a note:
+ 	 * 	orientation / mountingOrientation_ = transform
+@@ -1134,6 +1136,17 @@ Transform CameraSensorRaw::computeTransform(Orientation *orientation) const
+ 	 */
+ 	Transform transform = *orientation / mountingOrientation_;
+ 
++	/* If we cannot do the required flips, fall back to identity. */
++	if (!supportHFlips_ && !!(transform & Transform::HFlip)) {
++		*orientation = mountingOrientation_;
++		return Transform::Identity;
++	}
++
++	if (!supportVFlips_ && !!(transform & Transform::VFlip)) {
++		*orientation = mountingOrientation_;
++		return Transform::Identity;
++	}
++
+ 	/*
+ 	 * If transform contains any Transpose we cannot do it, so adjust
+ 	 * 'orientation' to report the image native orientation and return Identity.
+@@ -1164,7 +1177,7 @@ const ControlInfoMap &CameraSensorRaw::controls() const
+ 	return subdev_->controls();
+ }
+ 
+-ControlList CameraSensorRaw::getControls(Span<const uint32_t> ids)
++ControlList CameraSensorRaw::getControls(std::span<const uint32_t> ids)
+ {
+ 	return subdev_->getControls(ids);
+ }
+@@ -1221,6 +1234,6 @@ std::string CameraSensorRaw::logPrefix() const
+ 	return "'" + entity_->name() + "'";
+ }
+ 
+-REGISTER_CAMERA_SENSOR(CameraSensorRaw, 0)
++REGISTER_CAMERA_SENSOR(CameraSensorRaw, -200)
+ 
+ } /* namespace libcamera */
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index bb4e4410a..34d493348 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <assert.h>
+ #include <memory>
++#include <span>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -19,7 +20,6 @@
+ #include <tuple>
+ #include <vector>
+ 
+-#include <libcamera/base/span.h>
+ #include <libcamera/base/utils.h>
+ 
+ #include <libcamera/formats.h>
+@@ -43,11 +43,12 @@ namespace libcamera {
+  * \brief Construct a DebayerEGL object
+  * \param[in] stats Statistics processing object
+  * \param[in] cm The camera manager
++ * \param[in] display The EGL display to use
+  * \param[in] quadBayer Whether the sensor uses 2x2 same-colour cells
+  */
+ DebayerEGL::DebayerEGL(std::unique_ptr<SwStatsCpu> stats, const CameraManager &cm,
+-		       bool quadBayer)
+-	: Debayer(cm, quadBayer), stats_(std::move(stats))
++		       EGLDisplay display, bool quadBayer)
++	: Debayer(cm, quadBayer), stats_(std::move(stats)), egl_(display)
+ {
+ }
+ 
+@@ -101,20 +102,6 @@ int DebayerEGL::getInputConfig(PixelFormat inputFormat, DebayerInputConfig &conf
+ 	return -EINVAL;
+ }
+ 
+-int DebayerEGL::getOutputConfig(PixelFormat outputFormat, DebayerOutputConfig &config)
+-{
+-	if (outputFormat == formats::XRGB8888 || outputFormat == formats::ARGB8888 ||
+-	    outputFormat == formats::XBGR8888 || outputFormat == formats::ABGR8888) {
+-		config.bpp = 32;
+-		return 0;
+-	}
+-
+-	LOG(Debayer, Info)
+-		<< "Unsupported output format " << outputFormat;
+-
+-	return -EINVAL;
+-}
+-
+ int DebayerEGL::getShaderVariableLocations(void)
+ {
+ 	attributeVertex_ = glGetAttribLocation(programId_, "vertexIn");
+@@ -163,9 +150,9 @@ int DebayerEGL::getShaderVariableLocations(void)
+ 
+ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputFormat)
+ {
++	std::span<const unsigned char> fragmentShaderData;
++	std::span<const unsigned char> vertexShaderData;
+ 	std::vector<std::string> shaderEnv;
+-	Span<const unsigned char> fragmentShaderData;
+-	Span<const unsigned char> vertexShaderData;
+ 	GLenum err;
+ 
+ 	cellsEligible_ = false;
+@@ -339,7 +326,7 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+ 	}
+ 
+ 	/* Ensure we set the programId_ */
+-	egl_.useProgram(programId_);
++	glUseProgram(programId_);
+ 	err = glGetError();
+ 	if (err != GL_NO_ERROR) {
+ 		LOG(Debayer, Error) << "Use program error " << err;
+@@ -470,8 +457,8 @@ int DebayerEGL::buildRatioProgram()
+  * that samples and filters the cells, and the pass that bins them.
+  */
+ int DebayerEGL::initCellsPrograms(const std::vector<std::string> &shaderEnv,
+-				  Span<const unsigned char> vertexShaderData,
+-				  Span<const unsigned char> fragmentShaderData)
++				  std::span<const unsigned char> vertexShaderData,
++				  std::span<const unsigned char> fragmentShaderData)
+ {
+ 	/*
+ 	 * The main programs, with the other path's environment: the plain one,
+@@ -633,7 +620,7 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 			if (egl_.attachTextureToFBO(*ratioState_))
+ 				return -ENODEV;
+ 			egl_.activateBindTexture(*cells_[previous]);
+-			egl_.useProgram(ratio_.id);
++			glUseProgram(ratio_.id);
+ 			glEnableVertexAttribArray(ratio_.vertex);
+ 			glVertexAttribPointer(ratio_.vertex, 2, GL_FLOAT, GL_TRUE,
+ 					      2 * sizeof(GLfloat), vcoordinates);
+@@ -659,7 +646,7 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 		egl_.activateBindTexture(*ratioState_);
+ 
+ 	const BinProgram &bin = bin_[params.hdr.enabled ? 1 : 0];
+-	egl_.useProgram(bin.id);
++	glUseProgram(bin.id);
+ 	glEnableVertexAttribArray(bin.vertex);
+ 	glVertexAttribPointer(bin.vertex, 2, GL_FLOAT, GL_TRUE,
+ 			      2 * sizeof(GLfloat), vcoordinates);
+@@ -754,7 +741,7 @@ int DebayerEGL::renderCells(eGLImage &eglImageIn, const DebayerParams &params)
+ 		baseScaleX_ = 1.0f / binFracX;
+ 		baseScaleY_ = 1.0f / binFracY;
+ 
+-		egl_.useProgram(base_.id);
++		glUseProgram(base_.id);
+ 		glEnableVertexAttribArray(base_.vertex);
+ 		glVertexAttribPointer(base_.vertex, 2, GL_FLOAT, GL_TRUE,
+ 				      2 * sizeof(GLfloat), vcoordinates);
+@@ -816,15 +803,18 @@ void DebayerEGL::selectProgram(bool cells, bool hdr)
+ 		programId_ = id;
+ 		getShaderVariableLocations();
+ 	}
+-	egl_.useProgram(programId_);
++	glUseProgram(programId_);
+ }
+ 
+ int DebayerEGL::configure(const StreamConfiguration &inputCfg,
+ 			  const std::vector<std::reference_wrapper<const StreamConfiguration>> &outputCfgs,
+ 			  [[maybe_unused]] bool ccmEnabled)
+ {
+-	if (getInputConfig(inputCfg.pixelFormat, inputConfig_) != 0)
++	if (getInputConfig(inputCfg.pixelFormat, inputConfig_) != 0) {
++		LOG(Debayer, Error)
++			<< "Unsupported input format " << inputCfg.pixelFormat;
+ 		return -EINVAL;
++	}
+ 	if (quadBayer_)
+ 		inputConfig_.patternSize = { 4, 4 };
+ 
+@@ -922,15 +912,9 @@ std::vector<PixelFormat> DebayerEGL::formats(PixelFormat inputFormat)
+ std::tuple<unsigned int, unsigned int>
+ DebayerEGL::strideAndFrameSize(const PixelFormat &outputFormat, const Size &size)
+ {
+-	DebayerEGL::DebayerOutputConfig config;
+-
+-	if (getOutputConfig(outputFormat, config) != 0)
+-		return std::make_tuple(0, 0);
+-
+ 	/* Align stride to 256 bytes as a generic GPU memory access alignment */
+-	unsigned int stride = libcamera::utils::alignUp(size.width * config.bpp / 8, 256);
+-
+-	return std::make_tuple(stride, stride * size.height);
++	const PixelFormatInfo &info = PixelFormatInfo::info(outputFormat);
++	return std::make_tuple(info.stride(size.width, 0, 256), info.frameSize(size, 256));
+ }
+ 
+ uint32_t DebayerEGL::preferredInputStride(const PixelFormat &inputFormat, const Size &size)
+@@ -1025,21 +1009,10 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 			    << " textureUniformStep_.y " << Step[1]
+ 			    << " textureUniformStrideFactor_ " << Stride
+ 			    << " textureUniformProjMatrix_ " << textureUniformProjMatrix_;
+-	/*
+-	 * Pre-transpose matrix for GLES 2.0
+-	 */
+-	GLfloat ccm[9] = {
+-		params.combinedMatrix[0][0],
+-		params.combinedMatrix[1][0],
+-		params.combinedMatrix[2][0],
+-		params.combinedMatrix[0][1],
+-		params.combinedMatrix[1][1],
+-		params.combinedMatrix[2][1],
+-		params.combinedMatrix[0][2],
+-		params.combinedMatrix[1][2],
+-		params.combinedMatrix[2][2],
+-	};
+-	glUniformMatrix3fv(ccmUniformDataIn_, 1, GL_FALSE, ccm);
++
++	/* Pre-transpose matrix for GLES 2.0. */
++	Matrix<float, 3, 3> ccm = params.combinedMatrix.transpose();
++	glUniformMatrix3fv(ccmUniformDataIn_, 1, GL_FALSE, ccm.data().data());
+ 	LOG(Debayer, Debug) << " ccmUniformDataIn_ " << ccmUniformDataIn_ << " data " << params.combinedMatrix;
+ 
+ 	/*
+@@ -1247,8 +1220,6 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 	eGLImage *eglImageIn;
+ 	eGLImage *eglImageOut;
+ 
+-	/* eGL context switch */
+-	egl_.makeCurrent();
+ 	timerCollect();
+ 
+ 	eglImageIn = getCachedInputFrameBuffer(input, inMapped, inDmaSyncer);
+@@ -1298,6 +1269,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 
+ void DebayerEGL::process(uint32_t frame, FrameBuffer *input, FrameBuffer *output, const DebayerParams &params)
+ {
++	egl_.assertThread();
+ 	bench_.startFrame();
+ 
+ 	/* Copy metadata from the input buffer */
+@@ -1533,6 +1505,9 @@ void DebayerEGL::stop()
+ 			timerPending_[pass][i] = false;
+ 		}
+ 	}
++
++	/* Everything above lives in the context, which goes now */
++	egl_.resetEGLContext();
+ }
+ 
+ SizeRange DebayerEGL::sizes(PixelFormat inputFormat, const Size &inputSize)
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 7c09cddaa..bb93f644a 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -23,7 +23,7 @@
+ #define GL_GLEXT_PROTOTYPES
+ #define EGL_EGLEXT_PROTOTYPES
+ #include <libcamera/base/object.h>
+-#include <libcamera/base/span.h>
++#include <span>
+ #include <libcamera/base/thread.h>
+ 
+ #include "libcamera/internal/egl.h"
+@@ -142,8 +142,8 @@ private:
+ 	 */
+ 	bool cellsSupported();
+ 	int initCellsPrograms(const std::vector<std::string> &shaderEnv,
+-			      Span<const unsigned char> vertexShaderData,
+-			      Span<const unsigned char> fragmentShaderData);
++			      std::span<const unsigned char> vertexShaderData,
++			      std::span<const unsigned char> fragmentShaderData);
+ 	std::unique_ptr<eGLImage> createCellsTexture(GLenum unit, uint32_t uniformId, bool half);
+ 	int renderCells(eGLImage &eglImageIn, const DebayerParams &params);
+ 	void selectProgram(bool cells, bool hdr);
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index 425e56abe..1b7023aa4 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "libcamera/internal/software_isp/software_isp.h"
+ 
++#include <span>
+ #include <memory>
+ #include <optional>
+ #include <stdint.h>
+@@ -265,7 +266,7 @@ int SoftwareIsp::mapPdafBuffers(const std::vector<std::unique_ptr<FrameBuffer>>
+ 	std::vector<IPABuffer> ipaBuffers;
+ 
+ 	for (unsigned int i = 0; i < buffers.size(); i++) {
+-		Span<const FrameBuffer::Plane> planes = buffers[i]->planes();
++		std::span<const FrameBuffer::Plane> planes = buffers[i]->planes();
+ 
+ 		buffers[i]->setCookie(i);
+ 		ipaBuffers.emplace_back(i, std::vector<FrameBuffer::Plane>(planes.begin(),
+diff --git a/test/ipa/libipa/pdaf.cpp b/test/ipa/libipa/pdaf.cpp
+index c7b5d2bc7..101726079 100644
+--- a/test/ipa/libipa/pdaf.cpp
++++ b/test/ipa/libipa/pdaf.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "../src/ipa/libipa/pdaf.h"
+ 
++#include <span>
+ #include <cmath>
+ #include <iostream>
+ #include <random>
+@@ -227,7 +228,7 @@ protected:
+ 		}
+ 
+ 		/* A buffer too small for the layout is refused */
+-		if (pdaf.process(Span<const uint8_t>(flat).first(1000), bpl) != -EINVAL) {
++		if (pdaf.process(std::span<const uint8_t>(flat).first(1000), bpl) != -EINVAL) {
+ 			cout << "Short buffer accepted" << endl;
+ 			return TestFail;
+ 		}

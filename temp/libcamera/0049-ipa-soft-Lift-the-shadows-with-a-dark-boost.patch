@@ -1,0 +1,350 @@
+From ec8ed294156a82b66b6f4c505914a7398b8ea55d Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Sun, 27 Sep 2026 15:44:09 +0000
+Subject: ipa: soft: Lift the shadows with a dark boost
+
+The tuning's DRC tone mapping lifts the shadows by the DRC gain and a
+fixed dark boost offset. Qualcomm's ADRC also has AEC measure the
+darkest pixels and, when they sit below a floor, ask for a dark boost
+gain the tone mapping lifts them by on top (TMC 1.2's DRCGainDark);
+exposure does not change for it.
+
+With histogram darkRef, darkRange and maxDarkBoost, have Agc measure
+the darkest pixels as the tone curve will have lifted them by the DRC
+gain, and set a dark boost of up to maxDarkBoost to bring them to
+darkRef, filtered as the DRC gain is. Adjust builds the DRC curve with
+it, through the anchors' darkBoostRatio. How Qualcomm's AEC computes
+its gain is not public; the floor, pixel range and bound are its
+tuning's.
+
+Signed-off-by: William Floyd <git@notmy.space>
+---
+ src/ipa/softisp/algorithms/adjust.cpp | 34 +++++++-----
+ src/ipa/softisp/algorithms/adjust.h   | 12 +++-
+ src/ipa/softisp/algorithms/agc.cpp    | 80 ++++++++++++++++++++++++++-
+ src/ipa/softisp/algorithms/agc.h      |  6 ++
+ src/ipa/softisp/ipa_context.h         |  6 ++
+ 5 files changed, 120 insertions(+), 18 deletions(-)
+
+diff --git a/src/ipa/softisp/algorithms/adjust.cpp b/src/ipa/softisp/algorithms/adjust.cpp
+index 87803148c..9ff2abae3 100644
+--- a/src/ipa/softisp/algorithms/adjust.cpp
++++ b/src/ipa/softisp/algorithms/adjust.cpp
+@@ -33,11 +33,12 @@ LOG_DEFINE_CATEGORY(IPASoftIspAdjust)
+  *
+  *   (0, 0), (dy / (g r), dy), (mid / g, mid), (bright, bright), (1, 1)
+  *
+- * with r = 1 + darkBoost and dy = min(mid / r, dark), a straight gain of g r
+- * up to the second knee and a quartic Bezier curve through the rest: the
+- * shadows lifted by g and a little more, the mid-tones by g, the highlights
+- * left alone. The tuning data holds anchors at several DRC gains, which
+- * are interpolated:
++ * with r = (d - 1) darkBoostRatio + 1 + darkBoost for the frame's dark boost
++ * d (1 for none; see Agc) and dy = min(mid / r, dark), a straight gain of
++ * g r up to the second knee and a quartic Bezier curve through the rest:
++ * the shadows lifted by g and a little more, the mid-tones by g, the
++ * highlights left alone. The tuning data holds anchors at several DRC
++ * gains, which are interpolated:
+  *
+  *   drcCurve:
+  *     maxRatio: 256        # the largest gain, tone_max_ratio
+@@ -48,6 +49,7 @@ LOG_DEFINE_CATEGORY(IPASoftIspAdjust)
+  *       - drcGain: 1.0
+  *         tones: [ 0.30, 0.30, 0.87 ]  # dark, mid, bright
+  *         darkBoost: 0.2
++ *         darkBoostRatio: 1.0  # optional, default 1
+  */
+ int DrcCurve::read(const ValueNode &tuningData)
+ {
+@@ -62,7 +64,8 @@ int DrcCurve::read(const ValueNode &tuningData)
+ 			return -EINVAL;
+ 		}
+ 		anchors_.push_back({ *g, (*tones)[0], (*tones)[1], (*tones)[2],
+-				     node["darkBoost"].get<double>(0.0) });
++				     node["darkBoost"].get<double>(0.0),
++				     node["darkBoostRatio"].get<double>(1.0) });
+ 	}
+ 	std::sort(anchors_.begin(), anchors_.end(),
+ 		  [](const Anchors &a, const Anchors &b) { return a.drcGain < b.drcGain; });
+@@ -88,10 +91,11 @@ DrcCurve::Anchors DrcCurve::at(double drcGain) const
+ 	const double t = (drcGain - a.drcGain) / (b.drcGain - a.drcGain);
+ 	auto mix = [t](double u, double v) { return u + (v - u) * t; };
+ 	return { drcGain, mix(a.dark, b.dark), mix(a.mid, b.mid),
+-		 mix(a.bright, b.bright), mix(a.darkBoost, b.darkBoost) };
++		 mix(a.bright, b.bright), mix(a.darkBoost, b.darkBoost),
++		 mix(a.darkBoostRatio, b.darkBoostRatio) };
+ }
+ 
+-DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain)
++DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain, double darkGain)
+ 	: share_(curve.share_)
+ {
+ 	/* TMC 1.2 takes the gain in steps of 3%, up to 1.03^94 (about 16) */
+@@ -102,7 +106,8 @@ DrcCurve::Mapping::Mapping(const DrcCurve &curve, double drcGain)
+ 	const double g = std::pow(kStep, index);
+ 
+ 	const Anchors a = curve.at(drcGain);
+-	const double ratio = std::max(std::clamp(1.0 + a.darkBoost, 1.0, 16.0), 1.0001);
++	const double boost = (std::max(darkGain, 1.0) - 1.0) * a.darkBoostRatio;
++	const double ratio = std::max(std::clamp(boost + 1.0 + a.darkBoost, 1.0, 16.0), 1.0001);
+ 	const double gainDark = std::min(g * ratio, curve.maxRatio_);
+ 	const double darkY = std::min(a.mid / ratio, a.dark);
+ 
+@@ -155,6 +160,7 @@ double DrcCurve::Mapping::operator()(double x) const
+  * \param[in] curve A tone curve mapping [0, 1] to [0, 1], or nullptr
+  * \param[in] drcGain The dynamic range compression gain, 1 for none
+  * \param[in] drc The tuning's DRC tone mapping, or nullptr
++ * \param[in] darkGain The dark boost for \a drc's curve, 1 for none
+  *
+  * Dynamic range compression comes first, on the linear input: when exposure
+  * has been reduced by \a drcGain to keep highlights from clipping, it scales
+@@ -166,14 +172,14 @@ double DrcCurve::Mapping::operator()(double x) const
+  * \return The tone lookup table
+  */
+ ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
+-		float drcGain, const DrcCurve *drc)
++		float drcGain, const DrcCurve *drc, float darkGain)
+ {
+ 	ToneLut lut;
+ 	const double last = lut.size() - 1.0;
+ 	const double g = std::max(drcGain, 1.0f);
+ 	std::optional<DrcCurve::Mapping> mapping;
+ 	if (drc && !drc->empty())
+-		mapping.emplace(*drc, g);
++		mapping.emplace(*drc, g, darkGain);
+ 
+ 	for (unsigned int i = 0; i < lut.size(); i++) {
+ 		double x = i / last;
+@@ -385,15 +391,17 @@ void Adjust::prepare(IPAContext &context,
+ 	const bool fromCurve = !curve_.empty() && !gammaSet_;
+ 	/* Rebuild for DRC changes of half a percent or more. */
+ 	const float drc = std::round(drcGain(context, frameContext) * 200) / 200;
++	const float dark = std::round(std::max(context.activeState.agc.darkBoost, 1.0) * 200) / 200;
+ 
+ 	if (!lutValid_ || gamma != lutGamma_ || contrastExp != lutContrastExp_ ||
+-	    fromCurve != lutFromCurve_ || drc != lutDrc_) {
++	    fromCurve != lutFromCurve_ || drc != lutDrc_ || dark != lutDark_) {
+ 		lut_ = toneLut(gamma, contrastExp, fromCurve ? &curve_ : nullptr, drc,
+-			       &drcCurve_);
++			       &drcCurve_, dark);
+ 		lutGamma_ = gamma;
+ 		lutContrastExp_ = contrastExp;
+ 		lutFromCurve_ = fromCurve;
+ 		lutDrc_ = drc;
++		lutDark_ = dark;
+ 		lutValid_ = true;
+ 	}
+ 	params->toneLut = lut_;
+diff --git a/src/ipa/softisp/algorithms/adjust.h b/src/ipa/softisp/algorithms/adjust.h
+index ac2ad7835..826fe1db9 100644
+--- a/src/ipa/softisp/algorithms/adjust.h
++++ b/src/ipa/softisp/algorithms/adjust.h
+@@ -37,13 +37,17 @@ public:
+ 		double drcGain;
+ 		double dark, mid, bright;
+ 		double darkBoost;
++		double darkBoostRatio;
+ 	};
+ 
+-	/* The curve for one DRC gain: linear light in, linear light out */
++	/*
++	 * The curve for one DRC gain and dark boost: linear light in, linear
++	 * light out
++	 */
+ 	class Mapping
+ 	{
+ 	public:
+-		Mapping(const DrcCurve &curve, double drcGain);
++		Mapping(const DrcCurve &curve, double drcGain, double darkGain = 1.0);
+ 		double operator()(double x) const;
+ 
+ 	private:
+@@ -67,7 +71,8 @@ private:
+ };
+ 
+ ToneLut toneLut(float gamma, float contrastExp, const ipa::Pwl *curve,
+-		float drcGain = 1.0f, const DrcCurve *drc = nullptr);
++		float drcGain = 1.0f, const DrcCurve *drc = nullptr,
++		float darkGain = 1.0f);
+ 
+ class Adjust : public Algorithm
+ {
+@@ -112,6 +117,7 @@ private:
+ 	float lutContrastExp_ = 0.0f;
+ 	bool lutFromCurve_ = false;
+ 	float lutDrc_ = 1.0f;
++	float lutDark_ = 1.0f;
+ 	bool lutValid_ = false;
+ };
+ 
+diff --git a/src/ipa/softisp/algorithms/agc.cpp b/src/ipa/softisp/algorithms/agc.cpp
+index db390e8e6..3ea7b4b0b 100644
+--- a/src/ipa/softisp/algorithms/agc.cpp
++++ b/src/ipa/softisp/algorithms/agc.cpp
+@@ -153,12 +153,18 @@ int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 	 *     targetAdj: [ 0.97, 1.15 ]
+ 	 *     maxDrcGain: 2.4
+ 	 *     filter: 0.5
++	 *     darkRef: 0.031         # optional: the darkest pixels' floor,
++	 *     darkRange: [ 0, 0.1 ]  # the darkest 0-10% of the pixels,
++	 *     maxDarkBoost: 1.1      # and the most they are lifted by
+ 	 *
+ 	 * When the brightest pixels would sit above satRef, exposure is held
+ 	 * below the target by up to maxDrcGain (dynamic range compression),
+ 	 * and the tone curve lifts the rest of the image back by as much;
+ 	 * when they sit below it, a flat scene, the target rises by up to
+-	 * targetAdj's upper bound.
++	 * targetAdj's upper bound. When the darkest pixels, lifted by the DRC
++	 * gain, would still sit below darkRef, the tone curve lifts the
++	 * shadows by up to maxDarkBoost more (a dark boost, which the tuning's
++	 * DRC tone mapping applies; exposure is not changed for it).
+ 	 */
+ 	const ValueNode &hist = tuningData["histogram"];
+ 	auto satRef = hist["satRef"].get<double>();
+@@ -174,7 +180,20 @@ int Agc::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
+ 			.minAdj = std::min((*adj)[0], 1.0), .maxAdj = std::max((*adj)[1], 1.0),
+ 			.maxDrc = std::max(hist["maxDrcGain"].get<double>(1.0), 1.0),
+ 			.filter = std::clamp(hist["filter"].get<double>(0.0), 0.0, 0.99),
++			.darkRef = 0.0, .darkStart = 0.0, .darkEnd = 0.0,
++			.maxDarkBoost = 1.0,
+ 		};
++
++		auto darkRef = hist["darkRef"].get<double>();
++		auto darkRange = hist["darkRange"].get<std::vector<double>>();
++		auto maxDark = hist["maxDarkBoost"].get<double>();
++		if (darkRef && *darkRef > 0.0 && darkRange && darkRange->size() == 2 &&
++		    (*darkRange)[1] > (*darkRange)[0] && maxDark && *maxDark > 1.0) {
++			hist_->darkRef = *darkRef;
++			hist_->darkStart = (*darkRange)[0];
++			hist_->darkEnd = (*darkRange)[1];
++			hist_->maxDarkBoost = *maxDark;
++		}
+ 	}
+ 
+ 	if (meanTarget_)
+@@ -230,6 +249,42 @@ std::optional<double> brightMean(const SwIspStats *stats, double black,
+ 	return sum / count / (kYMax - black);
+ }
+ 
++/*
++ * The mean level of the pixels ranked between the fractions start and end
++ * of the pixels from the dark end of the histogram, as a fraction of the
++ * range above black. Empty if the range holds no pixels.
++ */
++std::optional<double> darkMean(const SwIspStats *stats, double black,
++			       double start, double end)
++{
++	const auto &hist = stats->yHistogram;
++	constexpr unsigned int kBinWidth = kYBinWidth;
++	double total = 0.0;
++
++	for (unsigned int i = 0; i < hist.size(); i++)
++		total += hist[i];
++
++	const double from = start * total;
++	const double to = end * total;
++	double seen = 0.0, sum = 0.0, count = 0.0;
++
++	for (unsigned int i = 0; i < hist.size() && seen < to; i++) {
++		const double c = hist[i];
++		const double overlap = std::min(seen + c, to) - std::max(seen, from);
++		if (overlap > 0.0) {
++			const double level = i * kBinWidth + kBinWidth / 2.0;
++			sum += overlap * std::max(level - black, 0.0);
++			count += overlap;
++		}
++		seen += c;
++	}
++
++	if (count <= 0.0)
++		return {};
++
++	return sum / count / (kYMax - black);
++}
++
+ } /* namespace */
+ 
+ /* A saturation position this close to full scale is clipped */
+@@ -302,11 +357,30 @@ double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
+ 			      : 1.0;
+ 	}
+ 
++	/*
++	 * Dark boost: the darkest pixels as the tone curve will have lifted
++	 * them by the DRC gain, against their floor.
++	 */
++	if (hist_->maxDarkBoost > 1.0) {
++		std::optional<double> dark = darkMean(stats, black, hist_->darkStart, hist_->darkEnd);
++		double wantDark = 1.0;
++		if (dark)
++			wantDark = *dark > 0.0
++					   ? std::clamp(hist_->darkRef / (*dark * applied), 1.0,
++							hist_->maxDarkBoost)
++					   : hist_->maxDarkBoost;
++		darkDecided_ = hist_->filter * darkDecided_ + (1.0 - hist_->filter) * wantDark;
++		if (wantDark == 1.0 && darkDecided_ < 1.005)
++			darkDecided_ = 1.0;
++		context.activeState.agc.darkBoost = darkDecided_;
++	}
++
+ 	LOG(IPASoftIspExposure, Debug)
+ 		<< "brightest " << scene << " of " << hist_->satRef
+ 		<< (*sat >= kClipped ? " (clipped)" : "")
+ 		<< ": DRC gain " << drcDecided_ << ", in effect " << applied
+-		<< ", target adjusted by " << adj;
++		<< ", target adjusted by " << adj
++		<< ", dark boost " << context.activeState.agc.darkBoost;
+ 
+ 	context.activeState.agc.plainTarget = *meanTarget_ * adj;
+ 	return *meanTarget_ * adj / drcDecided_;
+@@ -453,7 +527,9 @@ void Agc::process(IPAContext &context,
+ 		context.activeState.agc.drcGain = 1.0;
+ 		context.activeState.agc.drcHistory.clear();
+ 		context.activeState.agc.lastProduct = 0.0;
++		context.activeState.agc.darkBoost = 1.0;
+ 		drcDecided_ = 1.0;
++		darkDecided_ = 1.0;
+ 	}
+ 
+ 	/* The DRC gain the tone curve must use from now on */
+diff --git a/src/ipa/softisp/algorithms/agc.h b/src/ipa/softisp/algorithms/agc.h
+index 84fa477e5..1867e8109 100644
+--- a/src/ipa/softisp/algorithms/agc.h
++++ b/src/ipa/softisp/algorithms/agc.h
+@@ -41,6 +41,10 @@ private:
+ 		double minAdj, maxAdj;		/* bounds of the target adjustment */
+ 		double maxDrc;			/* the largest DRC gain */
+ 		double filter;			/* weight of the previous DRC gain */
++		/* Dark boost, if any: the darkest pixels' floor, which pixels */
++		double darkRef;
++		double darkStart, darkEnd;
++		double maxDarkBoost;		/* 1 for none */
+ 	};
+ 
+ 	double histTarget(IPAContext &context, const SwIspStats *stats);
+@@ -58,6 +62,8 @@ private:
+ 
+ 	/* The DRC gain exposure is being set for */
+ 	double drcDecided_ = 1.0;
++	/* The dark boost the tone curve is being set for */
++	double darkDecided_ = 1.0;
+ };
+ 
+ } /* namespace ipa::softisp::algorithms */
+diff --git a/src/ipa/softisp/ipa_context.h b/src/ipa/softisp/ipa_context.h
+index 2931c2925..f7395f7fd 100644
+--- a/src/ipa/softisp/ipa_context.h
++++ b/src/ipa/softisp/ipa_context.h
+@@ -69,6 +69,12 @@ struct IPAActiveState {
+ 		 */
+ 		double drcGain;
+ 		std::deque<std::pair<double, double>> drcHistory;
++		/*
++		 * Dark boost: how much more than the DRC gain the tone curve
++		 * lifts the shadows by when the darkest pixels sit below their
++		 * reference. 1 for none.
++		 */
++		double darkBoost;
+ 		/*
+ 		 * The mean luminance target without DRC, and the last frame
+ 		 * with statistics' mean (both above black, 0 to 1) and exposure

@@ -1,0 +1,469 @@
+From f764033533bef83b7daa301bf7fd2ee2edea3e8c Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Thu, 8 Oct 2026 15:57:35 +0000
+Subject: software_isp: Sharpen the luma on the cells path
+
+Add the Sharpen IPA algorithm, from the vendor tuning's adaptive spatial
+filter (asf32): its gains by gain region, level and activity, and its
+clamps. The GPU debayer's cells path takes the luma difference between the
+filtered pixel and the mean of the taps around it, after the tone curve, as
+the detail, and adds it back scaled by them. The cells path now also runs
+when only sharpening is on.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ .../internal/software_isp/debayer_params.h    |  24 ++++
+ src/ipa/softisp/algorithms/meson.build        |   1 +
+ src/ipa/softisp/algorithms/sharpen.cpp        | 124 ++++++++++++++++++
+ src/ipa/softisp/algorithms/sharpen.h          |  54 ++++++++
+ src/libcamera/shaders/bayer_1x_packed.frag    |  49 ++++++-
+ src/libcamera/software_isp/debayer_egl.cpp    |  48 ++++++-
+ src/libcamera/software_isp/debayer_egl.h      |   9 ++
+ 7 files changed, 300 insertions(+), 9 deletions(-)
+ create mode 100644 src/ipa/softisp/algorithms/sharpen.cpp
+ create mode 100644 src/ipa/softisp/algorithms/sharpen.h
+
+diff --git a/include/libcamera/internal/software_isp/debayer_params.h b/include/libcamera/internal/software_isp/debayer_params.h
+index e1e09d711..e34f90d60 100644
+--- a/include/libcamera/internal/software_isp/debayer_params.h
++++ b/include/libcamera/internal/software_isp/debayer_params.h
+@@ -103,6 +103,30 @@ struct DebayerParams {
+ 		float levelLow = 64.0f;
+ 		float levelHigh = 160.0f;
+ 	} denoise;
++
++	/*
++	 * Sharpening, applied by the GPU debayer on the cells path (where the
++	 * pixel's cell and the ones around it are at hand): the difference
++	 * between the pixel's filtered luma and the mean of the four taps
++	 * around it, after the tone curve, is the detail, which is added back
++	 * to the luma scaled by a gain: that of overshoot or undershoot at the
++	 * luma's level, weighted by the detail's activity (to leave out noise),
++	 * within the clamps. The gains and the weight are the bytes of a
++	 * kSharpenLevels x 1 RGBA texture: the positive gain and the negative
++	 * gain over kSharpenGainRange by the luma's level, in red and green,
++	 * and the weight by the activity (the detail's magnitude over 4 in
++	 * 8-bit units), in blue. The clamps are in luma units, 0 to 1.
++	 * Off unless enabled.
++	 */
++	static constexpr unsigned int kSharpenLevels = 64;
++	static constexpr float kSharpenGainRange = 4.0f;
++	struct Sharpen {
++		bool enabled = false;
++		float scale = 1.0f;
++		float clampLow = 0.0f;
++		float clampHigh = 0.0f;
++		std::array<uint8_t, kSharpenLevels * 4> lut = {};
++	} sharpen;
+ };
+ 
+ } /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/meson.build b/src/ipa/softisp/algorithms/meson.build
+index 11732a473..531e0d39b 100644
+--- a/src/ipa/softisp/algorithms/meson.build
++++ b/src/ipa/softisp/algorithms/meson.build
+@@ -10,4 +10,5 @@ softisp_ipa_algorithms = files([
+     'af.cpp',
+     'aperture.cpp',
+     'lsc.cpp',
++    'sharpen.cpp',
+ ])
+diff --git a/src/ipa/softisp/algorithms/sharpen.cpp b/src/ipa/softisp/algorithms/sharpen.cpp
+new file mode 100644
+index 000000000..99b689969
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/sharpen.cpp
+@@ -0,0 +1,124 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Sharpening
++ */
++
++#include "sharpen.h"
++
++#include <algorithm>
++#include <cmath>
++
++#include <libcamera/base/log.h>
++
++namespace libcamera {
++
++LOG_DEFINE_CATEGORY(IPASoftIspSharpen)
++
++namespace ipa::softisp::algorithms {
++
++/* The main kernel's amplitude, which a scale of 1 stands for */
++static constexpr double kReferenceAmplitude = 2.85;
++
++/**
++ * \class Sharpen
++ * \brief Sharpening by the vendor tuning's adaptive spatial filter
++ *
++ * The GPU debayer adds back the detail of the luma, scaled by a gain (see
++ * DebayerParams::Sharpen). This algorithm sets the gains for each frame from
++ * the vendor tuning's adaptive spatial filter (asf32), by the frame's gain:
++ *
++ *   - Sharpen:
++ *       regions:
++ *         - gain: [ 1, 1.1 ]
++ *           amplitude: 2.85       # the kernel's, 2.85 for the main one
++ *           cap: 1.8              # the largest gain
++ *           clamp: [ -32, 28 ]    # the change's limits, 8-bit luma units
++ *           positive: [ ... ]     # 64 gains of overshoot, by luma level
++ *           negative: [ ... ]     # 64 gains of undershoot
++ *           weight: [ ... ]       # 64 weights, by the detail's activity
++ *
++ * The regions blend across the gaps between their gain ranges.
++ */
++
++int Sharpen::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	for (const ValueNode &node : tuningData["regions"].asList()) {
++		auto gain = node["gain"].get<std::vector<double>>();
++		auto clamp = node["clamp"].get<std::vector<double>>();
++		auto positive = node["positive"].get<std::vector<double>>();
++		auto negative = node["negative"].get<std::vector<double>>();
++		auto weight = node["weight"].get<std::vector<double>>();
++		auto cap = node["cap"].get<double>();
++		auto amplitude = node["amplitude"].get<double>();
++		if (!gain || gain->size() != 2 || !clamp || clamp->size() != 2 ||
++		    !positive || positive->size() != kLevels || !negative || negative->size() != kLevels ||
++		    !weight || weight->size() != kLevels || !cap || !amplitude || *amplitude <= 0.0) {
++			LOG(IPASoftIspSharpen, Error) << "Invalid sharpening region";
++			return -EINVAL;
++		}
++
++		Region r;
++		r.amplitude = *amplitude;
++		r.cap = *cap;
++		r.clampLow = (*clamp)[0];
++		r.clampHigh = (*clamp)[1];
++		std::copy(positive->begin(), positive->end(), r.positive.begin());
++		std::copy(negative->begin(), negative->end(), r.negative.begin());
++		std::copy(weight->begin(), weight->end(), r.weight.begin());
++
++		ranges_.push_back({ (*gain)[0], (*gain)[1] });
++		regions_.push_back(r);
++	}
++
++	if (regions_.empty()) {
++		LOG(IPASoftIspSharpen, Error) << "No sharpening regions";
++		return -EINVAL;
++	}
++
++	LOG(IPASoftIspSharpen, Info)
++		<< "Sharpening, " << regions_.size() << " gain regions";
++
++	return 0;
++}
++
++void Sharpen::prepare(IPAContext &context,
++		      [[maybe_unused]] const uint32_t frame,
++		      IPAFrameContext &frameContext,
++		      DebayerParams *params)
++{
++	const double gain = frameContext.sensor.known ? frameContext.sensor.gain
++						      : context.activeState.agc.again;
++
++	const auto b = ipa::softisp::luxBlend(ranges_, gain);
++	const Region &lo = regions_[b.lo];
++	const Region &hi = regions_[b.hi];
++	const double w = b.lo == b.hi ? 0.0 : b.weight;
++	auto mix = [w](double u, double v) { return u + (v - u) * w; };
++
++	DebayerParams::Sharpen &s = params->sharpen;
++	s.enabled = true;
++	s.scale = mix(lo.amplitude, hi.amplitude) / kReferenceAmplitude;
++	s.clampLow = mix(lo.clampLow, hi.clampLow) / 255.0;
++	s.clampHigh = mix(lo.clampHigh, hi.clampHigh) / 255.0;
++
++	const double cap = mix(lo.cap, hi.cap);
++	auto byte = [](double v) {
++		return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0, 1.0) * 255.0));
++	};
++	for (unsigned int i = 0; i < kLevels; i++) {
++		s.lut[4 * i + 0] = byte(std::min(mix(lo.positive[i], hi.positive[i]), cap) /
++					DebayerParams::kSharpenGainRange);
++		s.lut[4 * i + 1] = byte(std::min(mix(lo.negative[i], hi.negative[i]), cap) /
++					DebayerParams::kSharpenGainRange);
++		s.lut[4 * i + 2] = byte(mix(lo.weight[i], hi.weight[i]));
++		s.lut[4 * i + 3] = 255;
++	}
++}
++
++REGISTER_IPA_ALGORITHM(Sharpen, "Sharpen")
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/ipa/softisp/algorithms/sharpen.h b/src/ipa/softisp/algorithms/sharpen.h
+new file mode 100644
+index 000000000..b14b7d86d
+--- /dev/null
++++ b/src/ipa/softisp/algorithms/sharpen.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/*
++ * Copyright (C) 2026, William Floyd
++ *
++ * Sharpening
++ */
++
++#pragma once
++
++#include <array>
++#include <vector>
++
++#include "libcamera/internal/software_isp/debayer_params.h"
++
++#include "algorithm.h"
++#include "lux.h"
++
++namespace libcamera {
++
++namespace ipa::softisp::algorithms {
++
++class Sharpen : public Algorithm
++{
++public:
++	Sharpen() = default;
++	~Sharpen() = default;
++
++	int init(IPAContext &context, const ValueNode &tuningData) override;
++	void prepare(IPAContext &context,
++		     const uint32_t frame,
++		     IPAFrameContext &frameContext,
++		     DebayerParams *params) override;
++
++private:
++	static constexpr unsigned int kLevels = DebayerParams::kSharpenLevels;
++
++	/* The adaptive spatial filter's tuning at one gain region */
++	struct Region {
++		double amplitude;
++		double cap;
++		double clampLow, clampHigh;
++		std::array<double, kLevels> positive;
++		std::array<double, kLevels> negative;
++		std::array<double, kLevels> weight;
++	};
++
++	/* The gain regions' ranges, for blending across the gaps */
++	std::vector<ipa::softisp::LuxRange> ranges_;
++	std::vector<Region> regions_;
++};
++
++} /* namespace ipa::softisp::algorithms */
++
++} /* namespace libcamera */
+diff --git a/src/libcamera/shaders/bayer_1x_packed.frag b/src/libcamera/shaders/bayer_1x_packed.frag
+index c12c6a9a6..177f39429 100644
+--- a/src/libcamera/shaders/bayer_1x_packed.frag
++++ b/src/libcamera/shaders/bayer_1x_packed.frag
+@@ -144,10 +144,9 @@ vec3 apply_chroma(vec3 rgb)
+ /*
+  * The colour processing of a pixel's red, green and blue as the sensor saw
+  * them, from 0 to 1 over the 8 high bits' range: black level, lens shading,
+- * white balance, colour correction, tone curve, chroma, and the output
+- * channel order.
++ * white balance, colour correction, tone curve and chroma.
+  */
+-vec4 finish(vec3 rgb)
++vec3 process(vec3 rgb)
+ {
+ 	/*
+ 	 * \todo: Black level normalising, AWB and digital gain could be
+@@ -173,8 +172,12 @@ vec4 finish(vec3 rgb)
+ 	rgb = apply_tone(clamp(rgb, 0.0, 1.0));
+ 
+ 	/* Scale the chroma, on the encoded values */
+-	rgb = apply_chroma(rgb);
++	return apply_chroma(rgb);
++}
+ 
++/* A processed pixel in the output's channel order */
++vec4 output_colour(vec3 rgb)
++{
+ #if defined (SWAP_BLUE)
+ 	return vec4(rgb.bgr, 1.0);
+ #else
+@@ -182,6 +185,12 @@ vec4 finish(vec3 rgb)
+ #endif
+ }
+ 
++/* The colour processing of a pixel, as it is written (see process()) */
++vec4 finish(vec3 rgb)
++{
++	return output_colour(process(rgb));
++}
++
+ #if defined (CELL_PATH)
+ /*
+  * The cells path: bayer_cells_bin.frag has binned each 2x2 cell of the frame,
+@@ -200,7 +209,17 @@ vec4 finish(vec3 rgb)
+  *             10-bit counts
+  *
+  * A cell's green is the mean of two pixels, which halves its noise variance.
++ *
++ * Sharpening, when on, uses the same values: after the colour processing,
++ * the luma difference between the filtered pixel and the mean of the four
++ * taps around it is the detail, a high-pass band of about the vendor's
++ * kernel's response (1.6 at 0.3 cycles per pixel), which is added back
++ * scaled by a gain by the luma's level and the sign of the detail, and
++ * a weight by its activity that leaves noise out, within the clamps. The
++ * gains and the weight are the red, green and blue of sharpen_lut.
+  */
++uniform sampler2D sharpen_lut;
++uniform vec4 sharpen;		/* scale, clamp low, clamp high, and 1 when on */
+ uniform sampler2D cell_tex;
+ uniform vec2 cell_size;
+ uniform vec3 noise;		/* slope, quadratic term and floor of the variance */
+@@ -222,6 +241,7 @@ void main(void)
+ 
+ 	vec3 sum = c;
+ 	vec3 weights = vec3(1.0);
++	vec3 ring = vec3(0.0);
+ 	for (int dy = 0; dy < 2; dy++) {
+ 		for (int dx = 0; dx < 2; dx++) {
+ 			vec2 offset = vec2(dx == 0 ? -1.5 : 1.5, dy == 0 ? -1.5 : 1.5) * texel;
+@@ -230,10 +250,29 @@ void main(void)
+ 			vec3 w = exp(-0.5 * d * d);
+ 			sum += w * n;
+ 			weights += w;
++			ring += n;
+ 		}
+ 	}
+ 
+-	gl_FragColor = finish(sum / weights / 1020.0);
++	vec3 rgb = process(sum / weights / 1020.0);
++
++	if (sharpen.w > 0.0) {
++		const vec3 luma = vec3(0.299, 0.587, 0.114);
++		vec3 low = process(ring * (0.25 / 1020.0));
++		float detail = dot(rgb - low, luma);
++		float y = dot(rgb, luma);
++
++		vec4 levels = texture2D(sharpen_lut,
++					vec2((y * (SHARPEN_LEVELS - 1.0) + 0.5) / SHARPEN_LEVELS, 0.5));
++		float gain = (detail >= 0.0 ? levels.r : levels.g) * SHARPEN_GAIN_RANGE;
++		float activity = abs(detail) * (255.0 / 4.0);
++		float weight = texture2D(sharpen_lut,
++					 vec2((min(activity, SHARPEN_LEVELS - 1.0) + 0.5) / SHARPEN_LEVELS, 0.5)).b;
++		float change = clamp(gain * weight * sharpen.x * detail, sharpen.y, sharpen.z);
++		rgb = clamp(rgb + change, 0.0, 1.0);
++	}
++
++	gl_FragColor = output_colour(rgb);
+ }
+ #endif /* CELL_PATH */
+ 
+diff --git a/src/libcamera/software_isp/debayer_egl.cpp b/src/libcamera/software_isp/debayer_egl.cpp
+index 91e70a24e..398fce691 100644
+--- a/src/libcamera/software_isp/debayer_egl.cpp
++++ b/src/libcamera/software_isp/debayer_egl.cpp
+@@ -135,6 +135,8 @@ int DebayerEGL::getShaderVariableLocations(void)
+ 	widthLowUniform_ = glGetUniformLocation(programId_, "width_lo");
+ 	widthHighUniform_ = glGetUniformLocation(programId_, "width_hi");
+ 	anchorsUniform_ = glGetUniformLocation(programId_, "anchors");
++	sharpenLutUniform_ = glGetUniformLocation(programId_, "sharpen_lut");
++	sharpenUniform_ = glGetUniformLocation(programId_, "sharpen");
+ 
+ 	textureUniformStep_ = glGetUniformLocation(programId_, "tex_step");
+ 	textureUniformSize_ = glGetUniformLocation(programId_, "tex_size");
+@@ -179,6 +181,14 @@ int DebayerEGL::initBayerShaders(PixelFormat inputFormat, PixelFormat outputForm
+ 					std::to_string(DebayerParams::kToneLutSize) + ".0";
+ 	egl_.pushEnv(shaderEnv, toneLutSize.c_str());
+ 
++	/* The sharpening's lookup tables: entries, and the range of the gains */
++	const std::string sharpenLevels = "#define SHARPEN_LEVELS " +
++					  std::to_string(DebayerParams::kSharpenLevels) + ".0";
++	egl_.pushEnv(shaderEnv, sharpenLevels.c_str());
++	const std::string sharpenRange = "#define SHARPEN_GAIN_RANGE " +
++					 std::to_string(DebayerParams::kSharpenGainRange);
++	egl_.pushEnv(shaderEnv, sharpenRange.c_str());
++
+ 	/* The lens shading grid's size and gain encoding */
+ 	const std::string lscDefines[] = {
+ 		"#define LSC_WIDTH " + std::to_string(DebayerParams::kLscWidth) + ".0",
+@@ -783,9 +793,39 @@ void DebayerEGL::setShaderVariableValues(eGLImage &eglImageIn, const DebayerPara
+ 		glUniform1i(cellTexUniform_, cells_->texture_unit_uniform_id_);
+ 		glUniform2f(cellSizeUniform_, cellsSize_.width, cellsSize_.height);
+ 		glUniform3f(noiseUniform_, d.slope, d.quad, d.floor);
+-		glUniform3f(widthLowUniform_, d.widthLow[0], d.widthLow[1], d.widthLow[2]);
+-		glUniform3f(widthHighUniform_, d.widthHigh[0], d.widthHigh[1], d.widthHigh[2]);
++		/* Without noise reduction (only sharpening), the taps carry no weight */
++		if (d.enabled) {
++			glUniform3f(widthLowUniform_, d.widthLow[0], d.widthLow[1], d.widthLow[2]);
++			glUniform3f(widthHighUniform_, d.widthHigh[0], d.widthHigh[1], d.widthHigh[2]);
++		} else {
++			glUniform3f(widthLowUniform_, 1e-3f, 1e-3f, 1e-3f);
++			glUniform3f(widthHighUniform_, 1e-3f, 1e-3f, 1e-3f);
++		}
+ 		glUniform2f(anchorsUniform_, d.levelLow, d.levelHigh);
++
++		/*
++		 * The sharpening's gains and weights, a kSharpenLevels x 1 RGBA
++		 * texture, uploaded when they change and sampled with linear
++		 * filtering.
++		 */
++		const DebayerParams::Sharpen &s = params.sharpen;
++		if (!sharpenLut_) {
++			sharpenLutData_ = s.lut;
++			sharpenLut_ = std::make_unique<eGLImage>(GL_RGBA, DebayerParams::kSharpenLevels, 1,
++								 DebayerParams::kSharpenLevels * 4,
++								 GL_TEXTURE5, 5);
++			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++			egl_.createTexture2D(*sharpenLut_, sharpenLutData_.data());
++			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++		} else if (s.enabled && s.lut != sharpenLutData_) {
++			sharpenLutData_ = s.lut;
++			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++			egl_.updateTexture2D(*sharpenLut_, sharpenLutData_.data());
++		}
++		egl_.activateBindTexture(*sharpenLut_);
++		glUniform1i(sharpenLutUniform_, sharpenLut_->texture_unit_uniform_id_);
++		glUniform4f(sharpenUniform_, s.scale, s.clampLow, s.clampHigh, s.enabled ? 1.0f : 0.0f);
+ 	}
+ 
+ 	return;
+@@ -895,7 +935,7 @@ int DebayerEGL::debayerGPU(FrameBuffer *input, FrameBuffer *output, const Debaye
+ 	 * The cells path, when the IPA asks for noise reduction; if it fails,
+ 	 * it is not tried again.
+ 	 */
+-	bool cells = cellsEligible_ && params.denoise.enabled;
++	bool cells = cellsEligible_ && (params.denoise.enabled || params.sharpen.enabled);
+ 	if (cells && renderCells(*eglImageIn)) {
+ 		LOG(Debayer, Error) << "No noise reduction: the cells path failed";
+ 		cellsEligible_ = false;
+@@ -1001,7 +1041,7 @@ int DebayerEGL::start()
+ 
+ 	LOG(Debayer, Debug) << "Available fragment shader texture units " << maxTextureImageUnits;
+ 
+-	cellsCapable_ = maxTextureImageUnits >= 5 && cellsSupported();
++	cellsCapable_ = maxTextureImageUnits >= 6 && cellsSupported();
+ 
+ 	if (initBayerShaders(inputPixelFormat_, outputPixelFormat_))
+ 		return -EINVAL;
+diff --git a/src/libcamera/software_isp/debayer_egl.h b/src/libcamera/software_isp/debayer_egl.h
+index 9c7a58227..27fafd500 100644
+--- a/src/libcamera/software_isp/debayer_egl.h
++++ b/src/libcamera/software_isp/debayer_egl.h
+@@ -197,6 +197,15 @@ private:
+ 
+ 	StatsThread statsThread_;
+ 
++	/*
++	 * The sharpening's gains and weights, a texture on unit 5 that the
++	 * cells path's main program samples (see DebayerParams::Sharpen)
++	 */
++	std::unique_ptr<eGLImage> sharpenLut_;
++	std::array<uint8_t, DebayerParams::kSharpenLevels * 4> sharpenLutData_;
++	GLint sharpenLutUniform_;
++	GLint sharpenUniform_;
++
+ 	/* The main program's variables for the cells */
+ 	GLint cellTexUniform_;
+ 	GLint cellSizeUniform_;
