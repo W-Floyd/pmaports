@@ -1,4 +1,4 @@
-From 5c93192c769dda3d107a5889f87d1c4b146848e9 Mon Sep 17 00:00:00 2001
+From d16657119b07423ed71f1f4558ee80d5acf34461 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -21,7 +21,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  .../internal/software_isp/swisp_stats.h       |  10 +
  .../internal/software_isp/swstats_cpu.h       |   2 +-
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
- src/ipa/soft/algorithms/agc.cpp               | 227 ++++++++--
+ src/ipa/soft/algorithms/agc.cpp               | 235 ++++++++--
  src/ipa/soft/algorithms/agc.h                 |  18 +-
  src/ipa/soft/algorithms/awb.cpp               |  21 +
  src/ipa/soft/algorithms/awb.h                 |   8 +
@@ -36,7 +36,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/libcamera/shaders/meson.build             |   2 +
  src/libcamera/software_isp/debayer_egl.cpp    | 424 +++++++++++++++---
  src/libcamera/software_isp/debayer_egl.h      |  66 ++-
- 19 files changed, 1112 insertions(+), 179 deletions(-)
+ 19 files changed, 1117 insertions(+), 182 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_base.frag
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
@@ -109,7 +109,7 @@ index ed78eb353..9a3c21ea9 100644
  		return std::max(agc.drcGain, 1.0);
  
 diff --git a/src/ipa/soft/algorithms/agc.cpp b/src/ipa/soft/algorithms/agc.cpp
-index ae99e98a8..1841e0f31 100644
+index ae99e98a8..8bfab4100 100644
 --- a/src/ipa/soft/algorithms/agc.cpp
 +++ b/src/ipa/soft/algorithms/agc.cpp
 @@ -99,15 +99,28 @@ static constexpr double kMeanAcquire = 0.6;
@@ -148,16 +148,26 @@ index ae99e98a8..1841e0f31 100644
  
  Agc::Agc()
  	: exposureOptimal_(kExposureOptimal),
-@@ -217,6 +230,8 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+@@ -212,11 +225,15 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+ 
+ 	/*
+ 	 * hdrOn, hdrOff: the DRC gains at which HDR from frames of alternating
+-	 * exposure starts and stops (see applyHdr()); an hdrOn of 0 turns it
+-	 * off.
++	 * exposure starts and stops (see applyHdr()); it is off unless the tuning
++	 * sets an hdrOn (kHdrOn is the usual one), as it is not steady enough
++	 * yet to be on by default, and needs the group hold of the sensor's
++	 * driver (see s5kjn1).
  	 */
- 	hdrOn_ = tuningData["hdrOn"].get<double>(kHdrOn);
+-	hdrOn_ = tuningData["hdrOn"].get<double>(kHdrOn);
++	hdrOn_ = tuningData["hdrOn"].get<double>(0.0);
  	hdrOff_ = std::min(tuningData["hdrOff"].get<double>(kHdrOff), hdrOn_);
 +	/* hdrForce: a ratio to hold HDR at in any scene, for testing; 0 for none */
 +	hdrForce_ = tuningData["hdrForce"].get<double>(0.0);
  	auto byGain = tuningData["exposureByGain"].get<std::vector<double>>();
  	if (byGain && byGain->size() >= 4 && byGain->size() % 2 == 0) {
  		for (unsigned int i = 0; i < byGain->size(); i += 2)
-@@ -308,6 +323,21 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
+@@ -308,6 +325,21 @@ int Agc::init(IPAContext &context, const ValueNode &tuningData)
  
  namespace {
  
@@ -179,7 +189,7 @@ index ae99e98a8..1841e0f31 100644
  /*
   * The mean level of the pixels ranked between the fractions start and end
   * of the pixels from the bright end of the histogram, as a fraction of the
-@@ -399,12 +429,13 @@ static constexpr double kDrcMatch = 0.02;
+@@ -399,12 +431,13 @@ static constexpr double kDrcMatch = 0.02;
  void Agc::trackDrc(IPAContext &context, const IPAFrameContext &frameContext)
  {
  	/*
@@ -197,7 +207,7 @@ index ae99e98a8..1841e0f31 100644
  		return;
  	}
  
-@@ -584,13 +615,51 @@ void Agc::selectTargets(double lux)
+@@ -584,13 +617,51 @@ void Agc::selectTargets(double lux)
  double Agc::histTarget(IPAContext &context, const SwIspStats *stats)
  {
  	const double black = context.activeState.blc.level;
@@ -251,7 +261,7 @@ index ae99e98a8..1841e0f31 100644
  	double want = std::clamp(scene / hist_->satRef, 1.0, hist_->maxDrc);
  
  	/*
-@@ -867,19 +936,27 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
+@@ -867,19 +938,27 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
  		return;
  	}
  
@@ -286,7 +296,7 @@ index ae99e98a8..1841e0f31 100644
  		exposureLong = std::clamp<int32_t>(std::lround(product / cfg.againMin),
  						   cfg.exposureMin, limit);
  		gainLong = product / exposureLong;
-@@ -887,44 +964,71 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
+@@ -887,44 +966,71 @@ void Agc::applyHdr(IPAContext &context, IPAFrameContext &frameContext)
  		return gainLong >= cfg.againMin && gainLong <= cfg.againMax &&
  		       exposureLong / ratio >= cfg.exposureMin;
  	};
@@ -375,7 +385,7 @@ index ae99e98a8..1841e0f31 100644
  		  IPAFrameContext &frameContext, DebayerParams *params)
  {
  	const auto &hdr = context.activeState.agc.hdr;
-@@ -934,6 +1038,13 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
+@@ -934,6 +1040,13 @@ void Agc::prepare(IPAContext &context, [[maybe_unused]] const uint32_t frame,
  	params->hdr.product = product;
  	/* Without HDR a frame is its own reference: cells in the units they were taken in */
  	params->hdr.reference = params->hdr.enabled ? hdr.reference : product;
@@ -389,7 +399,7 @@ index ae99e98a8..1841e0f31 100644
  }
  
  /*
-@@ -959,7 +1070,7 @@ void Agc::applyManual(IPAContext &context, IPAFrameContext &frameContext) const
+@@ -959,7 +1072,7 @@ void Agc::applyManual(IPAContext &context, IPAFrameContext &frameContext) const
  }
  
  void Agc::process(IPAContext &context,
@@ -398,7 +408,7 @@ index ae99e98a8..1841e0f31 100644
  		  IPAFrameContext &frameContext,
  		  const SwIspStats *stats,
  		  ControlList &metadata)
-@@ -988,6 +1099,10 @@ void Agc::process(IPAContext &context,
+@@ -988,6 +1101,10 @@ void Agc::process(IPAContext &context,
  		context.activeState.agc.darkBoost = 1.0;
  		drcDecided_ = 1.0;
  		darkDecided_ = 1.0;
@@ -409,7 +419,7 @@ index ae99e98a8..1841e0f31 100644
  	}
  
  	/* The DRC gain the tone curve must use from now on */
-@@ -1005,8 +1120,15 @@ void Agc::process(IPAContext &context,
+@@ -1005,8 +1122,15 @@ void Agc::process(IPAContext &context,
  			       frameContext.sensor.exposure * frameContext.sensor.gain >
  				       context.activeState.agc.exposure * context.activeState.agc.again *
  					       std::sqrt(hdrState.ratio);
@@ -426,7 +436,7 @@ index ae99e98a8..1841e0f31 100644
  
  	if (!stats->valid || longFrame) {
  		/*
-@@ -1071,6 +1193,33 @@ void Agc::process(IPAContext &context,
+@@ -1071,6 +1195,33 @@ void Agc::process(IPAContext &context,
  	}
  	double meanY = yCount ? static_cast<double>(ySum) / yCount : 0.0;
  
