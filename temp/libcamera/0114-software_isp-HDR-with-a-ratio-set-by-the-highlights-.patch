@@ -1,4 +1,4 @@
-From 2bd136e98feb21186f8b08af7abf8c45084a143e Mon Sep 17 00:00:00 2001
+From 5c93192c769dda3d107a5889f87d1c4b146848e9 Mon Sep 17 00:00:00 2001
 From: William Floyd <git@notmy.space>
 Date: Thu, 8 Oct 2026 18:01:07 +0000
 Subject: [PATCH] software_isp: HDR with a ratio set by the highlights, and its
@@ -23,6 +23,8 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/ipa/soft/algorithms/adjust.cpp            |   4 +
  src/ipa/soft/algorithms/agc.cpp               | 227 ++++++++--
  src/ipa/soft/algorithms/agc.h                 |  18 +-
+ src/ipa/soft/algorithms/awb.cpp               |  21 +
+ src/ipa/soft/algorithms/awb.h                 |   8 +
  src/ipa/soft/ipa_context.h                    |  20 +
  src/ipa/soft/soft_simple.cpp                  | 103 ++++-
  src/libcamera/pipeline/camss/camss.cpp        |  10 +-
@@ -34,7 +36,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
  src/libcamera/shaders/meson.build             |   2 +
  src/libcamera/software_isp/debayer_egl.cpp    | 424 +++++++++++++++---
  src/libcamera/software_isp/debayer_egl.h      |  66 ++-
- 17 files changed, 1083 insertions(+), 179 deletions(-)
+ 19 files changed, 1112 insertions(+), 179 deletions(-)
  create mode 100644 src/libcamera/shaders/bayer_cells_base.frag
  create mode 100644 src/libcamera/shaders/bayer_cells_ratio.frag
 
@@ -488,6 +490,57 @@ index 0484b88eb..1d3251e1e 100644
  
  	/* The longest exposure time (us) to lengthen the frame for, 0 for none */
  	double maxExposureUs_ = 0.0;
+diff --git a/src/ipa/soft/algorithms/awb.cpp b/src/ipa/soft/algorithms/awb.cpp
+index 4a3c037ae..9e37e7637 100644
+--- a/src/ipa/soft/algorithms/awb.cpp
++++ b/src/ipa/soft/algorithms/awb.cpp
+@@ -424,6 +424,27 @@ void Awb::process(IPAContext &context,
+ 			}
+ 		}
+ 
++		/*
++		 * Averaged over the frames' statistics, in the log of the ratios: the
++		 * first few ones as a plain mean, so that it settles at the start,
++		 * then by a weight of kSmoothing, a time constant of a second or so
++		 * at the statistics' rate (every fourth frame). A change of the light
++		 * is followed, at that pace; what moves in the picture is not.
++		 */
++		{
++			constexpr double kSmoothing = 0.12;
++			const Vector<double, 2> logNow{ { std::log(std::max(greyWorld[0], 1e-3)),
++							  std::log(std::max(greyWorld[1], 1e-3)) } };
++			if (smoothedCount_ == 0) {
++				smoothed_ = logNow;
++			} else {
++				const double weight = std::max(kSmoothing, 1.0 / (smoothedCount_ + 1));
++				smoothed_ = smoothed_ + (logNow - smoothed_) * weight;
++			}
++			smoothedCount_++;
++			greyWorld = { { std::exp(smoothed_[0]), std::exp(smoothed_[1]) } };
++		}
++
+ 		const LocusFit fit = fitLocus(greyWorld);
+ 		context.activeState.awb.temperatureK = fit.ct;
+ 		const Vector<double, 2> adjust = gainAdjust(fit.ratios, fit.ct);
+diff --git a/src/ipa/soft/algorithms/awb.h b/src/ipa/soft/algorithms/awb.h
+index e73871677..133994c31 100644
+--- a/src/ipa/soft/algorithms/awb.h
++++ b/src/ipa/soft/algorithms/awb.h
+@@ -75,6 +75,14 @@ private:
+ 
+ 	/* The learned illuminant estimate, if the tuning names one that loads */
+ 	std::unique_ptr<AwbModel> model_;
++
++	/*
++	 * The estimate of the illuminant (red and blue over green), averaged over
++	 * the frames' statistics: a frame's own moves with what is in it, and the
++	 * gains that followed it made the picture pulse whenever something moved.
++	 */
++	Vector<double, 2> smoothed_;
++	unsigned int smoothedCount_ = 0;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
 diff --git a/src/ipa/soft/ipa_context.h b/src/ipa/soft/ipa_context.h
 index 678a8f817..3a36a1710 100644
 --- a/src/ipa/soft/ipa_context.h
