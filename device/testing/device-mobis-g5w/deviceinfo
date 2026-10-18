@@ -14,7 +14,7 @@ deviceinfo_external_storage="true"
 deviceinfo_screen_width="1920"
 deviceinfo_screen_height="720"
 
-deviceinfo_dtb="telechips/tcc803x-avn"
+deviceinfo_dtb="tcc803x-avn"
 
 # The vendor Android runs NEMESIS.sh from a USB stick, which kexecs the kernel
 # (see the nura repository); nothing is flashed.

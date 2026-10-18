@@ -2,7 +2,7 @@
 #
 # The mainline kernel for the G5W-Android head unit (Telechips TCC803x, armv7),
 # branch 2024-kia-ev6 of the kernel repository. Installs the zImage as
-# /boot/vmlinuz, the DTB under /boot/dtbs/telechips/ and the modules; `nura usb`
+# /boot/vmlinuz, the DTB under /boot/dtbs/ and the modules; `nura usb`
 # and `nura live` take them from the apk.
 #
 # The source is a tarball of a commit of the container's worktree, made and
@@ -26,7 +26,6 @@ makedepends="
 	dtc
 	findutils
 	flex
-	installkernel
 	openssl-dev
 	perl
 	python3
@@ -61,16 +60,22 @@ build() {
 }
 
 package() {
+	mkdir -p "$pkgdir"/boot
 	make ARCH="$_carch" zinstall dtbs_install modules_install \
-		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_PATH="$pkgdir"/boot/ \
 		INSTALL_MOD_PATH="$pkgdir"/usr \
 		INSTALL_MOD_STRIP=1 \
 		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
 
-	mkdir -p "$pkgdir"/boot/dtbs/telechips
-	cp "$pkgdir"/boot/dtbs-tmp/tcc803x*.dtb "$pkgdir"/boot/dtbs/telechips/
+	# arm's dtbs_install is flat; only this SoC's trees are kept.
+	mkdir -p "$pkgdir"/boot/dtbs
+	cp "$pkgdir"/boot/dtbs-tmp/tcc803x*.dtb "$pkgdir"/boot/dtbs/
 	rm -rf "$pkgdir"/boot/dtbs-tmp
 	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+
+	# What postmarketos-mkinitfs looks for to know the kernel release.
+	install -D "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/$_flavor/kernel.release
 }
 
 sha512sums=""
