@@ -138,7 +138,7 @@ build() {
 	# u-root itself runs here; what it builds is armv7. No ELF is passed to
 	# -files singly (that would make u-root run ldd): directories only, and the
 	# static bootmanager-ui.
-	(cd "$_uroot" && env -u GOARCH -u GOARM GOWORK=off go build -o "$_out"/u-root-bin . &&
+	(cd "$_uroot" && env -u GOARCH -u GOARM CGO_ENABLED=0 GOWORK=off go build -o "$_out"/u-root-bin . &&
 		GOARCH=arm GOARM=7 CGO_ENABLED=0 GOWORK="$_out"/go.work "$_out"/u-root-bin \
 			-o "$_out"/stage.cpio \
 			-uinitcmd="gosh /etc/uinit.sh" \
