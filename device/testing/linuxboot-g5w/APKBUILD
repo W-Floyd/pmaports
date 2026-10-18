@@ -10,9 +10,12 @@
 # the Wi-Fi modules and vendor firmware. `nura usb` appends them as a second
 # cpio, which the kernel unpacks over this one.
 #
-# The Boot Manager's UI is its own package (bootmanager-ui, cross-compiled), so
-# this one builds only Go and packs: the whole thing runs in a few minutes under
-# qemu instead of Rust's much longer one.
+# The Boot Manager's UI is its own package (bootmanager-ui, cross-compiled), and
+# this one is cross-compiled too (pmb:cross-native): Go builds for armv7 natively,
+# and the armv7 userland the stage carries (busybox, kexec, hostapd, the fsck
+# tools, ...) is unpacked from the armv7 repository into a sysroot with
+# `apk --usermode --arch armv7`. Nothing here runs armv7 code, so there is no
+# ldd: shared libraries are found from the ELF headers with readelf.
 #
 # u-root and the Boot Manager come as tarballs of the commits in the pins below,
 # made by `nura stage sync` from the container's worktrees (git archive), so
@@ -26,26 +29,12 @@ arch="armv7"
 license="GPL-2.0-only AND BSD-3-Clause AND GPL-3.0-or-later"
 depends=""
 makedepends="
-	bluez
-	bluez-btmon
-	bluez-deprecated
-	busybox-static
-	cryptsetup
-	dnsmasq
-	dosfstools
-	e2fsprogs
-	exfatprogs
-	f2fs-tools
-	file
+	binutils
+	cpio
 	go
-	hostapd
-	kexec-tools
-	bootmanager-ui
-	wpa_supplicant
-	xfsprogs
 	"
-# net: go fetches its modules
-options="net !check !strip !tracedeps"
+# net: go fetches its modules, apk the armv7 packages
+options="net !check !strip !tracedeps pmb:cross-native"
 
 # Set by `nura stage sync`.
 _uroot_commit=
@@ -68,51 +57,89 @@ builddir="$srcdir"
 _uroot="$srcdir/u-root-$_uroot_commit"
 _bm="$srcdir/bootmanager-$_bm_commit"
 _out="$srcdir/out"
+_sys="$srcdir/sysroot"
+
+# Where an armv7 binary of the sysroot is.
+_find() {
+	local d
+	for d in sbin usr/sbin bin usr/bin; do
+		[ -f "$_sys/$d/$1" ] && echo "$_sys/$d/$1" && return 0
+	done
+	return 1
+}
+
+# Copy the shared libraries ELF FILE needs, and theirs, from the sysroot to DIR.
+# readelf reads armv7 headers anywhere; nothing is executed.
+_libs() {
+	local todo="$1" f n p
+	while [ -n "$todo" ]; do
+		f=${todo%% *}; case "$todo" in *" "*) todo=${todo#* } ;; *) todo= ;; esac
+		for n in $(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+			case "$n" in libc.musl-*) continue ;; esac
+			[ -e "$2/$n" ] && continue
+			for p in "$_sys"/usr/lib/$n "$_sys"/lib/$n; do
+				[ -e "$p" ] || continue
+				cp -L "$p" "$2/$n"
+				todo="$todo $2/$n"
+				break
+			done
+		done
+	done
+}
 
 build() {
 	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
-	export GOARCH=arm GOARM=7 CGO_ENABLED=0
+
+	# The armv7 userland, from the armv7 repositories (and the local one, for
+	# bootmanager-ui), into a sysroot. Scripts are not run: they would be armv7.
+	local alpine=http://cdn.alpinelinux.org/alpine/edge
+	apk add --usermode --root "$_sys" --initdb --arch armv7 --no-scripts --no-cache \
+		--allow-untrusted --repositories-file /dev/null \
+		-X $alpine/main -X $alpine/community -X /mnt/pmbootstrap/packages/edge \
+		busybox-static kexec-tools hostapd dnsmasq wpa_supplicant \
+		bluez bluez-deprecated bluez-btmon \
+		e2fsprogs dosfstools exfatprogs f2fs-tools xfsprogs cryptsetup \
+		bootmanager-ui
+
+	# /opt/ap: static busybox, kexec, Wi-Fi AP and Bluetooth tools with their
+	# musl libraries, where uinit.sh expects them. The fsck tools and cryptsetup
+	# go under usr/libexec, their libraries in /lib (the loader's default path).
+	mkdir -p "$_out"/ap/bin "$_out"/ap/lib "$_out"/fsck/usr/libexec/fsck \
+		"$_out"/fsck/usr/libexec/cryptsetup "$_out"/fsck/lib
+	for b in usr/sbin/hostapd usr/sbin/dnsmasq sbin/wpa_supplicant sbin/wpa_cli \
+		usr/sbin/kexec usr/bin/hciconfig usr/bin/hcitool usr/bin/btmon; do
+		cp -L "$_sys/$b" "$_out"/ap/bin/
+		_libs "$_sys/$b" "$_out"/ap/lib
+	done
+	cp -L "$_sys"/bin/busybox.static "$_out"/ap/bin/busybox
+	for b in e2fsck fsck.fat fsck.exfat fsck.f2fs xfs_repair; do
+		_f=$(_find "$b") || die "no $b in the sysroot"
+		cp -L "$_f" "$_out"/fsck/usr/libexec/fsck/
+		_libs "$_f" "$_out"/fsck/lib
+	done
+	_f=$(_find cryptsetup) || die "no cryptsetup in the sysroot"
+	cp -L "$_f" "$_out"/fsck/usr/libexec/cryptsetup/
+	_libs "$_f" "$_out"/fsck/lib
+	# The loader, under both its names (libs ask for the libc one).
+	for d in "$_out"/ap/lib "$_out"/fsck/lib; do
+		cp -L "$_sys"/lib/ld-musl-armhf.so.1 "$d"/ld-musl-armhf.so.1
+		cp -L "$_sys"/lib/ld-musl-armhf.so.1 "$d"/libc.musl-armv7.so.1
+	done
 
 	# The workspace u-root builds the Boot Manager backend in, as a u-root command.
 	mkdir -p "$_out"
 	(cd "$_out" && go work init "$_uroot" "$_bm"/bootmanager)
-
-	# /opt/ap: static busybox, kexec, Wi-Fi AP and Bluetooth tools with their
-	# musl libraries, where uinit.sh expects them.
-	mkdir -p "$_out"/ap/bin "$_out"/ap/lib
-	for b in /usr/sbin/hostapd /usr/sbin/dnsmasq /sbin/wpa_supplicant /sbin/wpa_cli \
-		/usr/sbin/kexec /usr/bin/hciconfig /usr/bin/hcitool /usr/bin/btmon; do
-		cp -L "$b" "$_out"/ap/bin/
-		# musl ldd lists only the first binary it is given: one run each.
-		for l in $(ldd "$b" | awk '/=>/{print $3}'); do cp -L "$l" "$_out"/ap/lib/; done
-	done
-	cp -L /bin/busybox.static "$_out"/ap/bin/busybox
-	cp -L /lib/ld-musl-armhf.so.1 "$_out"/ap/lib/
-
-	# The disk tools behind Check and Repair, with their libraries (u-root
-	# finds those itself). The Boot Manager leaves out a feature whose tool is
-	# missing.
-	_toolfiles=
-	_pack() { # BINARY DESTDIR
-		local src= d
-		for d in /sbin /usr/sbin /bin /usr/bin; do
-			[ -f "$d/$1" ] && src="$d/$1" && break
-		done
-		[ -n "$src" ] || die "no $1 to pack"
-		_toolfiles="$_toolfiles -files $src:$2/$1"
-	}
-	for _b in e2fsck fsck.fat fsck.exfat fsck.f2fs xfs_repair; do
-		_pack $_b usr/libexec/fsck
-	done
-	_pack cryptsetup usr/libexec/cryptsetup
 
 	mkdir -p "$_out"/files
 	cp -L "$srcdir"/uinit.sh "$srcdir"/rekexec.sh "$srcdir"/kexec.sh \
 		"$srcdir"/kexec-prep.sh "$srcdir"/bt-up.sh "$srcdir"/passwd \
 		"$srcdir"/group "$srcdir"/kia-ev6.json "$_out"/files/
 
-	(cd "$_uroot" && GOWORK=off go build -o "$_out"/u-root-bin . &&
-		GOWORK="$_out"/go.work "$_out"/u-root-bin \
+	# u-root itself runs here; what it builds is armv7. No ELF is passed to
+	# -files singly (that would make u-root run ldd): directories only, and the
+	# static bootmanager-ui.
+	(cd "$_uroot" && env -u GOARCH -u GOARM GOWORK=off go build -o "$_out"/u-root-bin . &&
+		GOARCH=arm GOARM=7 CGO_ENABLED=0 GOWORK="$_out"/go.work "$_out"/u-root-bin \
 			-o "$_out"/stage.cpio \
 			-uinitcmd="gosh /etc/uinit.sh" \
 			-tags dev \
@@ -124,11 +151,11 @@ build() {
 			-files "$_out/files/passwd:etc/passwd" \
 			-files "$_out/files/group:etc/group" \
 			-files "$_out/files/kia-ev6.json:etc/bootmanager/kia-ev6.json" \
-			-files "/usr/bin/bootmanager-ui:bin/bootmanager-ui" \
+			-files "$_sys/usr/bin/bootmanager-ui:bin/bootmanager-ui" \
 			-files "$_out/ap/bin:opt/ap/bin" \
-			-files "$_out/ap/lib/ld-musl-armhf.so.1:lib/ld-musl-armhf.so.1" \
 			-files "$_out/ap/lib:opt/ap/lib" \
-			$_toolfiles \
+			-files "$_out/fsck/usr:usr" \
+			-files "$_out/fsck/lib:lib" \
 			core boot cmds/exp/fdtdump "$_bm"/bootmanager "$_bm"/bootmanager/tools/micomd)
 	# A dangling link in the initramfs leaves the stage at a bare shell
 	cpio -itv < "$_out"/stage.cpio | grep -e ' etc/.* -> /' &&
