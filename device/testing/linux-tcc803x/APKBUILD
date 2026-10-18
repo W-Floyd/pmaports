@@ -68,7 +68,7 @@ package() {
 		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
 
 	mkdir -p "$pkgdir"/boot/dtbs/telechips
-	cp "$pkgdir"/boot/dtbs-tmp/telechips/*.dtb "$pkgdir"/boot/dtbs/telechips/
+	cp "$pkgdir"/boot/dtbs-tmp/tcc803x*.dtb "$pkgdir"/boot/dtbs/telechips/
 	rm -rf "$pkgdir"/boot/dtbs-tmp
 	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
 }
