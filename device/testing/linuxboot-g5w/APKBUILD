@@ -10,6 +10,10 @@
 # the Wi-Fi modules and vendor firmware. `nura usb` appends them as a second
 # cpio, which the kernel unpacks over this one.
 #
+# The Boot Manager's UI is its own package (bootmanager-ui, cross-compiled), so
+# this one builds only Go and packs: the whole thing runs in a few minutes under
+# qemu instead of Rust's much longer one.
+#
 # u-root and the Boot Manager come as tarballs of the commits in the pins below,
 # made by `nura stage sync` from the container's worktrees (git archive), so
 # unpushed commits build too.
@@ -26,7 +30,6 @@ makedepends="
 	bluez-btmon
 	bluez-deprecated
 	busybox-static
-	cargo
 	cryptsetup
 	dnsmasq
 	dosfstools
@@ -37,14 +40,12 @@ makedepends="
 	go
 	hostapd
 	kexec-tools
-	rust
+	bootmanager-ui
 	wpa_supplicant
 	xfsprogs
 	"
-# net: go and cargo fetch their modules and crates
-# !pmb:crossdirect: crossdirect refuses a rustc that differs between the native
-# and armv7 chroots; the whole build runs under qemu instead
-options="net !check !strip !tracedeps !pmb:crossdirect"
+# net: go fetches its modules
+options="net !check !strip !tracedeps"
 
 # Set by `nura stage sync`.
 _uroot_commit=
@@ -61,7 +62,6 @@ source="
 	passwd
 	group
 	kia-ev6.json
-	evdev-musl-time64.patch.txt
 	"
 builddir="$srcdir"
 
@@ -71,21 +71,11 @@ _out="$srcdir/out"
 
 build() {
 	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
-	export CARGO_TARGET_DIR="$srcdir/cargo-target" CARGO_HOME="$srcdir/cargo"
-	unset RUSTC_WRAPPER
-	# abuild's opt-level=s makes the software-rendered UI about 1.7x slower.
-	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 	export GOARCH=arm GOARM=7 CGO_ENABLED=0
 
-	# evdev 0.13.2 predates musl 1.2.3's 64-bit time on 32-bit targets, which
-	# Alpine's rustc turns on (libc_unstable_musl_v1_2_3): input_event has
-	# input_event_sec/usec, not time. Carry the fix until evdev has one.
-	(cd "$_bm"/bootmanager-ui && cargo fetch --locked)
-	_evdev=$(echo "$CARGO_HOME"/registry/src/*/evdev-0.13.2)
-	[ -d "$_evdev" ] || die "evdev is not 0.13.2: refresh evdev-musl-time64.patch.txt"
-	patch -Np1 -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt
-
-	TAGS=dev UROOT="$_uroot" sh "$_bm"/build.sh "$_out"
+	# The workspace u-root builds the Boot Manager backend in, as a u-root command.
+	mkdir -p "$_out"
+	(cd "$_out" && go work init "$_uroot" "$_bm"/bootmanager)
 
 	# /opt/ap: static busybox, kexec, Wi-Fi AP and Bluetooth tools with their
 	# musl libraries, where uinit.sh expects them.
@@ -120,8 +110,6 @@ build() {
 	cp -L "$srcdir"/uinit.sh "$srcdir"/rekexec.sh "$srcdir"/kexec.sh \
 		"$srcdir"/kexec-prep.sh "$srcdir"/bt-up.sh "$srcdir"/passwd \
 		"$srcdir"/group "$srcdir"/kia-ev6.json "$_out"/files/
-	_web=
-	[ -d "$_out"/web ] && _web="-files $_out/web:usr/share/bootmanager-web"
 
 	(cd "$_uroot" && GOWORK=off go build -o "$_out"/u-root-bin . &&
 		GOWORK="$_out"/go.work "$_out"/u-root-bin \
@@ -136,11 +124,11 @@ build() {
 			-files "$_out/files/passwd:etc/passwd" \
 			-files "$_out/files/group:etc/group" \
 			-files "$_out/files/kia-ev6.json:etc/bootmanager/kia-ev6.json" \
-			-files "$_out/bootmanager-ui:bin/bootmanager-ui" \
+			-files "/usr/bin/bootmanager-ui:bin/bootmanager-ui" \
 			-files "$_out/ap/bin:opt/ap/bin" \
 			-files "$_out/ap/lib/ld-musl-armhf.so.1:lib/ld-musl-armhf.so.1" \
 			-files "$_out/ap/lib:opt/ap/lib" \
-			$_web $_toolfiles \
+			$_toolfiles \
 			core boot cmds/exp/fdtdump "$_bm"/bootmanager "$_bm"/bootmanager/tools/micomd)
 	# A dangling link in the initramfs leaves the stage at a bare shell
 	cpio -itv < "$_out"/stage.cpio | grep -e ' etc/.* -> /' &&
