@@ -157,9 +157,32 @@ fwstage() {
 	} > /tmp/wifi-dmesg.log 2>&1
 	usblog
 	# Again once the access point has had time to come up (or a scan has
-	# been tried from the UI).
+	# been tried from the UI), and a few more times: the Boot Manager's log
+	# keeps growing, and what happened after a pick is the thing to read.
 	sleep 60
 	usblog
+	for i in 1 2 3 4 5; do
+		sleep 120
+		usblog
+	done
+}
+
+# What goes on the stick: the stage's logs, the Boot Manager's own (its scan of
+# the stick's images is in it) and the state a scan depends on.
+usblog_body() {
+	cat /tmp/stage.log /tmp/bootmanager.log /tmp/wifi-dmesg.log /tmp/wifi-tools.log /tmp/hostapd.log /tmp/wpa_supplicant.log /tmp/fwl.log 2>/dev/null
+	printf '== partitions\n'
+	cat /proc/partitions
+	printf '== mounts\n'
+	cat /proc/mounts
+	printf '== loop devices\n'
+	$BB losetup -a 2>&1
+	printf '== removable flags\n'
+	for d in /sys/block/sd*; do
+		printf '%s %s\n' "$d" "$(cat "$d/removable")"
+	done
+	printf '== dmesg: loop, file systems, usb storage\n'
+	$BB dmesg | $BB grep -iE 'loop|EXT4-fs|FAT-fs|usb-storage|sd[a-z]' | $BB tail -n 60
 }
 
 # Leaves the stage's log on the USB stick (the one holding NEMESIS.sh), for
@@ -175,7 +198,7 @@ usblog() {
 		mp=$($BB grep "^$p " /proc/mounts | $BB head -n 1 | $BB cut -d' ' -f2)
 		if [ -n "$mp" ]; then
 			if $BB mount -o remount,rw "$mp" 2>/tmp/usb.err && [ -e "$mp/NEMESIS.sh" ]; then
-				cat /tmp/stage.log /tmp/wifi-dmesg.log /tmp/wifi-tools.log /tmp/hostapd.log /tmp/wpa_supplicant.log > "$mp/stagelog.txt" 2>/dev/null
+				usblog_body > "$mp/stagelog.txt" 2>/dev/null
 				$BB sync
 				$BB mount -o remount,ro "$mp"
 				say "log written to $mp ($p) as stagelog.txt"
@@ -188,7 +211,7 @@ usblog() {
 		for t in vfat exfat ext4; do
 			if $BB mount -t "$t" -o rw,sync "$p" /mnt/usb 2>/tmp/usb.err; then
 				if [ -e /mnt/usb/NEMESIS.sh ]; then
-					cat /tmp/stage.log /tmp/wifi-dmesg.log /tmp/wifi-tools.log /tmp/hostapd.log /tmp/wpa_supplicant.log > /mnt/usb/stagelog.txt 2>/dev/null
+					usblog_body > /mnt/usb/stagelog.txt 2>/dev/null
 					$BB sync
 					$BB umount /mnt/usb
 					say "log written to $p as stagelog.txt"
