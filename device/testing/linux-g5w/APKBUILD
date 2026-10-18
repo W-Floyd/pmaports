@@ -1,0 +1,76 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# The mainline kernel for the G5W-Android head unit (Telechips TCC803x, armv7),
+# branch 2024-kia-ev6 of the kernel repository. Installs the zImage as
+# /boot/vmlinuz, the DTB under /boot/dtbs/telechips/ and the modules; `nura usb`
+# and `nura live` take them from the apk.
+#
+# The source is a tarball of a commit of the container's worktree, made and
+# pinned by `nura kernel apk` (git archive), so unpushed commits build; the pin
+# and checksum below are filled in at build time and not committed.
+maintainer="William Floyd <git@notmy.space>"
+_flavor="g5w"
+pkgname=linux-$_flavor
+pkgver=7.3.0_rc7
+pkgrel=0
+pkgdesc="Mainline kernel for the G5W-Android head unit (TCC8031)"
+arch="armv7"
+_carch="arm"
+url="https://github.com/W-Floyd/linux"
+license="GPL-2.0-only"
+options="!strip !check !tracedeps pmb:cross-native"
+makedepends="
+	bash
+	bc
+	bison
+	dtc
+	findutils
+	flex
+	installkernel
+	openssl-dev
+	perl
+	python3
+	xz
+	zstd
+"
+
+# Set by `nura kernel apk`.
+_commit=
+
+source="
+	$pkgname-$_commit.tar.gz
+	g5w.config
+"
+builddir="$srcdir/$pkgname-$_commit"
+
+prepare() {
+	default_prepare
+	make ARCH="$_carch" multi_v7_defconfig
+	# Each line of g5w.config is CONFIG_X=y.
+	for o in $(sed -n 's/^CONFIG_\([A-Z0-9_]*\)=y$/\1/p' "$srcdir"/g5w.config); do
+		./scripts/config -e "$o"
+	done
+	make ARCH="$_carch" olddefconfig
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1))-$_flavor" \
+		zImage dtbs modules
+}
+
+package() {
+	make ARCH="$_carch" zinstall dtbs_install modules_install \
+		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_MOD_PATH="$pkgdir"/usr \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs-tmp
+
+	mkdir -p "$pkgdir"/boot/dtbs/telechips
+	cp "$pkgdir"/boot/dtbs-tmp/telechips/*.dtb "$pkgdir"/boot/dtbs/telechips/
+	rm -rf "$pkgdir"/boot/dtbs-tmp
+	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+}
+
+sha512sums=""
