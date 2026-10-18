@@ -42,7 +42,9 @@ makedepends="
 	xfsprogs
 	"
 # net: go and cargo fetch their modules and crates
-options="net !check !strip !tracedeps"
+# !pmb:crossdirect: crossdirect refuses a rustc that differs between the native
+# and armv7 chroots; the whole build runs under qemu instead
+options="net !check !strip !tracedeps !pmb:crossdirect"
 
 # Set by `nura stage sync`.
 _uroot_commit=
