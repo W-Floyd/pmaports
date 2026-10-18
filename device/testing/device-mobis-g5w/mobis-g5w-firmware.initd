@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+
+description="Mobis G5W firmware from the stock system partition"
+
+depend() {
+	before net
+	after localmount
+}
+
+start() {
+	ebegin "Loading Mobis G5W firmware"
+	/usr/libexec/mobis-g5w-firmware
+	eend $?
+}

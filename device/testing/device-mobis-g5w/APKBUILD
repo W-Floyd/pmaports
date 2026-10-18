@@ -1,0 +1,54 @@
+# Reference: <https://postmarketos.org/devicepkg>
+maintainer="William Floyd <git@notmy.space>"
+pkgname=device-mobis-g5w
+pkgdesc="Mobis DAudio Plus Gen5 Wide head unit (Telechips TCC8031)"
+pkgver=1
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="armv7"
+options="!check !archcheck"
+depends="
+	go-msm-firmware-loader
+	linux-tcc803x
+	postmarketos-base
+"
+makedepends="devicepkg-dev"
+subpackages="
+	$pkgname-openrc:openrc
+	$pkgname-systemd:systemd
+	"
+source="
+	deviceinfo
+	mobis-g5w-firmware.sh
+	mobis-g5w-firmware.service
+	mobis-g5w-firmware.initd
+	"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+	install -Dm755 "$srcdir"/mobis-g5w-firmware.sh \
+		"$pkgdir"/usr/libexec/mobis-g5w-firmware
+}
+
+openrc() {
+	install_if="$pkgname=$pkgver-r$pkgrel openrc"
+	depends="openrc"
+	install -Dm755 "$srcdir"/mobis-g5w-firmware.initd \
+		"$subpkgdir"/etc/init.d/mobis-g5w-firmware
+}
+
+systemd() {
+	install_if="$pkgname=$pkgver-r$pkgrel systemd"
+	install -Dm644 "$srcdir"/mobis-g5w-firmware.service \
+		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-firmware.service
+	mkdir -p "$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../mobis-g5w-firmware.service \
+		"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/mobis-g5w-firmware.service
+}
+
+sha512sums=""

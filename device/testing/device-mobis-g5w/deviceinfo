@@ -1,0 +1,27 @@
+# Reference: <https://postmarketos.org/deviceinfo>
+# Please use double quotes only. You can source this file in shell scripts.
+
+deviceinfo_format_version="0"
+deviceinfo_name="Mobis DAudio Plus Gen5 Wide"
+deviceinfo_manufacturer="Mobis"
+deviceinfo_codename="mobis-g5w"
+deviceinfo_year="2022"
+deviceinfo_arch="armv7"
+
+# Device related
+deviceinfo_chassis="embedded"
+deviceinfo_external_storage="true"
+deviceinfo_screen_width="1920"
+deviceinfo_screen_height="720"
+
+deviceinfo_dtb="telechips/tcc803x-avn"
+
+# The vendor Android runs NEMESIS.sh from a USB stick, which kexecs the kernel
+# (see the nura repository); nothing is flashed.
+deviceinfo_flash_method="none"
+deviceinfo_generate_bootimg="false"
+deviceinfo_generate_extlinux_config="true"
+
+# clk_ignore_unused/pd_ignore_unused: clk_disable_unused() would gate the display
+# clocks at the end of initcalls and blank the panel the console draws on.
+deviceinfo_kernel_cmdline="ignore_loglevel clk_ignore_unused pd_ignore_unused"

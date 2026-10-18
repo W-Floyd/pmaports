@@ -1,0 +1,13 @@
+[Unit]
+Description=Mobis G5W firmware from the stock system partition
+After=local-fs.target
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/mobis-g5w-firmware
+
+[Install]
+WantedBy=multi-user.target
