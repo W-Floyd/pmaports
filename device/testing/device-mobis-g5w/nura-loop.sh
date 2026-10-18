@@ -27,6 +27,8 @@ if [ -x /usr/bin/micomd ]; then
 		i=$((i + 1))
 	done
 	/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 >/dev/null 2>&1 &
+	# Not the OOM killer's pick, as the service's copy is not.
+	echo -900 > "/proc/$!/oom_score_adj" 2>/dev/null
 	echo "nura: micomd answering the micom on /dev/ttyAMA2"
 fi
 
