@@ -1,0 +1,13 @@
+[Unit]
+Description=Answer the head unit's micom
+After=local-fs.target
+
+[Service]
+# The initramfs hook starts one and leaves it running: only start one if it is gone.
+ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
+ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

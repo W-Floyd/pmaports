@@ -15,6 +15,21 @@
 # (resize_root_filesystem). Nothing to do once the image is full size.
 . ./init_functions.sh
 
+# The micom (the vehicle's microcontroller) resets the SoC as hung when its
+# CPU-alive requests go unanswered, about 3.5 minutes after the vendor Android is
+# gone, and the grow below can take that long on its own. micomd answers them from
+# here on. It keeps running after the switch to the real system, where
+# mobis-g5w-micomd.service starts one only if there is none.
+if [ -x /usr/bin/micomd ]; then
+	i=0
+	while [ ! -c /dev/ttyAMA2 ] && [ "$i" -lt 10 ]; do
+		sleep 0.5
+		i=$((i + 1))
+	done
+	/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 >/dev/null 2>&1 &
+	echo "nura: micomd answering the micom on /dev/ttyAMA2"
+fi
+
 STICK=/run/nura-stick
 IMAGE=nura/os.img
 # 4 GiB - 1 MiB: under FAT32's 4 GiB - 1 byte file limit, on a MiB boundary.

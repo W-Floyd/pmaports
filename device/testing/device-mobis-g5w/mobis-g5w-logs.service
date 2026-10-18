@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy the logs of this boot to the USB stick
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/libexec/mobis-g5w-logs
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

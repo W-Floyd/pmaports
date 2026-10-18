@@ -11,6 +11,7 @@ options="!check !archcheck"
 depends="
 	go-msm-firmware-loader
 	linux-tcc803x
+	micomd
 	postmarketos-base
 	postmarketos-mkinitfs
 "
@@ -25,7 +26,12 @@ source="
 	mobis-g5w-firmware.service
 	mobis-g5w-firmware.initd
 	nura-loop.sh
+	nura-stick.sh
 	30-nura.modules
+	40-micomd.files
+	mobis-g5w-micomd.service
+	mobis-g5w-logs.sh
+	mobis-g5w-logs.service
 	"
 
 build() {
@@ -43,6 +49,14 @@ package() {
 		"$pkgdir"/usr/share/mkinitfs/hooks/nura-loop.sh
 	install -Dm644 "$srcdir"/30-nura.modules \
 		"$pkgdir"/usr/share/mkinitfs/modules/30-nura.modules
+	# micomd goes into the initramfs, which starts it before the grow.
+	install -Dm644 "$srcdir"/40-micomd.files \
+		"$pkgdir"/usr/share/mkinitfs/files/40-micomd.files
+	# The last step before the switch: the stick stays reachable from the system.
+	install -Dm644 "$srcdir"/nura-stick.sh \
+		"$pkgdir"/usr/share/mkinitfs/hooks-cleanup/nura-stick.sh
+	install -Dm755 "$srcdir"/mobis-g5w-logs.sh \
+		"$pkgdir"/usr/libexec/mobis-g5w-logs
 }
 
 openrc() {
@@ -56,16 +70,15 @@ systemd() {
 	install_if="$pkgname=$pkgver-r$pkgrel systemd"
 	install -Dm644 "$srcdir"/mobis-g5w-firmware.service \
 		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-firmware.service
+	install -Dm644 "$srcdir"/mobis-g5w-micomd.service \
+		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-micomd.service
+	install -Dm644 "$srcdir"/mobis-g5w-logs.service \
+		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-logs.service
 	mkdir -p "$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants
-	ln -s ../mobis-g5w-firmware.service \
-		"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/mobis-g5w-firmware.service
+	for u in mobis-g5w-firmware mobis-g5w-micomd mobis-g5w-logs; do
+		ln -s ../$u.service \
+			"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/$u.service
+	done
 }
 
-sha512sums="
-8ddd3f3719659805502aa3923a9f72d233d8368462476e615310b977e238b8e9b5239a3c729a38a991bd58ae2a8615607be9d17a3a3624e38d7722d652b7dfb9  deviceinfo
-040c55357430bb40abfe05dbd997bef8aed97ea1020352e8d8e9bb6b2220d84d40dbc4214fd46f8132790b7ce01055052b975f5403fc4792a8cffe725c512626  mobis-g5w-firmware.sh
-4aa29d1d9aba4fd250df6a83be966e2f89ed258f8fa225f89d1a2d3c6ec882a82f652a1d1c97c7b2dee2b1fb094cf575a23dfce88758c9cdb83b7812a6028b39  mobis-g5w-firmware.service
-e94392bc37c4e8d4942f22be5d687a36c968c5e89444717f5e7a08e4bbef9e3711fe995f68f8aa6eb1a087ea41f908075d11e7b255d5d98a884824a469f8c452  mobis-g5w-firmware.initd
-5fa4d4b1354d6c48352cbe8858d0d21bdecf1d5ecf02462c35d48399da84ebb46b238d75717a142dd7f9664288e1954e034dba01bd8c0f2e0ea66add067fbe8b  nura-loop.sh
-50279148944804421eb7db5abdedd6f8cb106269fe6c31b3bd0044d3d523d6300e72b63eb495a7253593ac4ced0097e826b5822057156fb60c83e56b4edcd6cb  30-nura.modules
-"
+sha512sums=""

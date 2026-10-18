@@ -1,0 +1,41 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# micomd: answers the head unit's micom (the vehicle's microcontroller) over
+# its serial link, as Android's daemon of the same name did. The micom resets
+# the SoC as hung when its CPU-alive requests go unanswered (about 3.5 minutes
+# after the vendor Android is gone), so whatever runs on the unit has to
+# answer: the Boot Manager stage does itself, and this is the same code for the
+# system the stage boots into (device-mobis-g5w starts it from the initramfs).
+#
+# The source is a tarball of a commit of the container's bootmanager worktree,
+# made and pinned by `nura live` (git archive); the pin and checksum below are
+# filled in at build time and not committed.
+pkgname=micomd
+pkgver=0
+pkgrel=0
+pkgdesc="Answers the head unit's micom so it does not reset the SoC as hung"
+url="https://github.com/W-Floyd/bootmanager"
+arch="armv7"
+license="GPL-3.0-or-later"
+makedepends="go"
+# net: go fetches its modules. No check: the link needs the hardware.
+options="net !check"
+
+# Set by `nura live`.
+_commit=
+
+source="bootmanager-$_commit.tar.gz"
+builddir="$srcdir/bootmanager-$_commit/bootmanager"
+
+build() {
+	# pmbootstrap's persistent Go caches, kept across builds
+	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
+	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw"
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o micomd ./tools/micomd
+}
+
+package() {
+	install -Dm755 micomd "$pkgdir"/usr/bin/micomd
+}
+
+sha512sums=""
