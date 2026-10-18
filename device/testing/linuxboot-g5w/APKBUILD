@@ -1,0 +1,145 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# The LinuxBoot stage for the G5W-Android head unit (Telechips TCC8031, armv7):
+# u-root plus postmarketOS Boot Manager, as one initramfs. The vendor Android
+# runs NEMESIS.sh from a USB stick, which kexecs a kernel with this as its
+# initramfs. Same recipe as linuxboot-fogona, minus the kernel: here the kernel
+# is a separate payload and this package is the initramfs alone.
+#
+# Machine-specific files are not in the package: the SSH keys, android.cmdline,
+# the Wi-Fi modules and vendor firmware. `nura usb` appends them as a second
+# cpio, which the kernel unpacks over this one.
+#
+# u-root and the Boot Manager come as tarballs of the commits in the pins below,
+# made by `nura stage sync` from the container's worktrees (git archive), so
+# unpushed commits build too.
+pkgname=linuxboot-g5w
+pkgver=0
+pkgrel=0
+pkgdesc="LinuxBoot stage with postmarketOS Boot Manager for the G5W-Android head unit"
+url="https://github.com/W-Floyd/bootmanager"
+arch="armv7"
+license="GPL-2.0-only AND BSD-3-Clause AND GPL-3.0-or-later"
+depends=""
+makedepends="
+	bluez
+	bluez-btmon
+	bluez-deprecated
+	busybox-static
+	cargo
+	cryptsetup
+	dnsmasq
+	dosfstools
+	e2fsprogs
+	exfatprogs
+	f2fs-tools
+	file
+	go
+	hostapd
+	kexec-tools
+	rust
+	wpa_supplicant
+	xfsprogs
+	"
+# net: go and cargo fetch their modules and crates
+options="net !check !strip !tracedeps"
+
+# Set by `nura stage sync`.
+_uroot_commit=
+_bm_commit=
+
+source="
+	u-root-$_uroot_commit.tar.gz
+	bootmanager-$_bm_commit.tar.gz
+	uinit.sh
+	rekexec.sh
+	kexec.sh
+	kexec-prep.sh
+	bt-up.sh
+	passwd
+	group
+	kia-ev6.json
+	"
+builddir="$srcdir"
+
+_uroot="$srcdir/u-root-$_uroot_commit"
+_bm="$srcdir/bootmanager-$_bm_commit"
+_out="$srcdir/out"
+
+build() {
+	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
+	export CARGO_TARGET_DIR="$srcdir/cargo-target" CARGO_HOME="$srcdir/cargo"
+	unset RUSTC_WRAPPER
+	# abuild's opt-level=s makes the software-rendered UI about 1.7x slower.
+	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+	export GOARCH=arm GOARM=7 CGO_ENABLED=0
+
+	TAGS=dev UROOT="$_uroot" sh "$_bm"/build.sh "$_out"
+
+	# /opt/ap: static busybox, kexec, Wi-Fi AP and Bluetooth tools with their
+	# musl libraries, where uinit.sh expects them.
+	mkdir -p "$_out"/ap/bin "$_out"/ap/lib
+	for b in /usr/sbin/hostapd /usr/sbin/dnsmasq /sbin/wpa_supplicant /sbin/wpa_cli \
+		/usr/sbin/kexec /usr/bin/hciconfig /usr/bin/hcitool /usr/bin/btmon; do
+		cp -L "$b" "$_out"/ap/bin/
+		# musl ldd lists only the first binary it is given: one run each.
+		for l in $(ldd "$b" | awk '/=>/{print $3}'); do cp -L "$l" "$_out"/ap/lib/; done
+	done
+	cp -L /bin/busybox.static "$_out"/ap/bin/busybox
+	cp -L /lib/ld-musl-armhf.so.1 "$_out"/ap/lib/
+
+	# The disk tools behind Check and Repair, with their libraries (u-root
+	# finds those itself). The Boot Manager leaves out a feature whose tool is
+	# missing.
+	_toolfiles=
+	_pack() { # BINARY DESTDIR
+		local src= d
+		for d in /sbin /usr/sbin /bin /usr/bin; do
+			[ -f "$d/$1" ] && src="$d/$1" && break
+		done
+		[ -n "$src" ] || die "no $1 to pack"
+		_toolfiles="$_toolfiles -files $src:$2/$1"
+	}
+	for _b in e2fsck fsck.fat fsck.exfat fsck.f2fs xfs_repair; do
+		_pack $_b usr/libexec/fsck
+	done
+	_pack cryptsetup usr/libexec/cryptsetup
+
+	mkdir -p "$_out"/files
+	cp -L "$srcdir"/uinit.sh "$srcdir"/rekexec.sh "$srcdir"/kexec.sh \
+		"$srcdir"/kexec-prep.sh "$srcdir"/bt-up.sh "$srcdir"/passwd \
+		"$srcdir"/group "$srcdir"/kia-ev6.json "$_out"/files/
+	_web=
+	[ -d "$_out"/web ] && _web="-files $_out/web:usr/share/bootmanager-web"
+
+	(cd "$_uroot" && GOWORK=off go build -o "$_out"/u-root-bin . &&
+		GOWORK="$_out"/go.work "$_out"/u-root-bin \
+			-o "$_out"/stage.cpio \
+			-uinitcmd="gosh /etc/uinit.sh" \
+			-tags dev \
+			-files "$_out/files/uinit.sh:etc/uinit.sh" \
+			-files "$_out/files/rekexec.sh:etc/rekexec.sh" \
+			-files "$_out/files/kexec.sh:etc/kexec.sh" \
+			-files "$_out/files/kexec-prep.sh:etc/kexec-prep.sh" \
+			-files "$_out/files/bt-up.sh:etc/bt-up.sh" \
+			-files "$_out/files/passwd:etc/passwd" \
+			-files "$_out/files/group:etc/group" \
+			-files "$_out/files/kia-ev6.json:etc/bootmanager/kia-ev6.json" \
+			-files "$_out/bootmanager-ui:bin/bootmanager-ui" \
+			-files "$_out/ap/bin:opt/ap/bin" \
+			-files "$_out/ap/lib/ld-musl-armhf.so.1:lib/ld-musl-armhf.so.1" \
+			-files "$_out/ap/lib:opt/ap/lib" \
+			$_web $_toolfiles \
+			core boot cmds/exp/fdtdump "$_bm"/bootmanager "$_bm"/bootmanager/tools/micomd)
+	# A dangling link in the initramfs leaves the stage at a bare shell
+	cpio -itv < "$_out"/stage.cpio | grep -e ' etc/.* -> /' &&
+		die "initramfs links to a build path"
+	gzip -9 -f -k "$_out"/stage.cpio
+}
+
+package() {
+	install -Dm644 "$_out"/stage.cpio.gz \
+		"$pkgdir"/usr/share/$pkgname/stage.cpio.gz
+}
+
+sha512sums=""
