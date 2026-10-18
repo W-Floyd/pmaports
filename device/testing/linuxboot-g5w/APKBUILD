@@ -61,6 +61,7 @@ source="
 	passwd
 	group
 	kia-ev6.json
+	evdev-musl-time64.patch.txt
 	"
 builddir="$srcdir"
 
@@ -75,6 +76,14 @@ build() {
 	# abuild's opt-level=s makes the software-rendered UI about 1.7x slower.
 	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 	export GOARCH=arm GOARM=7 CGO_ENABLED=0
+
+	# evdev 0.13.2 predates musl 1.2.3's 64-bit time on 32-bit targets, which
+	# Alpine's rustc turns on (libc_unstable_musl_v1_2_3): input_event has
+	# input_event_sec/usec, not time. Carry the fix until evdev has one.
+	(cd "$_bm"/bootmanager-ui && cargo fetch --locked)
+	_evdev=$(echo "$CARGO_HOME"/registry/src/*/evdev-0.13.2)
+	[ -d "$_evdev" ] || die "evdev is not 0.13.2: refresh evdev-musl-time64.patch.txt"
+	patch -Np1 -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt
 
 	TAGS=dev UROOT="$_uroot" sh "$_bm"/build.sh "$_out"
 

@@ -1,0 +1,146 @@
+diff -ru a/src/event_variants.rs b/src/event_variants.rs
+--- a/src/event_variants.rs	2006-07-23 20:21:28
++++ b/src/event_variants.rs	2026-10-17 21:44:28
+@@ -119,24 +119,24 @@
+     ($name:ty, $evdev_type:path, $kind:path) => {
+         impl $name {
+             pub fn new($kind(code): $kind, value: i32) -> Self {
+-                let raw = input_event {
+-                    time: libc::timeval {
++                let raw = crate::mk_input_event(
++                    libc::timeval {
+                         tv_sec: 0,
+                         tv_usec: 0,
+                     },
+-                    type_: $evdev_type.0,
++                    $evdev_type.0,
+                     code,
+                     value,
+-                };
++                );
+                 Self::from_raw(raw)
+             }
+             pub fn new_now($kind(code): $kind, value: i32) -> Self {
+-                let raw = input_event {
+-                    time: systime_to_timeval(&SystemTime::now()),
+-                    type_: $evdev_type.0,
++                let raw = crate::mk_input_event(
++                    systime_to_timeval(&SystemTime::now()),
++                    $evdev_type.0,
+                     code,
+                     value,
+-                };
++                );
+                 Self::from_raw(raw)
+             }
+             pub fn destructure(&self) -> ($kind, i32) {
+diff -ru a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs	2006-07-23 20:21:28
++++ b/src/lib.rs	2026-10-17 21:44:28
+@@ -373,7 +373,7 @@
+     /// Returns the timestamp associated with the event.
+     #[inline]
+     pub fn timestamp(&self) -> SystemTime {
+-        timeval_to_systime(&self.0.time)
++        timeval_to_systime(&input_event_time(&self.0))
+     }
+ 
+     /// Returns the type of event this describes, e.g. Key, Switch, etc.
+@@ -414,15 +414,15 @@
+ 
+     /// Create a new InputEvent. Only really useful for emitting events on virtual devices.
+     pub fn new(type_: u16, code: u16, value: i32) -> Self {
+-        let raw = input_event {
+-            time: libc::timeval {
++        let raw = mk_input_event(
++            libc::timeval {
+                 tv_sec: 0,
+                 tv_usec: 0,
+             },
+             type_,
+             code,
+             value,
+-        };
++        );
+         Self(raw)
+     }
+ 
+@@ -433,12 +433,7 @@
+     /// the kernel will update `input_event.time` when it emits the events to any programs reading
+     /// the event "file".
+     pub fn new_now(type_: u16, code: u16, value: i32) -> Self {
+-        let raw = input_event {
+-            time: systime_to_timeval(&SystemTime::now()),
+-            type_,
+-            code,
+-            value,
+-        };
++        let raw = mk_input_event(systime_to_timeval(&SystemTime::now()), type_, code, value);
+         Self(raw)
+     }
+ }
+@@ -492,6 +487,42 @@
+             .next()
+             .map(|(pb, dev)| (pb, Device::from_raw_device(dev)))
+     }
++}
++
++/// musl >= 1.2.3 on 32-bit targets (Alpine's rustc sets `libc_unstable_musl_v1_2_3`)
++/// has libc's `input_event` carry `input_event_sec`/`input_event_usec` instead of `time`.
++#[cfg(all(target_env = "musl", target_pointer_width = "32", libc_unstable_musl_v1_2_3))]
++pub(crate) fn mk_input_event(time: libc::timeval, type_: u16, code: u16, value: i32) -> input_event {
++    input_event {
++        input_event_sec: time.tv_sec as _,
++        input_event_usec: time.tv_usec as _,
++        type_,
++        code,
++        value,
++    }
++}
++
++#[cfg(not(all(target_env = "musl", target_pointer_width = "32", libc_unstable_musl_v1_2_3)))]
++pub(crate) fn mk_input_event(time: libc::timeval, type_: u16, code: u16, value: i32) -> input_event {
++    input_event {
++        time,
++        type_,
++        code,
++        value,
++    }
++}
++
++#[cfg(all(target_env = "musl", target_pointer_width = "32", libc_unstable_musl_v1_2_3))]
++fn input_event_time(ev: &input_event) -> libc::timeval {
++    libc::timeval {
++        tv_sec: ev.input_event_sec as _,
++        tv_usec: ev.input_event_usec as _,
++    }
++}
++
++#[cfg(not(all(target_env = "musl", target_pointer_width = "32", libc_unstable_musl_v1_2_3)))]
++fn input_event_time(ev: &input_event) -> libc::timeval {
++    ev.time
+ }
+ 
+ /// A safe Rust version of clock_gettime against CLOCK_REALTIME
+diff -ru a/src/sync_stream.rs b/src/sync_stream.rs
+--- a/src/sync_stream.rs	2006-07-23 20:21:28
++++ b/src/sync_stream.rs	2026-10-17 21:44:28
+@@ -495,12 +495,12 @@
+                     let value = get_value(vals, typ);
+                     if prev != value {
+                         $start.0 = typ.0 + 1;
+-                        let ev = InputEvent::from(input_event {
+-                            time: *$time,
+-                            type_: EventType::$evtype.0,
+-                            code: typ.0,
+-                            value: value as _,
+-                        });
++                        let ev = InputEvent::from(crate::mk_input_event(
++                            *$time,
++                            EventType::$evtype.0,
++                            typ.0,
++                            value as _,
++                        ));
+                         return Some(ev);
+                     }
+                 }
