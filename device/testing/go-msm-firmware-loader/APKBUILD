@@ -1,0 +1,43 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# go-msm-firmware-loader: a static Go port of postmarketOS's msm-firmware-loader.
+# It mounts a device's firmware partitions read-only (never writing, not even a
+# journal replay), links their blobs into one directory under the names the
+# drivers ask for, and points firmware_class.path at it. `--vendor generic`
+# takes any device's rules from the command line (--rule FIND=DST).
+#
+# Only the command is packaged. The Boot Manager stage has the same code built
+# in as a subcommand (linuxboot-g5w), so it does not need this.
+#
+# The source is a tarball of a commit of the container's worktree, made and
+# pinned by `nura fwloader` (git archive); the pin and checksum below are filled
+# in at build time and not committed.
+pkgname=go-msm-firmware-loader
+pkgver=0
+pkgrel=0
+pkgdesc="Static Go port of msm-firmware-loader: link firmware from device partitions"
+url="https://github.com/W-Floyd/go-msm-firmware-loader"
+arch="all"
+license="MIT"
+makedepends="go"
+# net: go fetches its modules. No check: the tests need mounts.
+options="net !check"
+
+# Set by `nura fwloader`.
+_commit=
+
+source="$pkgname-$_commit.tar.gz"
+builddir="$srcdir/$pkgname-$_commit"
+
+build() {
+	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+		-o msm-firmware-loader ./cmd/msm-firmware-loader
+}
+
+package() {
+	install -Dm755 msm-firmware-loader "$pkgdir"/usr/bin/msm-firmware-loader
+	install -Dm644 LICENSE "$pkgdir"/usr/share/licenses/$pkgname/LICENSE
+}
+
+sha512sums=""
