@@ -41,13 +41,9 @@ cmdline=$($BB cat /proc/cmdline)
 # A try with another command line: put it in /tmp/rekexec.cmdline (RAM, gone
 # with this boot, so a bad one costs one reset and is never the next boot's).
 [ -s /tmp/rekexec.cmdline ] && cmdline=$($BB head -n 1 /tmp/rekexec.cmdline)
-# --image-size: this kernel is linked at TEXT_OFFSET 0x208000 (multi_v7's
-# ARCH_MESON), but kexec-tools assumes 0x8000 and puts the initrd right after
-# its estimate of the kernel (0x22bd2000). The zImage decompressor then copies
-# itself (12.6 MB) to just past the real kernel end (0x22213704), over the
-# first 2.5 MB of the initrd: "Unable to mount root fs". 0x3200000 puts the
-# initrd at 0x23208000, clear of it.
-out=$($AP/bin/kexec -l /tmp/rekexec/zImage --dtb=/tmp/rekexec/tcc803x-avn.dtb --initrd=/tmp/rekexec/"$initrd" --image-size=0x3200000 --append="$cmdline" 2>&1) || { echo "kexec -l: $out"; exit 1; }
+# kexec.sh sizes the kernel for --image-size from a probe load of it (why: see
+# there), so a bigger kernel never puts the initrd under the relocated decompressor.
+out=$($BB ash /etc/kexec.sh -l /tmp/rekexec/zImage --dtb=/tmp/rekexec/tcc803x-avn.dtb --initrd=/tmp/rekexec/"$initrd" --append="$cmdline" 2>&1) || { echo "kexec -l: $out"; exit 1; }
 $BB sync
 
 # Quiet what can touch RAM on its own before the jump (kexec-prep.sh).
