@@ -1,0 +1,40 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# hippod: reads the head unit's GNSS receiver (a Trimble module on the vendor's
+# ttyTCC3, 115200) in its own binary protocol, "hippo", and writes NMEA for gpsd.
+# gpsd has no driver for it. The stock gps HAL does the same translation.
+#
+# It lives in its own module, github.com/W-Floyd/go-hippod. Built from the
+# module proxy at _ver, as micomd is: nothing is built until _ver names a
+# published version (go list -m github.com/W-Floyd/go-hippod@main shows it).
+pkgname=hippod
+pkgver=0
+pkgrel=0
+pkgdesc="Reads the head unit's GNSS receiver (hippo protocol) and writes NMEA for gpsd"
+url="https://github.com/W-Floyd/go-hippod"
+arch="armv7"
+license="GPL-3.0-or-later"
+makedepends="go"
+# net: go fetches the module. No check: the link needs the hardware.
+options="net !check"
+
+# Set to a published pseudo-version before building.
+_ver=
+
+source=""
+builddir="$srcdir"
+
+build() {
+	[ -n "$_ver" ] || die "_ver is empty: pin a published go-hippod version"
+	# pmbootstrap's persistent Go caches, kept across builds
+	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
+	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw" GOBIN="$builddir"
+	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" \
+		github.com/W-Floyd/go-hippod/cmd/hippod@$_ver
+}
+
+package() {
+	install -Dm755 hippod "$pkgdir"/usr/bin/hippod
+}
+
+sha512sums=""
