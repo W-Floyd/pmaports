@@ -16,7 +16,7 @@ pkgrel=0
 pkgdesc="Answers the head unit's micom so it does not reset the SoC as hung"
 url="https://github.com/W-Floyd/go-micomd"
 arch="armv7"
-license="GPL-3.0-or-later"
+license="MIT"
 makedepends="go"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"

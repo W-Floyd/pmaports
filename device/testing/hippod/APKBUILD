@@ -13,7 +13,7 @@ pkgrel=0
 pkgdesc="Reads the head unit's GNSS receiver (hippo protocol) and writes NMEA for gpsd"
 url="https://github.com/W-Floyd/go-hippod"
 arch="armv7"
-license="GPL-3.0-or-later"
+license="MIT"
 makedepends="go"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
