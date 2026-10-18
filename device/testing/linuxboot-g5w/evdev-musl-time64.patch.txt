@@ -124,7 +124,7 @@ diff -ru a/src/lib.rs b/src/lib.rs
  /// A safe Rust version of clock_gettime against CLOCK_REALTIME
 diff -ru a/src/sync_stream.rs b/src/sync_stream.rs
 --- a/src/sync_stream.rs	2006-07-23 20:21:28
-+++ b/src/sync_stream.rs	2026-10-17 21:44:28
++++ b/src/sync_stream.rs	2026-10-17 22:07:13
 @@ -495,12 +495,12 @@
                      let value = get_value(vals, typ);
                      if prev != value {
@@ -144,3 +144,22 @@ diff -ru a/src/sync_stream.rs b/src/sync_stream.rs
                          return Some(ev);
                      }
                  }
+@@ -572,12 +572,12 @@
+                     |st| st.led_vals().unwrap(),
+                     |vals, led| vals.contains(led)
+                 );
+-                let ev = InputEvent::from(input_event {
+-                    time: *time,
+-                    type_: EventType::SYNCHRONIZATION.0,
+-                    code: SynchronizationCode::SYN_REPORT.0,
+-                    value: 0,
+-                });
++                let ev = InputEvent::from(crate::mk_input_event(
++                    *time,
++                    EventType::SYNCHRONIZATION.0,
++                    SynchronizationCode::SYN_REPORT.0,
++                    0,
++                ));
+                 *state = None;
+                 return Some(ev);
+             }
