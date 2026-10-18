@@ -1,0 +1,15 @@
+[Unit]
+Description=gpsd on the GNSS receiver's NMEA (hippod's pty)
+After=mobis-g5w-hippod.service
+Wants=mobis-g5w-hippod.service
+ConditionPathExists=/dev/ttyAMA3
+
+[Service]
+# -n: read the device without waiting for a client. /run/gps0 is the pty hippod
+# writes NMEA to.
+ExecStart=/usr/sbin/gpsd -N -n /run/gps0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
