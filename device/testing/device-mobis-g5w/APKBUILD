@@ -8,12 +8,14 @@ url="https://postmarketos.org"
 license="MIT"
 arch="armv7"
 options="!check !archcheck"
+# rsync is for testing only: updates to the running unit over Wi-Fi (usb/sync -w).
 depends="
 	go-msm-firmware-loader
 	linux-tcc803x
 	micomd
 	postmarketos-base
 	postmarketos-mkinitfs
+	rsync
 "
 makedepends="devicepkg-dev"
 subpackages="

@@ -58,7 +58,9 @@ while true; do
 	# Whole disks (a stick without a partition table) and their partitions.
 	for dev in /dev/sd[a-z][0-9]* /dev/sd[a-z]; do
 		[ -b "$dev" ] || continue
-		mount -t vfat -o rw,flush,noatime "$dev" "$STICK" 2>/dev/null || continue
+		# uid/gid: the system's first user owns the stick's files, so updates to it
+		# over Wi-Fi (rsync as that user) need no root.
+		mount -t vfat -o rw,flush,noatime,uid=10000,gid=10000 "$dev" "$STICK" 2>/dev/null || continue
 		if [ -f "$STICK/$IMAGE" ]; then
 			# The unit has no console to read and may reset before the system is
 			# up, so this stage's kernel log goes to the stick while it works.
