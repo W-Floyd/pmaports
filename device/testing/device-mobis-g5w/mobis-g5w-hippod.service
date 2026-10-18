@@ -1,0 +1,15 @@
+[Unit]
+Description=Read the head unit's GNSS receiver and write NMEA
+After=local-fs.target
+# The UART exists once the kernel has the GNSS node enabled.
+ConditionPathExists=/dev/ttyAMA3
+
+[Service]
+# Only reads. /run/gps0 is a pty gpsd opens like a serial port;
+# `hippod -attach /run/hippod.sock` watches the decoded frames.
+ExecStart=/usr/bin/hippod -dev /dev/ttyAMA3 -out /run/gps0 -tap /run/hippod.sock
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

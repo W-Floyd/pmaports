@@ -11,6 +11,7 @@ options="!check !archcheck"
 # rsync is for testing only: updates to the running unit over Wi-Fi (usb/sync -w).
 depends="
 	go-msm-firmware-loader
+	hippod
 	linux-tcc803x
 	micomd
 	postmarketos-base
@@ -32,6 +33,7 @@ source="
 	30-nura.modules
 	40-micomd.files
 	mobis-g5w-micomd.service
+	mobis-g5w-hippod.service
 	mobis-g5w-logs.sh
 	mobis-g5w-logs.service
 	mobis-g5w-modprobe.conf
@@ -77,10 +79,12 @@ systemd() {
 		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-firmware.service
 	install -Dm644 "$srcdir"/mobis-g5w-micomd.service \
 		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-micomd.service
+	install -Dm644 "$srcdir"/mobis-g5w-hippod.service \
+		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-hippod.service
 	install -Dm644 "$srcdir"/mobis-g5w-logs.service \
 		"$subpkgdir"/usr/lib/systemd/system/mobis-g5w-logs.service
 	mkdir -p "$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants
-	for u in mobis-g5w-firmware mobis-g5w-micomd mobis-g5w-logs; do
+	for u in mobis-g5w-firmware mobis-g5w-micomd mobis-g5w-hippod mobis-g5w-logs; do
 		ln -s ../$u.service \
 			"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/$u.service
 	done
