@@ -1,0 +1,43 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# kexec-tools from git, for 32-bit ARM. Release 2.0.32 assumes a zImage's
+# TEXT_OFFSET is 0x8000 and so places the initramfs where the decompressor
+# relocates itself on a kernel linked elsewhere; git reads the real value from
+# the kernel's tag table (kernels since 5.10). Drop this for the first release
+# that has it (Alpine's package is otherwise this, minus its x86-only patch).
+pkgname=kexec-tools
+_commit=0fd0d8e9ea975696fdc05ad267a65f3efd415612
+pkgver=2.0.32_git20260911
+pkgrel=0
+pkgdesc="Directly boot into a new kernel over a currently running one"
+url="https://git.kernel.org/pub/scm/utils/kernel/kexec/kexec-tools.git/"
+arch="armv7"
+license="GPL-2.0-only"
+makedepends="autoconf automake zlib-dev zstd-dev xz-dev linux-headers"
+subpackages="$pkgname-doc"
+source="kexec-tools-$_commit.tar.gz::https://git.kernel.org/pub/scm/utils/kernel/kexec/kexec-tools.git/snapshot/kexec-tools-$_commit.tar.gz"
+builddir="$srcdir/kexec-tools-$_commit"
+options="!check"
+
+build() {
+	./bootstrap
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--localstatedir=/var \
+		--with-zlib \
+		--with-zstd \
+		--with-lzma
+	make
+}
+
+package() {
+	make DESTDIR="$pkgdir" install
+}
+
+sha512sums="
+9c8b5387b618fa9f276582b9895a47da86b5ba8f393c76b82cba785ef2f3d3b8bae5527fbe1f13cc5e73ace6046ec9e3f701600e1bf2c5547bee9dc0cf689c1d  kexec-tools-0fd0d8e9ea975696fdc05ad267a65f3efd415612.tar.gz
+"
