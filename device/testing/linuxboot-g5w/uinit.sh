@@ -59,7 +59,7 @@ say "usb stick after ${n}s: $($BB ls /dev | $BB grep '^sd' | $BB tr '\n' ' ')"
 
 # The Boot Manager needs no network: start it at once. Its remote UI listens
 # on localhost, reached through the sshd below (ssh -L 8080:127.0.0.1:8080).
-bootmanager -panel /etc/bootmanager/kia-ev6.json -hold /tmp/hold -scan-retries 3 -android-boot boot -android-dtb dtb -android-cmdline /etc/bootmanager/android.cmdline -kexec "/opt/ap/bin/busybox ash /etc/kexec.sh" -kexec-prep "/opt/ap/bin/busybox ash /etc/kexec-prep.sh" -micom /dev/ttyAMA2 -micom-log /tmp/micomd.log -micom-tap /tmp/micomd.sock-dev-once /tmp/dev-once -logs /tmp/stage.log,/tmp/wifi-dmesg.log,/tmp/wifi-tools.log,/tmp/hostapd.log,/tmp/wpa_supplicant.log,/tmp/micomd.log,/tmp/fwl.log -rekexec "/opt/ap/bin/busybox ash /etc/rekexec.sh" &
+bootmanager -panel /etc/bootmanager/kia-ev6.json -hold /tmp/hold -scan-retries 3 -android-boot boot -android-dtb dtb -android-cmdline /etc/bootmanager/android.cmdline -kexec "/opt/ap/bin/busybox ash /etc/kexec.sh" -kexec-prep "/opt/ap/bin/busybox ash /etc/kexec-prep.sh" -micom /dev/ttyAMA2 -micom-log /tmp/micomd.log -micom-tap /tmp/micomd.sock -dev-once /tmp/dev-once -logs /tmp/stage.log,/tmp/wifi-dmesg.log,/tmp/wifi-tools.log,/tmp/hostapd.log,/tmp/wpa_supplicant.log,/tmp/micomd.log,/tmp/fwl.log -rekexec "/opt/ap/bin/busybox ash /etc/rekexec.sh" &
 
 # The Wi-Fi access point (or joining a network) is the Boot Manager's, as is
 # sshd (its ssh service, same keys). A wired interface (USB Ethernet dongle
