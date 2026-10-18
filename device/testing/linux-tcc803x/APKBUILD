@@ -9,11 +9,11 @@
 # pinned by `nura kernel apk` (git archive), so unpushed commits build; the pin
 # and checksum below are filled in at build time and not committed.
 maintainer="William Floyd <git@notmy.space>"
-_flavor="g5w"
+_flavor="tcc803x"
 pkgname=linux-$_flavor
 pkgver=7.3.0_rc7
 pkgrel=0
-pkgdesc="Mainline kernel for the G5W-Android head unit (TCC8031)"
+pkgdesc="Mainline kernel for the Telechips TCC803x (G5W-Android head unit)"
 arch="armv7"
 _carch="arm"
 url="https://github.com/W-Floyd/linux"
@@ -39,15 +39,15 @@ _commit=
 
 source="
 	$pkgname-$_commit.tar.gz
-	g5w.config
+	tcc803x.config
 "
 builddir="$srcdir/$pkgname-$_commit"
 
 prepare() {
 	default_prepare
 	make ARCH="$_carch" multi_v7_defconfig
-	# Each line of g5w.config is CONFIG_X=y.
-	for o in $(sed -n 's/^CONFIG_\([A-Z0-9_]*\)=y$/\1/p' "$srcdir"/g5w.config); do
+	# Each line of tcc803x.config is CONFIG_X=y.
+	for o in $(sed -n 's/^CONFIG_\([A-Z0-9_]*\)=y$/\1/p' "$srcdir"/tcc803x.config); do
 		./scripts/config -e "$o"
 	done
 	make ARCH="$_carch" olddefconfig
