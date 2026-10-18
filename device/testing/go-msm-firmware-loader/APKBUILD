@@ -30,7 +30,9 @@ source="$pkgname-$_commit.tar.gz"
 builddir="$srcdir/$pkgname-$_commit"
 
 build() {
-	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
+	# pmbootstrap's persistent Go caches, kept across builds
+	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
+	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw"
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
 		-o msm-firmware-loader ./cmd/msm-firmware-loader
 }

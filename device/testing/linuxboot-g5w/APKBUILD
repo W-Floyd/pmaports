@@ -58,6 +58,9 @@ _uroot="$srcdir/u-root-$_uroot_commit"
 _bm="$srcdir/bootmanager-$_bm_commit"
 _out="$srcdir/out"
 _sys="$srcdir/sysroot"
+# A directory that outlives the build chroot and that the build user can write:
+# pmbootstrap's sccache mount, which nothing here uses (RUSTC_WRAPPER is unset).
+_cache=/mnt/pmbootstrap/sccache
 
 # Where an armv7 binary of the sysroot is.
 _find() {
@@ -88,12 +91,16 @@ _libs() {
 }
 
 build() {
-	export GOPATH="$srcdir/go" GOCACHE="$srcdir/go-cache" GOFLAGS="-modcacherw"
+	# pmbootstrap's persistent Go caches, kept across builds
+	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
+	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw"
 
 	# The armv7 userland, from the armv7 repositories (and the local one, for
 	# bootmanager-ui), into a sysroot. Scripts are not run: they would be armv7.
 	local alpine=http://cdn.alpinelinux.org/alpine/edge
-	apk add --usermode --root "$_sys" --initdb --arch armv7 --no-scripts --no-cache \
+	mkdir -p "$_cache"/apk-armv7
+	apk add --usermode --root "$_sys" --initdb --arch armv7 --no-scripts \
+		--cache-dir "$_cache"/apk-armv7 \
 		--allow-untrusted --repositories-file /dev/null \
 		-X $alpine/main -X $alpine/community -X /mnt/pmbootstrap/packages/edge \
 		busybox-static kexec-tools hostapd dnsmasq wpa_supplicant \

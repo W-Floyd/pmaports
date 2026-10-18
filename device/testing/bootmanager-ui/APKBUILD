@@ -50,15 +50,22 @@ source="
 builddir="$srcdir/bootmanager-$_bm_commit/bootmanager-ui"
 
 build() {
-	export RUSTUP_HOME="$srcdir/rustup" CARGO_HOME="$srcdir/cargo"
-	export CARGO_TARGET_DIR="$srcdir/cargo-target"
+	# The toolchain, the crates and the compiled dependencies are kept across
+	# builds, in a directory that outlives the build chroot and that the build
+	# user can write: pmbootstrap's sccache mount, which nothing here uses
+	# (RUSTC_WRAPPER is unset). Only this crate is compiled again.
+	_cache=/mnt/pmbootstrap/sccache/bootmanager-ui
+	mkdir -p "$_cache"
+	export RUSTUP_HOME="$_cache/rustup" CARGO_HOME="$_cache/cargo"
+	export CARGO_TARGET_DIR="$_cache/target"
 	# pmbootstrap points this at sccache without installing it
 	unset RUSTC_WRAPPER
 	# abuild's opt-level=s makes the software-rendered UI about 1.7x slower.
 	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
 
-	rustup-init -y --no-modify-path --profile minimal \
-		--default-host $_host --default-toolchain $_rust --target $_target
+	[ -d "$RUSTUP_HOME/toolchains/$_rust-$_host/lib/rustlib/$_target" ] ||
+		rustup-init -y --no-modify-path --profile minimal \
+			--default-host $_host --default-toolchain $_rust --target $_target
 	export PATH="$CARGO_HOME/bin:$(rustc --print sysroot)/lib/rustlib/$_host/bin:$PATH"
 
 	# musl has no libdl; the crates that ask for it get an empty one.
@@ -71,7 +78,9 @@ build() {
 		cargo fetch --locked
 		_evdev=$(echo "$CARGO_HOME"/registry/src/*/evdev-0.13.2)
 		[ -d "$_evdev" ] || die "evdev is not 0.13.2: refresh evdev-musl-time64.patch.txt"
-		patch -Np1 -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt
+		# the registry is kept across builds: patch it once
+		patch -Rsp1 --dry-run -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt >/dev/null 2>&1 ||
+			patch -Np1 -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt
 	fi
 
 	# An explicit --target keeps RUSTFLAGS off build scripts and proc-macros,
