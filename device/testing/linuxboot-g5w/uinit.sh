@@ -194,6 +194,10 @@ usblog_body() {
 	done
 	printf '== dmesg: loop, file systems, usb storage\n'
 	$BB dmesg | $BB grep -iE 'loop|EXT4-fs|FAT-fs|usb-storage|sd[a-z]' | $BB tail -n 60
+	# All of it, last: the early lines (a driver's probe, the CPU/clock
+	# measurement) are what a hang or a reset leaves nothing else of.
+	printf '== dmesg: full\n'
+	$BB dmesg 2>&1
 }
 
 # Leaves the stage's log on the USB stick (the one holding NEMESIS.sh), for
