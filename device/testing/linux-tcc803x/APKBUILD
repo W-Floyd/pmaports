@@ -45,9 +45,12 @@ builddir="$srcdir/$pkgname-$_commit"
 prepare() {
 	default_prepare
 	make ARCH="$_carch" multi_v7_defconfig
-	# Each line of tcc803x.config is CONFIG_X=y.
+	# Each line of tcc803x.config is CONFIG_X=y or "# CONFIG_X is not set".
 	for o in $(sed -n 's/^CONFIG_\([A-Z0-9_]*\)=y$/\1/p' "$srcdir"/tcc803x.config); do
 		./scripts/config -e "$o"
+	done
+	for o in $(sed -n 's/^# CONFIG_\([A-Z0-9_]*\) is not set$/\1/p' "$srcdir"/tcc803x.config); do
+		./scripts/config -d "$o"
 	done
 	make ARCH="$_carch" olddefconfig
 }
