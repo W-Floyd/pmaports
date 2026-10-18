@@ -3,7 +3,7 @@ Description=Answer the head unit's micom
 After=local-fs.target
 
 [Service]
-# The initramfs hook starts one and leaves it running: only start one if it is gone.
+# Only one: skip if a micomd is already running.
 ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
 ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0
 # A starved or killed daemon makes the micom reset the unit: keep it off the
