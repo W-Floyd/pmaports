@@ -41,8 +41,6 @@ cmdline=$($BB cat /proc/cmdline)
 # A try with another command line: put it in /tmp/rekexec.cmdline (RAM, gone
 # with this boot, so a bad one costs one reset and is never the next boot's).
 [ -s /tmp/rekexec.cmdline ] && cmdline=$($BB head -n 1 /tmp/rekexec.cmdline)
-# kexec.sh sizes the kernel for --image-size from a probe load of it (why: see
-# there), so a bigger kernel never puts the initrd under the relocated decompressor.
 out=$($BB ash /etc/kexec.sh -l /tmp/rekexec/zImage --dtb=/tmp/rekexec/tcc803x-avn.dtb --initrd=/tmp/rekexec/"$initrd" --append="$cmdline" 2>&1) || { echo "kexec -l: $out"; exit 1; }
 $BB sync
 
