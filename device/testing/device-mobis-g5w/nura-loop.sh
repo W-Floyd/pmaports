@@ -74,6 +74,17 @@ while true; do
 		[ -b "$dev" ] || continue
 		mount -t vfat -o rw,flush,noatime "$dev" "$STICK" 2>/dev/null || continue
 		if [ -f "$STICK/$IMAGE" ]; then
+			# The unit has no console to read and may reset before the system is
+			# up, so this stage's kernel log goes to the stick while it works.
+			# nura-stick.sh (the last step before the switch) stops it.
+			mkdir -p "$STICK/nura-logs" 2>/dev/null
+			(
+				while :; do
+					dmesg > "$STICK/nura-logs/initramfs-dmesg.txt" 2>&1
+					sleep 5
+				done
+			) >/dev/null 2>&1 &
+			echo $! > /run/nura-dmesg.pid
 			grow_image "$STICK/$IMAGE"
 			# -P: scan the partitions; --direct-io is what pmOS uses for its own
 			# images, and not every file system takes it.

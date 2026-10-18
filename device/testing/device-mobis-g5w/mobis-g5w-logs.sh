@@ -10,6 +10,17 @@ while :; do
 	dmesg > "$D/dmesg.txt" 2>&1
 	systemctl --failed --no-pager > "$D/failed.txt" 2>&1
 	ls -l /dev/dri /dev/fb0 /dev/input > "$D/devices.txt" 2>&1
+	{
+		# What the OS thinks the panel is: the Boot Manager's UI draws it right
+		# as 1920x720, 32 bpp, stride 7680.
+		for f in /sys/class/graphics/fb0/*; do
+			[ -f "$f" ] && printf '%s: %s\n' "$f" "$(cat "$f" 2>&1 | head -c 200)"
+		done
+		for f in /sys/class/drm/*/modes /sys/class/drm/*/status; do
+			[ -f "$f" ] && printf '%s: %s\n' "$f" "$(cat "$f" 2>&1 | head -c 200)"
+		done
+		ps -eo pid,etime,args 2>&1 | grep -E 'gnome-shell|gdm|mutter|plymouth|splash|Xwayland|weston|cage|sway' | grep -v grep
+	} > "$D/display.txt" 2>&1
 	sync
 	sleep 20
 done
