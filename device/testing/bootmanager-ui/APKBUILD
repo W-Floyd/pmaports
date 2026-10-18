@@ -1,0 +1,89 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# The Boot Manager's UI (Rust + Slint, a static binary), for LinuxBoot stages
+# (linuxboot-g5w packs it into the initramfs).
+#
+# CROSS-COMPILED WITH UPSTREAM RUST, FOR NOW. Alpine's armv7 Rust lags its
+# aarch64 one (1.99.0-r2 against 1.99.1-r0, `nura stage rust-status`), and
+# pmbootstrap's crossdirect refuses a rustc that differs between the native and
+# armv7 chroots, which left only a qemu build: the UI crate alone takes about
+# 20 minutes there, one thread. So this is `pmb:cross-native`: the native
+# aarch64 chroot cross-compiles with a rustup toolchain (upstream's
+# armv7-unknown-linux-musleabihf std, linked with rust-lld; nothing from
+# the armv7 chroot is needed, the binary is static).
+#
+# TO GO BACK TO ALPINE'S RUST once its armv7 package catches up
+# (`nura stage rust-status` says "match"):
+#   * drop `pmb:cross-native` from options (pmbootstrap then uses crossdirect);
+#   * makedepends: rustup -> cargo rust;
+#   * build(): delete the rustup block, keep the `cargo build`, and use
+#     --target armv7-alpine-linux-musleabihf with no linker override;
+#   * Alpine's rustc builds libc with 64-bit time on 32-bit musl, which evdev
+#     0.13.2 does not handle: keep the patch (build() applies it by itself when
+#     it sees that cfg).
+#
+# The source is a tarball of a commit of the container's bootmanager worktree,
+# made and pinned by `nura stage build` (git archive); the pin and checksums are
+# filled in at build time and not committed.
+pkgname=bootmanager-ui
+pkgver=0
+pkgrel=0
+pkgdesc="postmarketOS Boot Manager's UI, a static binary for LinuxBoot stages"
+url="https://github.com/W-Floyd/bootmanager"
+arch="armv7"
+license="GPL-3.0-or-later"
+makedepends="rustup"
+# net: rustup and cargo fetch the toolchain and the crates
+options="net !check !strip !tracedeps pmb:cross-native"
+
+_rust=1.99.1
+_target=armv7-unknown-linux-musleabihf
+_host=aarch64-unknown-linux-musl
+
+# Set by `nura stage build`.
+_bm_commit=
+
+source="
+	bootmanager-$_bm_commit.tar.gz
+	evdev-musl-time64.patch.txt
+	"
+builddir="$srcdir/bootmanager-$_bm_commit/bootmanager-ui"
+
+build() {
+	export RUSTUP_HOME="$srcdir/rustup" CARGO_HOME="$srcdir/cargo"
+	export CARGO_TARGET_DIR="$srcdir/cargo-target"
+	# pmbootstrap points this at sccache without installing it
+	unset RUSTC_WRAPPER
+	# abuild's opt-level=s makes the software-rendered UI about 1.7x slower.
+	export CARGO_PROFILE_RELEASE_OPT_LEVEL=3
+
+	rustup-init -y --no-modify-path --profile minimal \
+		--default-host $_host --default-toolchain $_rust --target $_target
+	export PATH="$CARGO_HOME/bin:$(rustc --print sysroot)/lib/rustlib/$_host/bin:$PATH"
+
+	# musl has no libdl; the crates that ask for it get an empty one.
+	_sc="$(rustc --print sysroot)/lib/rustlib/$_target/lib/self-contained"
+	[ -f "$_sc/libdl.a" ] || ar rc "$_sc/libdl.a"
+
+	# A rustc whose libc has 64-bit time on 32-bit musl (Alpine's) breaks evdev
+	# 0.13.2; upstream's does not, so this is a no-op until we go back.
+	if rustc --print cfg | grep -q libc_unstable_musl_v1_2_3; then
+		cargo fetch --locked
+		_evdev=$(echo "$CARGO_HOME"/registry/src/*/evdev-0.13.2)
+		[ -d "$_evdev" ] || die "evdev is not 0.13.2: refresh evdev-musl-time64.patch.txt"
+		patch -Np1 -d "$_evdev" < "$srcdir"/evdev-musl-time64.patch.txt
+	fi
+
+	# An explicit --target keeps RUSTFLAGS off build scripts and proc-macros,
+	# which run on the host and cannot be static.
+	CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=rust-lld \
+	RUSTFLAGS="-C target-feature=+crt-static" \
+		cargo build --release --locked --target $_target
+}
+
+package() {
+	install -Dm755 "$CARGO_TARGET_DIR"/$_target/release/bootmanager-ui \
+		"$pkgdir"/usr/bin/bootmanager-ui
+}
+
+sha512sums=""
