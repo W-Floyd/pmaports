@@ -5,7 +5,8 @@ After=local-fs.target
 [Service]
 # Only one: skip if a micomd is already running.
 ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
-ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0
+# -tap: `micomd -attach /run/micomd.sock` watches the live frames.
+ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock
 # A starved or killed daemon makes the micom reset the unit: keep it off the
 # OOM killer's list, ahead of the desktop for CPU, and restarted when it dies.
 OOMScoreAdjust=-900
