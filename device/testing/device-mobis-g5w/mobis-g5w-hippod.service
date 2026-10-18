@@ -8,6 +8,8 @@ ConditionPathExists=/dev/ttyAMA3
 # Only reads. /run/gps0 is a pty gpsd opens like a serial port;
 # `hippod -attach /run/hippod.sock` watches the decoded frames.
 ExecStart=/usr/bin/hippod -dev /dev/ttyAMA3 -out /run/gps0 -tap /run/hippod.sock
+# The tap is root's (mode 0660): hand it to wheel, so the admin user can attach.
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/hippod.sock ] && exec chgrp wheel /run/hippod.sock; sleep 0.5; done'
 Restart=on-failure
 RestartSec=5
 
