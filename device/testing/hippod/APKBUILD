@@ -5,8 +5,8 @@
 # gpsd has no driver for it. The stock gps HAL does the same translation.
 #
 # It lives in its own module, github.com/W-Floyd/go-hippod. Built from the
-# module proxy at _ver, as micomd is: nothing is built until _ver names a
-# published version (go list -m github.com/W-Floyd/go-hippod@main shows it).
+# module proxy at _ver, as micomd is (go list -m github.com/W-Floyd/go-hippod@main
+# shows the latest).
 pkgname=hippod
 pkgver=0
 pkgrel=0
@@ -18,14 +18,12 @@ makedepends="go"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
-# Set to a published pseudo-version before building.
-_ver=
+_ver=v0.0.0-20261018215520-2b59097ac356
 
 source=""
 builddir="$srcdir"
 
 build() {
-	[ -n "$_ver" ] || die "_ver is empty: pin a published go-hippod version"
 	# pmbootstrap's persistent Go caches, kept across builds
 	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
 	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw" GOBIN="$builddir"
