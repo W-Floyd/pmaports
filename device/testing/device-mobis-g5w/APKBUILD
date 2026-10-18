@@ -32,6 +32,7 @@ source="
 	mobis-g5w-micomd.service
 	mobis-g5w-logs.sh
 	mobis-g5w-logs.service
+	mobis-g5w-modprobe.conf
 	"
 
 build() {
@@ -57,6 +58,8 @@ package() {
 		"$pkgdir"/usr/share/mkinitfs/hooks-cleanup/nura-stick.sh
 	install -Dm755 "$srcdir"/mobis-g5w-logs.sh \
 		"$pkgdir"/usr/libexec/mobis-g5w-logs
+	install -Dm644 "$srcdir"/mobis-g5w-modprobe.conf \
+		"$pkgdir"/usr/lib/modprobe.d/mobis-g5w.conf
 }
 
 openrc() {
