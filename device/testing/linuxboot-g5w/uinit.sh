@@ -46,6 +46,17 @@ done
 emmc_ro
 say "eMMC set read-only: $($BB ls /dev | $BB grep mmcblk | $BB tr '\n' ' ')"
 
+# The stick (it carries this stage, and the images the Boot Manager lists)
+# enumerates a second or two after the eMMC. The Boot Manager scans once at
+# start, and again only if that finds nothing, so it must not start before the
+# stick is there: a scan without it saw only the eMMC and listed no image.
+n=0
+while [ ! -b /dev/sda1 ] && [ ! -b /dev/sdb1 ] && [ "$n" -lt 20 ]; do
+	sleep 1
+	n=$((n + 1))
+done
+say "usb stick after ${n}s: $($BB ls /dev | $BB grep '^sd' | $BB tr '\n' ' ')"
+
 # The Boot Manager needs no network: start it at once. Its remote UI listens
 # on localhost, reached through the sshd below (ssh -L 8080:127.0.0.1:8080).
 bootmanager -panel /etc/bootmanager/kia-ev6.json -hold /tmp/hold -scan-retries 3 -android-boot boot -android-dtb dtb -android-cmdline /etc/bootmanager/android.cmdline -kexec "/opt/ap/bin/busybox ash /etc/kexec.sh" -kexec-prep "/opt/ap/bin/busybox ash /etc/kexec-prep.sh" -micom /dev/ttyAMA2 -micom-log /tmp/micomd.log -dev-once /tmp/dev-once -logs /tmp/stage.log,/tmp/wifi-dmesg.log,/tmp/wifi-tools.log,/tmp/hostapd.log,/tmp/wpa_supplicant.log,/tmp/micomd.log,/tmp/fwl.log -rekexec "/opt/ap/bin/busybox ash /etc/rekexec.sh" &
