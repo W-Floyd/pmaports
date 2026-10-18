@@ -5,33 +5,33 @@
 # the SoC as hung when its CPU-alive requests go unanswered (about 3.5 minutes
 # after the vendor Android is gone), so whatever runs on the unit has to
 # answer: the Boot Manager stage does itself, and this is the same code for the
-# system the stage boots into (device-mobis-g5w starts it from the initramfs).
+# system the stage boots into (device-mobis-g5w starts it as a service).
 #
-# The source is a tarball of a commit of the container's bootmanager worktree,
-# made and pinned by `nura live` (git archive); the pin and checksum below are
-# filled in at build time and not committed.
+# It lives in its own module, github.com/W-Floyd/go-micomd. Built from the
+# module proxy at the version the Boot Manager requires (bootmanager/go.mod), so
+# the stage and the system answer the micom with the same code. Bump _ver with it.
 pkgname=micomd
 pkgver=0
 pkgrel=0
 pkgdesc="Answers the head unit's micom so it does not reset the SoC as hung"
-url="https://github.com/W-Floyd/bootmanager"
+url="https://github.com/W-Floyd/go-micomd"
 arch="armv7"
 license="GPL-3.0-or-later"
 makedepends="go"
-# net: go fetches its modules. No check: the link needs the hardware.
+# net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
-# Set by `nura live`.
-_commit=
+_ver=v0.0.0-20261018142429-b74864ab6c22
 
-source="bootmanager-$_commit.tar.gz"
-builddir="$srcdir/bootmanager-$_commit/bootmanager"
+source=""
+builddir="$srcdir"
 
 build() {
 	# pmbootstrap's persistent Go caches, kept across builds
 	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
-	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw"
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o micomd ./tools/micomd
+	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw" GOBIN="$builddir"
+	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" \
+		github.com/W-Floyd/go-micomd/cmd/micomd@$_ver
 }
 
 package() {

@@ -163,7 +163,7 @@ build() {
 			-files "$_out/ap/lib:opt/ap/lib" \
 			-files "$_out/fsck/usr:usr" \
 			-files "$_out/fsck/lib:lib" \
-			core boot cmds/exp/fdtdump "$_bm"/bootmanager "$_bm"/bootmanager/tools/micomd)
+			core boot cmds/exp/fdtdump "$_bm"/bootmanager github.com/W-Floyd/go-micomd/cmd/micomd)
 	# A dangling link in the initramfs leaves the stage at a bare shell
 	cpio -itv < "$_out"/stage.cpio | grep -e ' etc/.* -> /' &&
 		die "initramfs links to a build path"
