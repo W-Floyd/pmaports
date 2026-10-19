@@ -28,6 +28,20 @@ fi
 
 BB=/opt/ap/bin/busybox
 
+# One-off: probe whether this unit's EL3 firmware implements the standard
+# ARM_SIP_SVC_EXE_STATE_SWITCH SMC (see go-unbrick/kia-ev6 64BIT.md). Logged
+# through say(), so it rides the existing usblog() mechanism back onto the
+# stick as stagelog.txt - no separate stick mount, no laptop at the car.
+# Also visible in usblog_body's full "dmesg: full" dump either way. Remove
+# this block once answered.
+if [ -e /assets/stage/sip_state_switch_probe.ko ]; then
+	$BB insmod /assets/stage/sip_state_switch_probe.ko 2>/tmp/sip-probe.err
+	say "sip-probe dmesg: $($BB dmesg 2>/dev/null | $BB grep sip_state_switch_probe | $BB tr '\n' '|')"
+	if [ -s /tmp/sip-probe.err ]; then
+		say "sip-probe insmod stderr: $(cat /tmp/sip-probe.err)"
+	fi
+fi
+
 # The stock eMMC is never written: every block device of it is set read-only
 # in the kernel (BLKROSET) before anything mounts it, so even a mount that
 # would replay a journal fails instead of writing. Waits a bounded time for
