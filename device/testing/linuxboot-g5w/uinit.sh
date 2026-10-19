@@ -34,11 +34,14 @@ BB=/opt/ap/bin/busybox
 # stick as stagelog.txt - no separate stick mount, no laptop at the car.
 # Also visible in usblog_body's full "dmesg: full" dump either way. Remove
 # this block once answered.
-if [ -e /assets/stage/sip_state_switch_probe.ko ]; then
-	$BB insmod /assets/stage/sip_state_switch_probe.ko 2>/tmp/sip-probe.err
-	say "sip-probe dmesg: $($BB dmesg 2>/dev/null | $BB grep sip_state_switch_probe | $BB tr '\n' '|')"
+sip_probe_result=""
+if [ -e /lib/modules/sip_state_switch_probe.ko ]; then
+	$BB insmod /lib/modules/sip_state_switch_probe.ko 2>/tmp/sip-probe.err
+	sip_probe_result="$($BB dmesg 2>/dev/null | $BB grep sip_state_switch_probe | $BB tail -n 2 | $BB tr '\n' '|')"
+	say "sip-probe dmesg: $sip_probe_result"
 	if [ -s /tmp/sip-probe.err ]; then
 		say "sip-probe insmod stderr: $(cat /tmp/sip-probe.err)"
+		sip_probe_result="insmod failed: $(cat /tmp/sip-probe.err)"
 	fi
 fi
 
@@ -74,6 +77,10 @@ say "usb stick after ${n}s: $($BB ls /dev | $BB grep '^sd' | $BB tr '\n' ' ')"
 # The Boot Manager needs no network: start it at once. Its remote UI listens
 # on localhost, reached through the sshd below (ssh -L 8080:127.0.0.1:8080).
 bootmanager -panel /etc/bootmanager/kia-ev6.json -hold /tmp/hold -scan-retries 3 -android-boot boot -android-dtb dtb -android-cmdline /etc/bootmanager/android.cmdline -kexec "/opt/ap/bin/busybox ash /etc/kexec.sh" -kexec-prep "/opt/ap/bin/busybox ash /etc/kexec-prep.sh" -micom /dev/ttyAMA2 -micom-log /tmp/micomd.log -micom-tap /tmp/micomd.sock -dev-once /tmp/dev-once -logs /tmp/stage.log,/tmp/wifi-dmesg.log,/tmp/wifi-tools.log,/tmp/hostapd.log,/tmp/wpa_supplicant.log,/tmp/micomd.log,/tmp/fwl.log -rekexec "/opt/ap/bin/busybox ash /etc/rekexec.sh" &
+
+if [ -n "$sip_probe_result" ]; then
+	bootmanager -send toast -send-args "{\"message\":\"sip-probe: ${sip_probe_result}\"}" 2>/tmp/sip-probe-toast.err &
+fi
 
 # The Wi-Fi access point (or joining a network) is the Boot Manager's, as is
 # sshd (its ssh service, same keys). A wired interface (USB Ethernet dongle
