@@ -5,8 +5,12 @@ After=local-fs.target
 [Service]
 # Only one: skip if a micomd is already running.
 ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
-# -tap: `micomd -attach /run/micomd.sock` watches the live frames.
-ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock
+# -tap: `micomd -attach /run/micomd.sock` watches the live frames. -keyfunc and
+# -keymap turn the key frames into a virtual keyboard (Linux key numbers: 115 volume
+# up, 114 down, 113 mute, 163 next, 165 previous): the steering wheel's volume
+# keys (2.6, 2.7, push 2.5), the volume knob (9.1 up and down, push 0.1) and the
+# front Seek (0.2) and Track (0.3) keys.
+ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock -keyfunc 0x8701 -keymap 2.6=115,2.7=114,2.5=113,9.1.up=115,9.1.down=114,0.1=113,0.2=165,0.3=163
 # The tap is root's (mode 0660): hand it to wheel, so the admin user can attach.
 ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/micomd.sock ] && exec chgrp wheel /run/micomd.sock; sleep 0.5; done'
 # A starved or killed daemon makes the micom reset the unit: keep it off the
