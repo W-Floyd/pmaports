@@ -10,9 +10,17 @@ ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
 # up, 114 down, 113 mute, 163 next, 165 previous): the steering wheel's volume
 # keys (2.6, 2.7, push 2.5), the volume knob (9.1 up and down, push 0.1) and the
 # front Seek (0.2) and Track (0.3) keys.
-ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock -keyfunc 0x8701 -keymap 2.6=115,2.7=114,2.5=113,9.1.up=115,9.1.down=114,0.1=113,0.2=165,0.3=163
-# The tap is root's (mode 0660): hand it to wheel, so the admin user can attach.
-ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/micomd.sock ] && exec chgrp wheel /run/micomd.sock; sleep 0.5; done'
+#
+# -ctl and -allow: `micomd -send /run/micomd.ctl 'ff 85 ...'` sends one of the frames
+# listed here, byte for byte, and nothing else; nothing is sent unless asked. They are
+# the audio frames worked out from the stock system (sndId 0x85, rcvId 2): the
+# boot-mode request, audio mode USB and MUSIC, main volume 0, 5 and 10, AV mute
+# release and set, AMP mute release and set. To bring up the amp, in order, with a
+# pause (-gap): boot-mode request, mode, volume 5, AV release.
+ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock -keyfunc 0x8701 -keymap 2.6=115,2.7=114,2.5=113,9.1.up=115,9.1.down=114,0.1=113,0.2=165,0.3=163 -ctl /run/micomd.ctl -allow ff8a01010101000174 -allow ff85020102010003090070 -allow ff8502010201000312006b -allow ff85020102030002007a -allow ff85020102030002057f -allow ff850201020300020a70 -allow ff850201020b0003020071 -allow ff850201020b0003020170 -allow ff850201020b0003010072 -allow ff850201020b0003010173
+# The tap and the control socket are root's (mode 0660): hand them to wheel, so the
+# admin user can attach and send.
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/micomd.sock ] && [ -S /run/micomd.ctl ] && exec chgrp wheel /run/micomd.sock /run/micomd.ctl; sleep 0.5; done'
 # A starved or killed daemon makes the micom reset the unit: keep it off the
 # OOM killer's list, ahead of the desktop for CPU, and restarted when it dies.
 OOMScoreAdjust=-900
