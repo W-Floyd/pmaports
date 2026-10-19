@@ -21,7 +21,7 @@ makedepends="go"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
-_ver=v0.0.0-20261019001004-f7b045b5c64a
+_ver=v0.0.0-20261019001511-eae47aed78cb
 
 source=""
 builddir="$srcdir"
