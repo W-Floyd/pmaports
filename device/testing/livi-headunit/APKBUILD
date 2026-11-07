@@ -131,6 +131,16 @@ package() {
 	[ ! -d "$builddir"/../assets/displays ] ||
 		cp -r "$builddir"/../assets/displays "$_d"/resources/
 
+	# livi-core starts the helper (USB, Bluetooth, Wi-Fi) with `sudo -n -E` and
+	# stops a stale one with `sudo -n pkill`. Upstream's installer grants the
+	# helper's copy in the user's home; this is the packaged, root-owned binary.
+	install -Dm440 /dev/stdin "$pkgdir"/etc/sudoers.d/99-livi-headunit <<-'EOF'
+	Cmnd_Alias LIVI_HELPER = /usr/lib/livi/resources/driver/livi-helperd
+	Cmnd_Alias LIVI_HELPER_STOP = /usr/bin/pkill -TERM -f driver/livi-helperd$, /usr/bin/pkill -KILL -f driver/livi-helperd$
+	%wheel ALL=(root) NOPASSWD: SETENV: LIVI_HELPER
+	%wheel ALL=(root) NOPASSWD: LIVI_HELPER_STOP
+	EOF
+
 	install -Dm755 /dev/stdin "$pkgdir"/usr/bin/livi <<-'EOF'
 	#!/bin/sh
 	[ "$1" = telemetry ] && exec /usr/lib/livi/resources/core/livi-core "$@"
