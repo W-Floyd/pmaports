@@ -34,6 +34,7 @@ depends="
 	gst-plugins-good
 	hostapd
 	iw
+	pipewire-spa-bluez
 	pulseaudio-utils
 	util-linux-misc
 	"
