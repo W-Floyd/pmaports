@@ -1,0 +1,152 @@
+# Maintainer: William Floyd <git@notmy.space>
+#
+# LIVI: an Android Auto / CarPlay head unit (Rust + Slint, GStreamer), from the
+# fork's g5w branch (github.com/W-Floyd/LIVI), which carries the musl fixes.
+#
+# Cross-compiled with upstream Rust (pmb:cross-native2): LIVI pins a beta
+# toolchain (rust-toolchain.toml) that Alpine does not ship, and a qemu build of
+# ~630 crates is out of reach. The native chroot compiles; the armv7 buildroot,
+# with makedepends_host in it, is the sysroot at /mnt/sysroot.
+#
+# Upstream's armv7 musl std and LIVI's libc crate still use 32-bit time_t. They
+# link against Alpine's 64-bit-time musl through its compatibility symbols, so
+# the binaries are good until 2038.
+#
+# The source is a tarball of a commit of the container's livi worktree, made and
+# pinned by aport.sh (git archive); the pin and checksums are filled in at build
+# time and not committed.
+pkgname=livi
+pkgver=0
+pkgrel=0
+pkgdesc="Android Auto and CarPlay head unit"
+url="https://github.com/W-Floyd/LIVI"
+arch="armv7"
+license="GPL-3.0-or-later"
+# What LIVI starts or loads at run time; tracedeps finds the linked libraries.
+depends="
+	avahi
+	avahi-tools
+	bluez
+	dnsmasq
+	gst-plugins-bad
+	gst-plugins-base
+	gst-plugins-good
+	hostapd
+	iw
+	pulseaudio-utils
+	util-linux-misc
+	"
+makedepends_build="rustup cmake clang-dev pkgconf perl linux-headers"
+makedepends_host="
+	eudev-dev
+	fontconfig-dev
+	gst-plugins-base-dev
+	gstreamer-dev
+	libdrm-dev
+	libinput-dev
+	libseat-dev
+	libxkbcommon-dev
+	mesa-dev
+	openssl-dev
+	wayland-dev
+	xz-dev
+	"
+# net: rustup and cargo fetch the toolchain and the crates
+options="net !check !strip pmb:cross-native2"
+
+_target=armv7-unknown-linux-musleabihf
+_host=aarch64-unknown-linux-musl
+
+# Set by aport.sh.
+_livi_commit=
+
+source="livi-$_livi_commit.tar.gz"
+builddir="$srcdir/livi-$_livi_commit/native"
+
+build() {
+	# Toolchain, crates and compiled dependencies outlive the build chroot in
+	# pmbootstrap's sccache mount (RUSTC_WRAPPER is unset, sccache is not used).
+	_cache=/mnt/pmbootstrap/sccache/livi
+	mkdir -p "$_cache"
+	export RUSTUP_HOME="$_cache/rustup" CARGO_HOME="$_cache/cargo"
+	export CARGO_TARGET_DIR="$_cache/target"
+	export PATH="$CARGO_HOME/bin:$PATH"
+	unset RUSTC_WRAPPER
+	# pmbootstrap's and abuild's flags would reach the host build scripts too,
+	# and changing them reruns every cc build script (aws-lc among them).
+	unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+
+	[ -x "$CARGO_HOME/bin/rustup" ] ||
+		rustup-init -y --no-modify-path --profile minimal \
+			--default-host $_host --default-toolchain none
+	# the channel comes from rust-toolchain.toml
+	rustup toolchain install --profile minimal
+	rustup target add $_target
+	# musl has no libdl; the crates that ask for it get an empty one.
+	_sc="$(rustc --print sysroot)/lib/rustlib/$_target/lib/self-contained"
+	[ ! -d "$_sc" ] || [ -f "$_sc/libdl.a" ] || ar rc "$_sc/libdl.a"
+
+	_x=armv7-alpine-linux-musleabihf
+	_t=armv7_unknown_linux_musleabihf
+	_s=$CBUILDROOT
+	export CC_$_t=$_x-gcc CXX_$_t=$_x-g++ AR_$_t=$_x-ar
+	export CFLAGS_$_t="--sysroot=$_s" CXXFLAGS_$_t="--sysroot=$_s"
+	export BINDGEN_EXTRA_CLANG_ARGS_$_t="--sysroot=$_s --target=$_x"
+	export PKG_CONFIG_ALLOW_CROSS=1
+	export PKG_CONFIG_SYSROOT_DIR_$_t=$_s
+	export PKG_CONFIG_LIBDIR_$_t=$_s/usr/lib/pkgconfig:$_s/usr/share/pkgconfig
+	export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=$_x-gcc
+	export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C target-feature=-crt-static -C link-arg=--sysroot=$_s -C link-arg=-Wl,-rpath-link=$_s/usr/lib"
+
+	# What upstream's xtask sets.
+	export LIVI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+	export LIVI_BUILD=g5w LIVI_BUILD_DATE=$(date -u +%F) LIVI_BUILD_RUN=0
+	export LIVI_BUILD_SHA=$_livi_commit
+
+	cargo build --release --locked --target $_target \
+		-p livi-gst-host -p livi-helperd -p livi-core -p livi-ui -p livi-compositor
+}
+
+package() {
+	# Upstream's AppImage layout: livi-core finds the rest from LIVI_RESOURCES.
+	_r="$CARGO_TARGET_DIR"/$_target/release
+	_d="$pkgdir"/usr/lib/livi
+	install -Dm755 "$_r"/LIVI "$_d"/livi-ui
+	install -Dm755 "$_r"/livi-core "$_d"/resources/core/livi-core
+	install -Dm755 "$_r"/livi-helperd "$_d"/resources/driver/livi-helperd
+	install -Dm755 "$_r"/livi-gst-host "$_d"/resources/gst-host/livi-gst-host
+	install -Dm755 "$_r"/livi-compositor "$_d"/resources/compositor/livi-compositor
+
+	_a="$builddir"/../assets/linux
+	for f in 99-LIVI.rules.template 99-LIVI-helper.sudoers.template \
+		livi-wifi-ap.service.template 99-LIVI-wifi-ap.sudoers.template \
+		livi-kiosk.service.template; do
+		install -Dm644 "$_a"/$f "$_d"/resources/$f
+	done
+	install -Dm755 "$_a"/livi-touch-filter "$_d"/resources/livi-touch-filter
+	install -Dm644 "$builddir"/../LICENSE "$builddir"/../NOTICE -t "$_d"/resources/
+	[ ! -d "$builddir"/../assets/displays ] ||
+		cp -r "$builddir"/../assets/displays "$_d"/resources/
+
+	install -Dm755 /dev/stdin "$pkgdir"/usr/bin/livi <<-'EOF'
+	#!/bin/sh
+	[ "$1" = telemetry ] && exec /usr/lib/livi/resources/core/livi-core "$@"
+	export LIVI_RESOURCES=/usr/lib/livi/resources
+	exec /usr/lib/livi/resources/core/livi-core
+	EOF
+	install -Dm644 "$builddir"/../assets/icons/linux/livi.png \
+		"$pkgdir"/usr/share/icons/hicolor/512x512/apps/livi.png
+	install -Dm644 /dev/stdin "$pkgdir"/usr/share/applications/dev.f-io.livi.desktop <<-'EOF'
+	[Desktop Entry]
+	Name=LIVI
+	Comment=Android Auto and CarPlay
+	Exec=livi
+	Icon=livi
+	Type=Application
+	Terminal=false
+	Categories=Utility;
+	StartupWMClass=LIVI
+	EOF
+}
+
+sha512sums=""
