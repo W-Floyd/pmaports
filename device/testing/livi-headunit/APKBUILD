@@ -15,7 +15,8 @@
 # The source is a tarball of a commit of the container's livi worktree, made and
 # pinned by aport.sh (git archive); the pin and checksums are filled in at build
 # time and not committed.
-pkgname=livi
+# Not "livi": Alpine's livi is an unrelated video player.
+pkgname=livi-headunit
 pkgver=0
 pkgrel=0
 pkgdesc="Android Auto and CarPlay head unit"
@@ -75,6 +76,8 @@ build() {
 	# pmbootstrap's and abuild's flags would reach the host build scripts too,
 	# and changing them reruns every cc build script (aws-lc among them).
 	unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+	# abuild's RUSTFLAGS would override the per-target ones below.
+	unset RUSTFLAGS
 
 	[ -x "$CARGO_HOME/bin/rustup" ] ||
 		rustup-init -y --no-modify-path --profile minimal \
