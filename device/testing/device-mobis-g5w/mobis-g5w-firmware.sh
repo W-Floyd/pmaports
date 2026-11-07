@@ -27,3 +27,12 @@ done
 # again now that the image is there. coda checks only the header's "MX".
 modprobe -r coda_vpu 2>/dev/null
 modprobe coda_vpu 2>/dev/null || true
+
+# hci_bcm (built in) set the Bluetooth controller up at boot without its patch
+# RAM, and on the ROM firmware the setup fails (LE Read Maximum Data Length)
+# and no adapter registers. Bind it again: it now downloads the patch.
+bt=/sys/bus/serial/drivers/hci_uart_bcm
+if [ -e "$bt/serial0-0" ]; then
+	echo serial0-0 > "$bt/unbind"
+	echo serial0-0 > "$bt/bind"
+fi
