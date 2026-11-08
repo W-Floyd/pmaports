@@ -135,7 +135,11 @@ package() {
 	# livi-core starts the helper (USB, Bluetooth, Wi-Fi) with `sudo -n -E` and
 	# stops a stale one with `sudo -n pkill`. Upstream's installer grants the
 	# helper's copy in the user's home; this is the packaged, root-owned binary.
+	# The helper's settings come in LIVI_* variables (and DEBUG), and sudo-rs
+	# ignores -E: without env_keep the helper runs on its defaults (wlan0, the
+	# SSID "LIVI") and tells the phone the wrong access point.
 	install -Dm440 /dev/stdin "$pkgdir"/etc/sudoers.d/99-livi-headunit <<-'EOF'
+	Defaults env_keep += "LIVI_* DEBUG"
 	Cmnd_Alias LIVI_HELPER = /usr/lib/livi/resources/driver/livi-helperd
 	Cmnd_Alias LIVI_HELPER_STOP = /usr/bin/pkill -TERM -f driver/livi-helperd$, /usr/bin/pkill -KILL -f driver/livi-helperd$
 	%wheel ALL=(root) NOPASSWD: SETENV: LIVI_HELPER
