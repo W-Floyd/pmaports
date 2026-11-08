@@ -144,6 +144,37 @@ package() {
 	Cmnd_Alias LIVI_HELPER_STOP = /usr/bin/pkill -TERM -f driver/livi-helperd$, /usr/bin/pkill -KILL -f driver/livi-helperd$
 	%wheel ALL=(root) NOPASSWD: SETENV: LIVI_HELPER
 	%wheel ALL=(root) NOPASSWD: LIVI_HELPER_STOP
+	%wheel ALL=(root) NOPASSWD: /usr/local/lib/livi/livi-set-time.sh *
+	EOF
+
+	# The clock and time zone from the GNSS fix: livi-core runs it with sudo at
+	# this path (gnss/mod.rs SET_TIME_HELPER). Upstream's installer writes it
+	# in bash (scripts/install/common.sh); this is the same contract in sh.
+	install -Dm755 /dev/stdin "$pkgdir"/usr/local/lib/livi/livi-set-time.sh <<-'EOF'
+	#!/bin/sh
+	# Sets the system clock from a unix timestamp, or the time zone.
+	usage() {
+		echo "usage: livi-set-time.sh <unix-seconds> | tz <zone>" >&2
+		exit 2
+	}
+	case "$1" in
+	tz)
+		zone=$2
+		case "$zone" in
+		"" | *[!A-Za-z0-9_+/-]*) usage ;;
+		esac
+		[ "${#zone}" -le 64 ] || usage
+		[ -f "/usr/share/zoneinfo/$zone" ] || { echo "unknown timezone: $zone" >&2; exit 3; }
+		exec timedatectl set-timezone "$zone"
+		;;
+	*)
+		case "$1" in
+		"" | *[!0-9]*) usage ;;
+		esac
+		[ "${#1}" -ge 10 ] && [ "${#1}" -le 11 ] || usage
+		exec date -u -s "@$1" >/dev/null
+		;;
+	esac
 	EOF
 
 	install -Dm755 /dev/stdin "$pkgdir"/usr/bin/livi <<-'EOF'
