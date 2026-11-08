@@ -9,7 +9,19 @@ for d in /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]*; do
 	[ -b "$d" ] && blockdev --setro "$d"
 done
 
+# The FM1288 voice processor's tuning, one file per group of modes, searched as
+# the stock audio HAL does: this car's directory (ro.product.name), then ext/,
+# common/ and etc/ itself. The first found wins: later rules keep it.
+set --
+for f in HF ICC VR FAC Siri VM VRRear; do
+	dst=fm1288/kia-ev6/$(echo "$f" | tr 'A-Z' 'a-z').bin
+	for d in etc/tunning_param/wp_daudioplus_cvev_us etc/tunning_param/ext etc/tunning_param/common etc; do
+		set -- "$@" --rule "$d/${f}_DSP_PARAM.bin=$dst"
+	done
+done
+
 msm-firmware-loader --vendor generic --partitions system --copy --base /run/fwl \
+	"$@" \
 	--rule fw_bcmdhd.bin=brcm/brcmfmac4359-sdio.bin \
 	--rule bcmdhd.cal=brcm/brcmfmac4359-sdio.txt \
 	--rule 89359.clm_blob=brcm/brcmfmac4359-sdio.clm_blob \
