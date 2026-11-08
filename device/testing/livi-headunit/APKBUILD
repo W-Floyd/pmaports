@@ -77,8 +77,6 @@ build() {
 	# pmbootstrap's and abuild's flags would reach the host build scripts too,
 	# and changing them reruns every cc build script (aws-lc among them).
 	unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
-	# abuild's RUSTFLAGS would override the per-target ones below.
-	unset RUSTFLAGS
 
 	[ -x "$CARGO_HOME/bin/rustup" ] ||
 		rustup-init -y --no-modify-path --profile minimal \
@@ -100,7 +98,10 @@ build() {
 	export PKG_CONFIG_SYSROOT_DIR_$_t=$_s
 	export PKG_CONFIG_LIBDIR_$_t=$_s/usr/lib/pkgconfig:$_s/usr/share/pkgconfig
 	export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=$_x-gcc
-	export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C target-feature=-crt-static -C link-arg=--sysroot=$_s -C link-arg=-Wl,-rpath-link=$_s/usr/lib"
+	# As RUSTFLAGS, not the per-target variable: abuild exports RUSTFLAGS, and
+	# a RUSTFLAGS that is set outranks per-target rustflags. With --target it
+	# reaches only the target's crates, not the host's build scripts.
+	export RUSTFLAGS="-C target-feature=-crt-static -C link-arg=--sysroot=$_s -C link-arg=-Wl,-rpath-link=$_s/usr/lib"
 
 	# What upstream's xtask sets.
 	export LIVI_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
