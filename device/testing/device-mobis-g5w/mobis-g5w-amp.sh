@@ -10,7 +10,10 @@
 #   it), which the sound server takes for hardware volume, so the samples stay
 #   at full scale; each change becomes a 0x0203 frame at that level. Every
 #   session starts at START, not at what the last one left: the amp's ceiling
-#   is too loud to come back to unasked.
+#   is too loud to come back to unasked. So nothing is ever stored: each frame
+#   carries bit 7, stock's "don't keep as the last volume", as stock sets for
+#   a volume it won't return to (MicomAudioService.sendVolumeCommandToMicom).
+#   Without it the micom writes its EEPROM on every step of the knob.
 C=/run/micomd.ctl
 SET=ff850201020b0003020170
 MODE=ff850201020100030e0077
@@ -27,8 +30,12 @@ level() {
 	echo "${v:-$FALLBACK}"
 }
 
-# 0x0203, header 85 02 01 02; the checksum works out to 0x7a XOR the level.
-volume_frame() { printf 'ff85020102030002%02x%02x' "$1" $((0x7a ^ $1)); }
+# 0x0203, header 85 02 01 02, payload level | 0x80; the checksum works out to
+# 0x7a XOR the payload.
+volume_frame() {
+	b=$(($1 | 0x80))
+	printf 'ff85020102030002%02x%02x' $b $((0x7a ^ b))
+}
 
 # micomd's control socket and the sound server come up around login.
 until [ -S "$C" ] && pactl info >/dev/null 2>&1; do sleep 1; done

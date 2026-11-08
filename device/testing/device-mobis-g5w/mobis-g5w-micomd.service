@@ -21,12 +21,14 @@ ExecCondition=/bin/sh -c '! pidof micomd >/dev/null'
 # Captured from the stock micomd (strace on its UART) on a source switch:
 # 0x020B AV mute set (020b...020170), 0x0201 mode (0e Media, 01 Radio), 0x0203
 # volume, then 0.2-1.3 s later 0x0238 AV mute release (0238...020042), which the
-# micom answers with 0x820B. Volume: the pattern ff85020102030002[00-23].. (0x0203,
-# levels 0-35, the checksum following from the level); stock sat at 22-31, its
-# maximum unknown, so 35 is the cap (the I2S card's control).
+# micom answers with 0x820B. Volume: the pattern ff85020102030002[80-a3].. (0x0203,
+# levels 0-35 with bit 7 set, the checksum following from the level); stock sat at
+# 22-31, its maximum unknown, so 35 is the cap (the I2S card's control). Bit 7 is
+# stock's "don't keep as the last volume": without it every step writes the
+# micom's EEPROM.
 # Inferred statically, never seen sent: the boot-mode request, modes 09 and 12,
 # the 0x020B releases and the AMP mute frames.
-ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock -keyfunc 0x8701 -keymap 2.2=163,2.3=165,2.4=164,2.5=113,2.6=115,2.7=114,2.8=183,2.10=184,2.11=191,0.1=113,0.2=165,0.3=163,0.4=187,0.5=102,1.1=28,1.2=188,1.3=189,1.4=190,1.5=192,8.1.up=185,8.1.down=186,9.1.up=115,9.1.down=114 -ctl /run/micomd.ctl -allow ff8a01010101000174 -allow ff85020102010003090070 -allow ff8502010201000312006b -allow ff850201020b0003020071 -allow ff850201020b0003020170 -allow ff850201020b0003010072 -allow ff850201020b0003010173 -allow ff85020102380003020042 -allow ff850201020100030e0077 -allow ff85020102010003010078 -allow ff85020102030002[00-23]..
+ExecStart=/usr/bin/micomd -dev /dev/ttyAMA2 -stats 0 -tap /run/micomd.sock -keyfunc 0x8701 -keymap 2.2=163,2.3=165,2.4=164,2.5=113,2.6=115,2.7=114,2.8=183,2.10=184,2.11=191,0.1=113,0.2=165,0.3=163,0.4=187,0.5=102,1.1=28,1.2=188,1.3=189,1.4=190,1.5=192,8.1.up=185,8.1.down=186,9.1.up=115,9.1.down=114 -ctl /run/micomd.ctl -allow ff8a01010101000174 -allow ff85020102010003090070 -allow ff8502010201000312006b -allow ff850201020b0003020071 -allow ff850201020b0003020170 -allow ff850201020b0003010072 -allow ff850201020b0003010173 -allow ff85020102380003020042 -allow ff850201020100030e0077 -allow ff85020102010003010078 -allow ff85020102030002[80-a3]..
 # The tap and the control socket are root's (mode 0660): hand them to wheel, so the
 # admin user can attach and send.
 ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do [ -S /run/micomd.sock ] && [ -S /run/micomd.ctl ] && exec chgrp wheel /run/micomd.sock /run/micomd.ctl; sleep 0.5; done'
