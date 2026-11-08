@@ -45,6 +45,7 @@ source="
 	mobis-g5w-modprobe.conf
 	mobis-g5w-amp.sh
 	mobis-g5w-amp.service
+	mobis-g5w-tmp.conf
 	50-mobis-g5w.json
 	50_mobis-g5w.gschema.override
 	monitors.xml
@@ -119,6 +120,12 @@ systemd() {
 		ln -s ../$u.service \
 			"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/$u.service
 	done
+	# /tmp in RAM. The root file system is ext4 in an image file on the FAT USB
+	# stick: a large file written to /tmp there saturated the stick and stalled
+	# the desktop. postmarketos-base-systemd keeps tmp.mount off below 2 GB of
+	# RAM (10-min-memory.conf); this unit has 1.6 GB, with zram swap behind it.
+	install -Dm644 "$srcdir"/mobis-g5w-tmp.conf \
+		"$subpkgdir"/usr/lib/systemd/system/tmp.mount.d/50-mobis-g5w.conf
 	# Per session: it follows that session's sound server.
 	install -Dm644 "$srcdir"/mobis-g5w-amp.service \
 		"$subpkgdir"/usr/lib/systemd/user/mobis-g5w-amp.service
