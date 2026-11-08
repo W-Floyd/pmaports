@@ -28,7 +28,8 @@ msm-firmware-loader --vendor generic --partitions system --copy --base /run/fwl 
 	--rule bcm4349.hcd=brcm/BCM4349B1.hcd \
 	--rule bcm4349.hcd=brcm/BCM.hcd \
 	--rule bcm4349.hcd_E0300=brcm/bcm4349.hcd_E0300 \
-	--rule 'vpu_lib.ko@bit_code_319=vpu/tcc803x/bit_code_319?prefix=4d580000000000000000000000000000'
+	--rule 'vpu_lib.ko@bit_code_319=vpu/tcc803x/bit_code_319?prefix=4d580000000000000000000000000000' \
+	--rule 'hevc_lib.ko@bit_code=vpu/tcc803x/hevc_bit_code'
 
 # The firmware's vendor glue (wcc) needs brcmfmac loaded first.
 for m in brcmutil brcmfmac brcmfmac-wcc; do
@@ -39,6 +40,9 @@ done
 # again now that the image is there. coda checks only the header's "MX".
 modprobe -r coda_vpu 2>/dev/null
 modprobe coda_vpu 2>/dev/null || true
+# The same for the Wave410 HEVC decoder (wave4). Its image has no header.
+modprobe -r wave4 2>/dev/null
+modprobe wave4 2>/dev/null || true
 
 # hci_bcm (built in) set the Bluetooth controller up at boot without its patch
 # RAM, and on the ROM firmware the setup fails (LE Read Maximum Data Length)
