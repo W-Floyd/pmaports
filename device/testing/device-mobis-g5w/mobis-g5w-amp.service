@@ -1,0 +1,12 @@
+[Unit]
+Description=Mirror the sound server's mute onto the head unit's amp
+After=pulseaudio.service pipewire-pulse.service
+
+[Service]
+# Talks to micomd's control socket (group wheel) and the session's sound server.
+ExecStart=/usr/libexec/mobis-g5w-amp
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

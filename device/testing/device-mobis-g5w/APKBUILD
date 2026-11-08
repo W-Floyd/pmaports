@@ -41,6 +41,8 @@ source="
 	mobis-g5w-logs.sh
 	mobis-g5w-logs.service
 	mobis-g5w-modprobe.conf
+	mobis-g5w-amp.sh
+	mobis-g5w-amp.service
 	"
 
 build() {
@@ -68,6 +70,8 @@ package() {
 		"$pkgdir"/usr/libexec/mobis-g5w-logs
 	install -Dm644 "$srcdir"/mobis-g5w-modprobe.conf \
 		"$pkgdir"/usr/lib/modprobe.d/mobis-g5w.conf
+	install -Dm755 "$srcdir"/mobis-g5w-amp.sh \
+		"$pkgdir"/usr/libexec/mobis-g5w-amp
 }
 
 openrc() {
@@ -94,6 +98,12 @@ systemd() {
 		ln -s ../$u.service \
 			"$subpkgdir"/usr/lib/systemd/system/multi-user.target.wants/$u.service
 	done
+	# Per session: it follows that session's sound server.
+	install -Dm644 "$srcdir"/mobis-g5w-amp.service \
+		"$subpkgdir"/usr/lib/systemd/user/mobis-g5w-amp.service
+	mkdir -p "$subpkgdir"/usr/lib/systemd/user/default.target.wants
+	ln -s ../mobis-g5w-amp.service \
+		"$subpkgdir"/usr/lib/systemd/user/default.target.wants/mobis-g5w-amp.service
 }
 
 sha512sums=""
