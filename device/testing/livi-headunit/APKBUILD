@@ -151,7 +151,12 @@ package() {
 	# The clock and time zone from the GNSS fix: livi-core runs it with sudo at
 	# this path (gnss/mod.rs SET_TIME_HELPER). Upstream's installer writes it
 	# in bash (scripts/install/common.sh); this is the same contract in sh.
-	install -Dm755 /dev/stdin "$pkgdir"/usr/local/lib/livi/livi-set-time.sh <<-'EOF'
+	# abuild refuses anything under /usr/local, so the script lives in
+	# /usr/lib/livi and tmpfiles links LIVI's fixed path to it at boot.
+	install -Dm644 /dev/stdin "$pkgdir"/usr/lib/tmpfiles.d/livi-headunit.conf <<-'EOF'
+	L /usr/local/lib/livi/livi-set-time.sh - - - - /usr/lib/livi/livi-set-time.sh
+	EOF
+	install -Dm755 /dev/stdin "$pkgdir"/usr/lib/livi/livi-set-time.sh <<-'EOF'
 	#!/bin/sh
 	# Sets the system clock from a unix timestamp, or the time zone.
 	usage() {
