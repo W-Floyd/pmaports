@@ -6,6 +6,12 @@
   "gpsEnabled": true,
   "gpsDevice": "/run/gps-livi",
   "kiosk": { "main": true },
+  "mainScreenWidth": 1920,
+  "mainScreenHeight": 720,
+  "projectionWidth": 1920,
+  "projectionHeight": 720,
+  "screenWidthMm": { "main": 293 },
+  "screenHeightMm": { "main": 110 },
   "bindings": {
     "home": "Home",
     "next": "MediaTrackNext",

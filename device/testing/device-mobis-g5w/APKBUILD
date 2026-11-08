@@ -46,6 +46,8 @@ source="
 	mobis-g5w-amp.sh
 	mobis-g5w-amp.service
 	50-mobis-g5w.json
+	50_mobis-g5w.gschema.override
+	monitors.xml
 	"
 
 build() {
@@ -78,9 +80,17 @@ package() {
 	# LIVI's first-run settings for this head unit (its preset.d, see
 	# livi-core config_file.rs): wlan0 as a 5 GHz access point, which wireless
 	# Android Auto needs; hippod's GNSS pty; key bindings matching micomd's
-	# keymap; kiosk mode. The car's own values belong to its variant, not here.
+	# keymap; kiosk mode; the panel's size. The car's own values belong to its
+	# variant, not here.
 	install -Dm644 "$srcdir"/50-mobis-g5w.json \
 		"$pkgdir"/usr/share/livi/preset.d/50-mobis-g5w.json
+	# GNOME on a head unit: no lock screen, blanking or idle suspend.
+	install -Dm644 "$srcdir"/50_mobis-g5w.gschema.override \
+		"$pkgdir"/usr/share/glib-2.0/schemas/50_mobis-g5w.gschema.override
+	# The panel at scale 1, mutter's system-wide default. From the panel's real
+	# size (293x110 mm, 166 dpi) mutter picks 1.25 on its own, and every client
+	# then renders at 1536x576 and is stretched to 1920x720.
+	install -Dm644 "$srcdir"/monitors.xml "$pkgdir"/etc/xdg/monitors.xml
 }
 
 openrc() {
