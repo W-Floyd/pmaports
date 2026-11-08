@@ -6,15 +6,18 @@
 #   mute: 0x020B set; the first unmute brings the amp up as stock does on a
 #   source switch (set, mode Media, volume, then 0x0238 release), later ones
 #   only release.
-#   volume: the I2S card's "Master Playback Volume" (0-30, no register behind
+#   volume: the I2S card's "Master Playback Volume" (0-35, no register behind
 #   it), which the sound server takes for hardware volume, so the samples stay
-#   at full scale; each change becomes a 0x0203 frame at that level.
+#   at full scale; each change becomes a 0x0203 frame at that level. Every
+#   session starts at START, not at what the last one left: the amp's ceiling
+#   is too loud to come back to unasked.
 C=/run/micomd.ctl
 SET=ff850201020b0003020170
 MODE=ff850201020100030e0077
 REL=ff85020102380003020042
 # without the card's control (an older kernel), the lowest volume stock sent
 FALLBACK=22
+START=40%
 
 send() { micomd -send "$C" "$1" >/dev/null 2>&1; }
 
@@ -29,6 +32,7 @@ volume_frame() { printf 'ff85020102030002%02x%02x' "$1" $((0x7a ^ $1)); }
 
 # micomd's control socket and the sound server come up around login.
 until [ -S "$C" ] && pactl info >/dev/null 2>&1; do sleep 1; done
+pactl set-sink-volume @DEFAULT_SINK@ "$START"
 
 state=
 sent=
