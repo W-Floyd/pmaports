@@ -18,6 +18,7 @@ url="https://github.com/W-Floyd/go-micomd"
 arch="armv7"
 license="MIT"
 makedepends="go"
+subpackages="micom-livi:livi"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
@@ -31,11 +32,18 @@ build() {
 	export GOCACHE=/mnt/pmbootstrap/go/gocache GOMODCACHE=/mnt/pmbootstrap/go/gomodcache
 	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw" GOBIN="$builddir"
 	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" \
-		github.com/W-Floyd/go-micomd/cmd/micomd@$_ver
+		github.com/W-Floyd/go-micomd/cmd/micomd@$_ver \
+		github.com/W-Floyd/go-micomd/cmd/micom-livi@$_ver
 }
 
 package() {
 	install -Dm755 micomd "$pkgdir"/usr/bin/micomd
+}
+
+livi() {
+	pkgdesc="Feeds the car's state, as micomd decodes it, into LIVI's telemetry"
+	depends="$pkgname"
+	install -Dm755 "$builddir"/micom-livi "$subpkgdir"/usr/bin/micom-livi
 }
 
 sha512sums=""

@@ -1,0 +1,20 @@
+[Unit]
+Description=Feed the car's climate from micomd into LIVI
+After=mobis-g5w-micomd.service
+Wants=mobis-g5w-micomd.service
+
+[Service]
+# Only reads micomd's tap and posts to LIVI's local telemetry endpoint; nothing
+# goes back to the car. Root, not a wheel member: the tap is root:wheel, and
+# wheel also has passwordless sudo for LIVI's helper. It reconnects to either
+# side, so neither needs to be up first.
+ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry
+Restart=on-failure
+RestartSec=5
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
