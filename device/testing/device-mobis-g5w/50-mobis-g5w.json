@@ -1,0 +1,19 @@
+{
+  "wifiInterface": "wlan0",
+  "wifiType": "5ghz",
+  "wifiChannel": 36,
+  "wifiChannelWidth": 40,
+  "gpsEnabled": true,
+  "gpsDevice": "/run/gps-livi",
+  "kiosk": { "main": true },
+  "bindings": {
+    "home": "Home",
+    "next": "MediaTrackNext",
+    "prev": "MediaTrackPrevious",
+    "playPause": "MediaPlayPause",
+    "voiceAssistant": "F13",
+    "acceptPhone": "F14",
+    "knobRight": "F15",
+    "knobLeft": "F16"
+  }
+}

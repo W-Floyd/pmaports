@@ -43,6 +43,7 @@ source="
 	mobis-g5w-modprobe.conf
 	mobis-g5w-amp.sh
 	mobis-g5w-amp.service
+	50-mobis-g5w.json
 	"
 
 build() {
@@ -72,6 +73,12 @@ package() {
 		"$pkgdir"/usr/lib/modprobe.d/mobis-g5w.conf
 	install -Dm755 "$srcdir"/mobis-g5w-amp.sh \
 		"$pkgdir"/usr/libexec/mobis-g5w-amp
+	# LIVI's first-run settings for this head unit (its preset.d, see
+	# livi-core config_file.rs): wlan0 as a 5 GHz access point, which wireless
+	# Android Auto needs; hippod's GNSS pty; key bindings matching micomd's
+	# keymap; kiosk mode. The car's own values belong to its variant, not here.
+	install -Dm644 "$srcdir"/50-mobis-g5w.json \
+		"$pkgdir"/usr/share/livi/preset.d/50-mobis-g5w.json
 }
 
 openrc() {
