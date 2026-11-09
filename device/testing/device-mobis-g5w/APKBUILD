@@ -85,8 +85,8 @@ package() {
 	# variant, not here, except the 2024 EV6 Long Range's, for Android Auto's
 	# energy model: CCS1 and J1772, 10.9 kW AC and 240 kW DC (kiamedia.com 2024
 	# EV6 specifications); road load from the EPA 2024 test car list, Long Range
-	# AWD 19-inch, target coefficients 23.992 lbf, 0.22890 lbf/mph,
-	# 0.020912 lbf/mph² in N, N/(m/s), N/(m/s)²; the 77.4 kWh pack's DC
+	# RWD, target coefficients 23.31 lbf, 0.1194 lbf/mph, 0.02221 lbf/mph² in
+	# N, N/(m/s), N/(m/s)²; the 77.4 kWh pack's DC
 	# charging curve from evkx.net's EV6 Long Range (GEN1) page, 1 to 100 %
 	# (github.com/evkx/evkx.github.io eec0f1f2,
 	# content/models/kia/ev6/ev6_long_range_awd_gen1/chargingcurve.md).
