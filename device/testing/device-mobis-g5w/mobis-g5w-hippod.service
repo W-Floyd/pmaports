@@ -8,7 +8,8 @@ ConditionPathExists=/dev/ttyAMA3
 # Only reads. /run/gps0 is a pty gpsd opens like a serial port; /run/gps-livi
 # is a second one for LIVI, which reads a serial device rather than gpsd.
 # `hippod -attach /run/hippod.sock` watches the decoded frames.
-ExecStart=/usr/bin/hippod -dev /dev/ttyAMA3 -out /run/gps0 -out /run/gps-livi -tap /run/hippod.sock
+# -speed-tap: the car's speed from micomd's tap in RMC/VTG (soft: it reconnects, and without micomd the module's speed stays).
+ExecStart=/usr/bin/hippod -dev /dev/ttyAMA3 -out /run/gps0 -out /run/gps-livi -tap /run/hippod.sock -speed-tap /run/micomd.sock
 # The tap and the ptys are root's: hand the tap and LIVI's pty to wheel, so the
 # admin user can attach and LIVI (running as that user) can read.
 ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do if [ -S /run/hippod.sock ] && [ -L /run/gps-livi ]; then p=$$(readlink -f /run/gps-livi); chgrp wheel /run/hippod.sock "$$p" && chmod 0660 "$$p"; exit; fi; sleep 0.5; done'
