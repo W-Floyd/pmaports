@@ -22,7 +22,7 @@ subpackages="micom-livi:livi"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
-_ver=v0.0.0-20261109023705-5e8fab990f68
+_ver=v0.0.0-20261109062323-fce15c584f63
 
 source=""
 builddir="$srcdir"
@@ -33,11 +33,13 @@ build() {
 	export GOPATH="$srcdir/go" GOFLAGS="-modcacherw" GOBIN="$builddir"
 	CGO_ENABLED=0 go install -trimpath -ldflags="-s -w" \
 		github.com/W-Floyd/go-micomd/cmd/micomd@$_ver \
-		github.com/W-Floyd/go-micomd/cmd/micom-livi@$_ver
+		github.com/W-Floyd/go-micomd/cmd/micom-livi@$_ver \
+		github.com/W-Floyd/go-micomd/cmd/micom-precondition@$_ver
 }
 
 package() {
 	install -Dm755 micomd "$pkgdir"/usr/bin/micomd
+	install -Dm755 micom-precondition "$pkgdir"/usr/bin/micom-precondition
 }
 
 livi() {
