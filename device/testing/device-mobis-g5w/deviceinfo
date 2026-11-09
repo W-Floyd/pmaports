@@ -24,4 +24,7 @@ deviceinfo_generate_extlinux_config="true"
 
 # clk_ignore_unused/pd_ignore_unused: clk_disable_unused() would gate the display
 # clocks at the end of initcalls and blank the panel the console draws on.
-deviceinfo_kernel_cmdline="ignore_loglevel clk_ignore_unused pd_ignore_unused"
+# cma=128M: Android Auto's 1920x1080 main stream and 1280x720 cluster stream on
+# the CODA, LIVI's compositor and the display exhausted the default 64 MiB, and
+# the main picture stayed black.
+deviceinfo_kernel_cmdline="ignore_loglevel clk_ignore_unused pd_ignore_unused cma=128M"
