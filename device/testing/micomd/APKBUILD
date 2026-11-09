@@ -22,7 +22,7 @@ subpackages="micom-livi:livi"
 # net: go fetches the module. No check: the link needs the hardware.
 options="net !check"
 
-_ver=v0.0.0-20261109062323-fce15c584f63
+_ver=v0.0.0-20261109064631-80290217c6de
 
 source=""
 builddir="$srcdir"
