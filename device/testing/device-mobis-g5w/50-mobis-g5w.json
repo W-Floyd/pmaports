@@ -6,6 +6,7 @@
   "gpsEnabled": true,
   "gpsDevice": "/run/gps-livi",
   "kiosk": { "main": true },
+  "dashboard": { "main": false },
   "mainScreenWidth": 1920,
   "mainScreenHeight": 720,
   "projectionWidth": 1920,
