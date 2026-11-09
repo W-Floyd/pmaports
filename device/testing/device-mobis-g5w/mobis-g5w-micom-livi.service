@@ -10,10 +10,12 @@ Wants=mobis-g5w-micomd.service mobis-g5w-gpsd.service
 # -capacity-kwh: the EV6's 77.4 kWh pack (gross), which the micom doesn't
 # report; LIVI's Android Auto EV routing needs it.
 # -input: the phone's route guidance (LIVI's GET /navigation) on the
-# instrument cluster, as micomd's cluster TBT messages; the only thing it
-# sends toward the car. Miles and feet, 12 h arrival time.
+# instrument cluster, as micomd's cluster TBT messages. Miles and feet, 12 h
+# arrival time.
 # -gpsd: the cluster's compass from gpsd's track (local gpsd, fed by hippod).
-ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry -capacity-kwh 77.4 -input /run/micomd.input -units imperial -gpsd 127.0.0.1:2947
+# -precondition: battery conditioning asked of the car while the route leads
+# to a fast charger, or when asked for in LIVI; LIVI's setting turns it off.
+ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry -capacity-kwh 77.4 -input /run/micomd.input -units imperial -gpsd 127.0.0.1:2947 -precondition
 Restart=on-failure
 RestartSec=5
 ProtectSystem=full
