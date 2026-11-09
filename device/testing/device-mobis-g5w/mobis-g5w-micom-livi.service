@@ -1,7 +1,7 @@
 [Unit]
 Description=Feed the car's state from micomd into LIVI
-After=mobis-g5w-micomd.service
-Wants=mobis-g5w-micomd.service
+After=mobis-g5w-micomd.service mobis-g5w-gpsd.service
+Wants=mobis-g5w-micomd.service mobis-g5w-gpsd.service
 
 [Service]
 # Reads micomd's tap and posts to LIVI's local telemetry endpoint. Root, not a
@@ -12,7 +12,8 @@ Wants=mobis-g5w-micomd.service
 # -input: the phone's route guidance (LIVI's GET /navigation) on the
 # instrument cluster, as micomd's cluster TBT messages; the only thing it
 # sends toward the car. Miles and feet, 12 h arrival time.
-ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry -capacity-kwh 77.4 -input /run/micomd.input -units imperial
+# -gpsd: the cluster's compass from gpsd's track (local gpsd, fed by hippod).
+ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry -capacity-kwh 77.4 -input /run/micomd.input -units imperial -gpsd 127.0.0.1:2947
 Restart=on-failure
 RestartSec=5
 ProtectSystem=full
