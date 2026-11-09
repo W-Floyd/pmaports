@@ -1,5 +1,5 @@
 [Unit]
-Description=Feed the car's climate from micomd into LIVI
+Description=Feed the car's state from micomd into LIVI
 After=mobis-g5w-micomd.service
 Wants=mobis-g5w-micomd.service
 
@@ -7,8 +7,9 @@ Wants=mobis-g5w-micomd.service
 # Only reads micomd's tap and posts to LIVI's local telemetry endpoint; nothing
 # goes back to the car. Root, not a wheel member: the tap is root:wheel, and
 # wheel also has passwordless sudo for LIVI's helper. It reconnects to either
-# side, so neither needs to be up first.
-ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry
+# side, so neither needs to be up first. -capacity-kwh: the EV6's 77.4 kWh pack
+# (gross), which the micom doesn't report; LIVI's Android Auto EV routing needs it.
+ExecStart=/usr/bin/micom-livi -tap /run/micomd.sock -url http://127.0.0.1:4000/telemetry -capacity-kwh 77.4
 Restart=on-failure
 RestartSec=5
 ProtectSystem=full
