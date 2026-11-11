@@ -1,0 +1,52 @@
+From b8e7f6e9f3161ee6b23e69ff2d283ed984289776 Mon Sep 17 00:00:00 2001
+From: William Floyd <git@notmy.space>
+Date: Wed, 11 Nov 2026 17:31:33 +0000
+Subject: [PATCH] us: add RedPocket Mobile
+
+RedPocket Mobile is an MVNO on AT&T's network. Its SIMs carry GID1 4201,
+which tells them apart from other AT&T lines. The network IDs and GID1
+are from AOSP's carrier list, "Red Pocket-ATT" (canonical_id 10012):
+https://android.googlesource.com/platform/packages/providers/TelephonyProvider/+/bca387f553a4493c88e24455172225fd1049c91f/assets/latest_carrier_id/carrier_list.textpb
+
+ERESELLER is the APN Red Pocket publishes for its lines on AT&T (GSMA),
+with AT&T's MMSC and MMS proxy:
+https://www.redpocket.com/configure-handset
+
+Tested with a Red Pocket GSMA SIM (310280, GID1 4201): data over IPv4
+and IPv6, and MMS both ways.
+---
+ serviceproviders.xml | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/serviceproviders.xml b/serviceproviders.xml
+index 15edccd..dd3b1c6 100644
+--- a/serviceproviders.xml
++++ b/serviceproviders.xml
+@@ -14715,6 +14715,24 @@ conceived.
+ 			</apn>
+ 		</gsm>
+ 	</provider>
++	<provider>
++		<!-- MVNO operating on AT&T's network -->
++		<name>RedPocket Mobile</name>
++		<gsm>
++			<network-id mcc="310" mnc="410"/>
++			<network-id mcc="310" mnc="280"/>
++			<network-id mcc="310" mnc="950"/>
++			<network-id mcc="311" mnc="180"/>
++			<gid1>4201</gid1>
++			<apn value="ERESELLER">
++				<plan type="prepaid"/>
++				<usage type="mms-internet-hipri-fota"/>
++				<name>RedPocket Mobile</name>
++				<mmsc>http://mmsc.mobile.att.net</mmsc>
++				<mmsproxy>proxy.mobile.att.net:80</mmsproxy>
++			</apn>
++		</gsm>
++	</provider>
+ 	<provider primary="false">
+ 		<!-- MVNO operating on T-Mobile/Sprint -->
+ 		<name>SpeedTalk Mobile</name>
+-- 
+2.55.0
+
